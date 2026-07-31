@@ -8,6 +8,12 @@ WorldQuant Alpha 公式中大量使用**截面(cross-sectional) rank / correlati
 横截面上会弱于原版——生产环境若需严格截面，应在多标的 DataFrame 上替换 ``rank`` 实现。
 
 公式来源：WorldQuant Alpha101/Alpha191 公开文献（仅重实现数学公式，未复制任何仓库代码）。
+
+本模块同时提供两种 ``rank``：
+  - :func:`_rank` —— 单标的滚动窗口内分位（时序近似），用于 ``cli factor`` 单标的评估；
+  - :func:`_rank_cs` —— **严格截面 rank**（每行跨列百分位），用于多标的面板因子计算。
+所有时间序列表原语（``_delta``/``_ts_*``/``_corr``/``_cov``/``_slope``/``_decay_linear``
+等）均天然支持面板 DataFrame（按列逐标的计算），可与 ``_rank_cs`` 组合得到可信截面因子。
 """
 from __future__ import annotations
 
@@ -19,9 +25,21 @@ RANK_WINDOW = 250
 
 
 def _rank(s: pd.Series, win: int = RANK_WINDOW) -> pd.Series:
-    """分位排名：最后一根在滚动窗口内的百分位（0~1）。近似截面 rank。"""
+    """分位排名：最后一根在滚动窗口内的百分位（0~1）。近似截面 rank（单标的场景）。"""
     s = s.astype(float)
     return s.rolling(win, min_periods=5).apply(lambda x: (x[-1] < x).mean(), raw=True)
+
+
+def _rank_cs(df: pd.DataFrame, pct: bool = True) -> pd.DataFrame:
+    """严格**截面** rank：对每个时间截面（每行）跨标的（列）做百分位排名（0~1）。
+
+    这是 WorldQuant Alpha 公式中 ``rank`` 的本意——在同一交易日对所有标的研究其相对
+    位置，而非单标的的时间序列分位。输入为面板 DataFrame（index=日期，columns=标的），
+    输出同型 DataFrame；NaN 不参与排名（pandas 默认）。
+
+    单标的下若误用（仅 1 列），结果退化为常量 0.5，因此截面计算要求面板含 ≥2 个标的。
+    """
+    return df.rank(axis=1, method="average", pct=pct)
 
 
 def _delay(s: pd.Series, d: int) -> pd.Series:

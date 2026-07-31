@@ -4,6 +4,7 @@
 命令：
   quantmind smoke   端到端冒烟：拉取多资产数据并入库读出
   quantmind factor   计算并评估一个因子（IC/IR/衰减）
+  quantmind cs       多标的截面因子评估（严格截面 rank）
   quantmind backtest 回测 / 模拟 / 实盘（按 --mode）
   quantmind research AI 研究：idea -> 规格/因子/策略代码
   quantmind e2e      完整端到端演示（数据→因子→多因子策略→回测→模拟→实盘→AI）
@@ -26,6 +27,7 @@ from .core.constant import Exchange, Interval
 from .core.engine import EventEngine
 from .core.contracts import default_size
 from .research import MomentumFactor, FactorEvaluator, FactorSpec, build_model_from_specs, build_factor_registry, eval_factor_expression
+from .research.factors.alpha_cs import Panel, list_alpha_cs
 from .strategy import run_strategy, MultiFactorStrategy, DualMaStrategy, VolTargetStrategy, PairTradingStrategy, build_spread_bars
 from .ai import ResearchAgent
 from .monitoring import Notifier
@@ -87,6 +89,22 @@ def factor(
 ) -> None:
     """计算并评估因子（IC/IR/衰减/分位收益）。"""
     asyncio.run(_factor(symbol, exchange, name, expr, window, years))
+
+
+@app.command()
+@app.command()
+def cs(
+    symbols: str = typer.Option("rb0,hc0,bu0,i0", help="多标的，逗号分隔，如 rb0,hc0,bu0,i0"),
+    exchange: str = typer.Option("SHFE", help="所有标的共用交易所"),
+    name: str = typer.Option("alpha021", help="截面 Alpha 因子名（alpha002..alpha101 / alpha191_*）"),
+    years: int = typer.Option(1),
+) -> None:
+    """多标的截面因子评估（严格截面 rank）：构建面板→算因子→截面 IC/组合。
+
+    与 ``factor``（单标的滚动近似）不同，此处对每个交易日横截面上对所有标的做 rank，
+    得到 WorldQuant 公式本意的截面因子，再算截面 Spearman IC 与多空组合。需 ≥2 标的。
+    """
+    asyncio.run(_cs(symbols, exchange, name, years))
 
 
 @app.command()
@@ -157,6 +175,44 @@ async def _fetch(symbol, exchange, years):
                                                 interval=Interval.DAILY, start=start, end=end))
     await dm.close()
     return bars
+
+
+async def _cs(symbols, exchange, name, years) -> None:
+    syms = [s.strip() for s in symbols.split(",") if s.strip()]
+    if len(syms) < 2:
+        console.print("[red]截面评估需要至少 2 个标的[/red]"); return
+    if name not in list_alpha_cs():
+        console.print(f"[red]未知截面因子 {name}[/red]；可用: {list_alpha_cs()[:6]}...")
+        return
+    dm = _make_dm(); await dm.connect()
+    end = datetime.now(); start = end - timedelta(days=365 * years)
+    bars_by_symbol: Dict[str, list] = {}
+    for sym in syms:
+        try:
+            bars = await dm.get_bar_data(HistoryRequest(symbol=sym, exchange=Exchange(exchange.upper()),
+                                                       interval=Interval.DAILY, start=start, end=end))
+            if bars:
+                bars_by_symbol[sym] = bars
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]{sym} 取数失败: {exc}[/yellow]")
+    await dm.close()
+    if len(bars_by_symbol) < 2:
+        console.print("[red]可用标的不足 2 个，无法做截面[/red]"); return
+    panel = Panel.from_bars(bars_by_symbol)
+    if panel.close.empty:
+        console.print("[red]面板为空[/red]"); return
+    evaluator = FactorEvaluator()
+    reports = evaluator.evaluate_cross_sectional_panel([name], panel)
+    rep = reports.get(name)
+    if rep is None:
+        console.print(f"[red]因子 {name} 未计算[/red]"); return
+    console.print(f"[green]多标的截面因子评估[/green] {name} @ {exchange}  "
+                  f"标的数={len(panel.symbols)} 截面数={rep.n_samples}")
+    table = Table(title=f"截面因子 {name}")
+    table.add_column("指标"); table.add_column("值")
+    for k, v in rep.to_dict().items():
+        table.add_row(k, str(v))
+    console.print(table)
 
 
 async def _factor(symbol, exchange, name, expr, window, years) -> None:

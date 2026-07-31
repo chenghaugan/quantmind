@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import math
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
@@ -66,6 +67,9 @@ def _jsonable(o: Any) -> Any:
         return o.isoformat()
     if isinstance(o, Enum):
         return o.value
+    if isinstance(o, float):
+        # 非有限值（inf/nan）在 JSON(allow_nan=False) 下会抛错，统一转 None
+        return o if math.isfinite(o) else None
     if hasattr(o, "to_dict"):
         return o.to_dict()
     if dataclasses.is_dataclass(o):
@@ -74,6 +78,21 @@ def _jsonable(o: Any) -> Any:
         return {k: _jsonable(v) for k, v in o.items()}
     if isinstance(o, (list, tuple)):
         return [_jsonable(x) for x in o]
+    return o
+
+
+def _sanitize(o: Any) -> Any:
+    """递归把非有限 float 转为 None，避免 JSON 序列化（allow_nan=False）抛错。
+
+    用于 /backtest 等直接返回原始 dict 的端点——MockFeed 在退化样本下可能算出
+    inf/nan（如零波动导致 Sharpe 分母为 0），若不处理会让整条响应 500。
+    """
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    if isinstance(o, dict):
+        return {k: _sanitize(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_sanitize(x) for x in o]
     return o
 
 
@@ -219,7 +238,7 @@ async def backtest(req: BacktestRequest):
         run_strategy, req.mode, strat_class, vt, dict(req.setting), bars,
         _ee, sizes, req.gateway,
     )
-    return result
+    return _sanitize(result)
 
 
 @app.get("/strategies", response_model=List[StrategyInfo])

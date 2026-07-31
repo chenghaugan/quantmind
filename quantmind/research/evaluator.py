@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 
 from .factors.base import bars_to_df, expanding_zscore
+from .factors.alpha_cs import Panel, compute_alpha_cross_sectional
 from ..core.object import BarData
 
 
@@ -467,3 +468,144 @@ class FactorEvaluator:
             composite_score=composite,
             n_samples=len(ic_valid),
         )
+
+    # ---- 多标的截面评估（面板直算）----
+    def evaluate_cross_sectional_panel(
+        self,
+        names: Sequence[str],
+        panel: Panel,
+        forward_periods: int = 1,
+        n_groups: int = 5,
+        periods_per_year: int = 252,
+        bootstrap: bool = True,
+        min_cross_section: int = 3,
+    ) -> Dict[str, FactorReport]:
+        """多标的截面评估（直接从已对齐 ``Panel`` 计算因子 + 截面 IC）。
+
+        与 :meth:`evaluate_cross_sectional` 等价，但入参是 ``Panel``（index=日期，
+        columns=标的），内部用 :func:`compute_alpha_cross_sectional` 计算**严格截面**
+        Alpha 因子，再按日做截面 Spearman/Pearson、构造截面多空组合。返回每个因子的
+        ``FactorReport``。要求面板含 ≥2 个标的，否则截面 rank 退化为常量；每个截面
+        至少需要 ``min_cross_section``（默认 3）个标的才参与统计。
+        """
+        if panel.close.shape[1] < 2:
+            return {n: FactorReport(factor_name=n, note="面板需 ≥2 个标的才能做截面")
+                    for n in names}
+        factor_dfs = compute_alpha_cross_sectional(list(names), panel)
+        fwd_ret = panel.close.pct_change(forward_periods).shift(-forward_periods)
+        # IC 衰减：horizon 1..5 的截面 IC
+        fwd_ret_h = {h: panel.close.pct_change(h).shift(-h) for h in range(1, 6)}
+        dates = panel.close.index
+        reports: Dict[str, FactorReport] = {}
+        for name, fdf in factor_dfs.items():
+            ic_list: List[float] = []
+            ic_p_list: List[float] = []
+            ls_ret_list: List[float] = []
+            decay_lists: Dict[int, List[float]] = {h: [] for h in range(1, 6)}
+            mono5_list: List[float] = []
+            mono10_list: List[float] = []
+            for d in dates:
+                if d not in fdf.index:
+                    continue
+                frow = fdf.loc[d].dropna()
+                if len(frow) < min_cross_section:
+                    continue
+                # 主 horizon 的截面 IC + 多空组合 + 单调性
+                if d in fwd_ret.index:
+                    rrow = fwd_ret.loc[d].dropna()
+                    common = frow.index.intersection(rrow.index)
+                    if len(common) >= min_cross_section:
+                        fv = frow[common].astype(float)
+                        rv = rrow[common].astype(float)
+                        s = fv.rank(); t = rv.rank()
+                        ic_list.append(float(s.corr(t)))
+                        ic_p_list.append(float(fv.corr(rv)))
+                        try:
+                            grp = pd.qcut(fv.rank(method="first"), n_groups, labels=False)
+                        except Exception:  # noqa: BLE001
+                            grp = None
+                        if grp is not None:
+                            top = float(rv[grp == n_groups - 1].mean())
+                            bottom = float(rv[grp == 0].mean())
+                            if pd.notna(top) and pd.notna(bottom):
+                                ls_ret_list.append(top - bottom)
+                        # 截面分组单调性（5 组；标的数足够时再算 10 组）
+                        try:
+                            g5 = pd.qcut(fv.rank(method="first"), 5, labels=False)
+                            gm5 = rv.groupby(g5).mean().astype(float)
+                            mono5_list.append(float(pd.Series(range(5), dtype=float).corr(gm5)))
+                        except Exception:  # noqa: BLE001
+                            pass
+                        if len(common) >= 12:
+                            try:
+                                g10 = pd.qcut(fv.rank(method="first"), 10, labels=False)
+                                gm10 = rv.groupby(g10).mean().astype(float)
+                                mono10_list.append(float(pd.Series(range(10), dtype=float).corr(gm10)))
+                            except Exception:  # noqa: BLE001
+                                pass
+                # 各 horizon 的衰减 IC
+                for h in range(1, 6):
+                    frh = fwd_ret_h[h]
+                    if d not in frh.index:
+                        continue
+                    rrow_h = frh.loc[d].dropna()
+                    common_h = frow.index.intersection(rrow_h.index)
+                    if len(common_h) >= min_cross_section:
+                        fv = frow[common_h].astype(float)
+                        rvh = rrow_h[common_h].astype(float)
+                        decay_lists[h].append(float(fv.rank().corr(rvh.rank())))
+            ic_valid = pd.Series(ic_list).dropna()
+            if ic_valid.empty:
+                reports[name] = FactorReport(factor_name=name, note="无足够截面样本")
+                continue
+            ic_mean = float(ic_valid.mean())
+            ic_std = float(ic_valid.std())
+            ir = ic_mean / ic_std if ic_std > 0 else float("nan")
+            ic_pearson = float(pd.Series(ic_p_list).dropna().mean()) if ic_p_list else float("nan")
+            decay = [float(pd.Series(decay_lists[h]).dropna().mean()) if decay_lists[h] else float("nan")
+                     for h in range(1, 6)]
+            half_life = self._ic_decay_half_life(decay)
+            ci_low, ci_high = (float("nan"), float("nan"))
+            if bootstrap and len(ic_valid) >= 30:
+                # 仅在有限 IC 上做 Bootstrap（退化截面产生的 NaN 不计入）
+                rng = np.random.default_rng(42)
+                vals = ic_valid.to_numpy(dtype=float)
+                means = np.empty(500, dtype=float)
+                for i in range(500):
+                    means[i] = float(vals[rng.integers(0, len(vals), len(vals))].mean())
+                ci_low = float(np.nanpercentile(means, 2.5))
+                ci_high = float(np.nanpercentile(means, 97.5))
+            mono5 = float(pd.Series(mono5_list).dropna().mean()) if mono5_list else float("nan")
+            mono10 = float(pd.Series(mono10_list).dropna().mean()) if mono10_list else float("nan")
+            # 截面信号换手：跨日截面 rank 变化幅度 × 年化周期数
+            turn = float(fdf.diff().abs().mean().mean()) * periods_per_year if fdf.notna().any().any() else float("nan")
+            ls_series = pd.Series(ls_ret_list)
+            ls_total, ls_sharpe, ls_mdd = self._portfolio_stats(ls_series, periods_per_year)
+            composite = self._composite(
+                ic_mean=ic_mean, ls_return=ls_total, ls_sharpe=ls_sharpe,
+                ls_mdd=ls_mdd, monotonicity=(max(mono5, mono10) if pd.notna(mono5) else float("nan")),
+                turnover=turn,
+            )
+            reports[name] = FactorReport(
+                factor_name=name,
+                ic_mean=ic_mean,
+                ic_pearson=ic_pearson,
+                ic_std=ic_std,
+                ir=ir,
+                ic_positive_ratio=float((ic_valid > 0).mean()),
+                ic_decay=decay,
+                ic_decay_half_life=half_life,
+                ic_ci_low=ci_low,
+                ic_ci_high=ci_high,
+                top_quantile_return=float("nan"),
+                long_short_return=float("nan"),
+                monotonicity_5=mono5,
+                monotonicity_10=mono10,
+                turnover_annual=turn,
+                ls_portfolio_return=ls_total,
+                ls_portfolio_sharpe=ls_sharpe,
+                ls_portfolio_mdd=ls_mdd,
+                composite_score=composite,
+                n_samples=len(ic_valid),
+            )
+        return reports

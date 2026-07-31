@@ -8,6 +8,9 @@ from .expression import eval_factor_expression, ExpressionError
 from .registry import FactorRegistry, build_factor_registry
 from .alpha101 import AlphaFactor, build_alpha_factor, list_alpha101
 from .alpha191 import Alpha191Factor, build_alpha191_factor, list_alpha191
+from .alpha_cs import (
+    Panel, compute_alpha_cross_sectional, list_alpha_cs,
+)
 from .seat_futures import (
     SeatFactor, compute_seat_factors, make_synthetic_seat_df,
 )
@@ -20,5 +23,6 @@ __all__ = [
     "FactorRegistry", "build_factor_registry",
     "AlphaFactor", "build_alpha_factor", "list_alpha101",
     "Alpha191Factor", "build_alpha191_factor", "list_alpha191",
+    "Panel", "compute_alpha_cross_sectional", "list_alpha_cs",
     "SeatFactor", "compute_seat_factors", "make_synthetic_seat_df",
 ]
