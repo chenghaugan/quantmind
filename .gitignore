@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Secrets / env (keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
+# Databases / local caches
+*.db
+*.duckdb
+data/cache/
+
+# Logs
+logs/
+*.log
+
+# Build artifacts
+build/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# WorkBuddy local memory (if present inside repo)
+.workbuddy/

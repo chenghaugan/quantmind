@@ -1,0 +1,63 @@
+# 全容器化：timescaledb + redis + api(FastAPI) + web(Streamlit)
+# 源码挂卷 → 改码免重建；仅改依赖时 docker compose build api web
+# 热更新：uvicorn --reload / streamlit --server.runOnSave
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: quantmind
+      POSTGRES_USER: qm
+      POSTGRES_PASSWORD: ${QM_DB_PASSWORD:-quantmind}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qm -d quantmind"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+
+  api:
+    build: .
+    command: ["uvicorn", "quantmind.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    environment:
+      QM_DB_URL: postgresql://qm:${QM_DB_PASSWORD:-quantmind}@timescaledb:5432/quantmind
+      QM_REDIS_URL: redis://redis:6379/0
+      QM_LLM_PROVIDER: ${QM_LLM_PROVIDER:-mock}
+      QM_LOG_LEVEL: ${QM_LOG_LEVEL:-INFO}
+    volumes:
+      - ./quantmind:/app/quantmind          # ★ 挂卷：热更新
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  web:
+    build: .
+    command: ["streamlit", "run", "web/streamlit_app.py",
+              "--server.address", "0.0.0.0", "--server.port", "8501",
+              "--server.runOnSave", "true"]
+    environment:
+      QM_API_URL: http://api:8000
+    volumes:
+      - ./quantmind:/app/quantmind          # ★ 挂卷：热更新
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
+
+volumes:
+  pgdata:

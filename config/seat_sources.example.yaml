@@ -1,0 +1,27 @@
+# 期货席位因子 F1-F8 数据源配置（示例）
+# 用法：复制为 config/seat_sources.yaml 并填充后启用。
+# 当前 compute_seat_factors 在 MockFeed 下无席位数据会显式报错；
+# 接入下方任一真实数据源后，F1-F8 才能跑出真实 IC。
+
+sources:
+  # 选项 A：交易所每日持仓排名（公开，需定时下载/爬取后落盘）
+  exchange_daily_rank:
+    enabled: false
+    # 每个交易日一只合约一行的原始文件，列约定见 seat_futures.parse_exchange_rank
+    cache_dir: "data/seat"
+    # 可选：自动拉取的 URL 模板，{date}=YYYYMMDD, {symbol}=合约代码
+    url_template: "https://www.example.com/rank?date={date}&symbol={symbol}"
+
+  # 选项 B：付费数据商席位持仓 API
+  paid_api:
+    enabled: false
+    provider: "your_provider"
+    endpoint: "https://api.example.com/seat"
+    # API key 从环境变量读取，切勿硬编码进仓库
+    api_key_env: "QM_SEAT_API_KEY"
+
+# 解析约定（供 parse_exchange_rank 使用）：
+# 每行一只合约，列 = [trade_date, symbol, broker, net_long, net_short, volume]
+# compute_seat_factors 会在此表上计算 F1 净持仓 / F2 净持仓变化 /
+# F3 净持仓占比 / F4 多空持仓比代理 / F5 变化率 / F6 二阶变化 /
+# F7 净持仓 Z-score / F8 席位情绪综合。

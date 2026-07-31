@@ -1,0 +1,24 @@
+# 依赖与构建缓存
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# 本地数据与日志（不进镜像）
+data/
+logs/
+*.log
+
+# 环境
+.env
+
+# 前端构建产物（若升级 React）
+web/node_modules/
+web/dist/
+
+# 编辑器
+.idea/
+.vscode/
