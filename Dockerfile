@@ -2,24 +2,24 @@ FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Shanghai
 
-# 编译依赖（akshare/mootdx/pydantic 等纯 Python，但部分需 build-essential）
+# 系统依赖 + 中文时区（真实行情时间处理必须）
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential curl git \
+        build-essential curl git tzdata \
+    && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone \
     && rm -rf /var/lib/apt/lists/*
-
-# 用 uv 加速依赖安装（带依赖层缓存）
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# 先拷依赖清单，利用层缓存；仅当依赖变更时才重装
-COPY pyproject.toml uv.lock* ./
-RUN uv sync --frozen 2>/dev/null || uv pip install --system . || pip install --no-cache-dir .
-
-# 再拷源码（开发时由 compose 卷挂载覆盖，此处用于镜像内完整副本）
+# 拷全部源码（开发时由 compose 卷挂载覆盖，实现热更新）
 COPY . .
+
+# 安装项目及全部依赖（editable，确保 import 始终指向 /app/quantmind）
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -e .
 
 EXPOSE 8000 8501
 
