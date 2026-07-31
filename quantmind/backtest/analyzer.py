@@ -27,6 +27,14 @@ class PerformanceReport:
     profit_factor: float = 0.0
     final_equity: float = 0.0
     equity_curve: List[dict] = field(default_factory=list)
+    # 交易成本统计（由 BacktestEngine 附加）
+    total_commission: float = 0.0
+    total_stamp_tax: float = 0.0
+    total_impact: float = 0.0
+    total_slippage: float = 0.0
+    total_cost: float = 0.0
+    margin_used: float = 0.0
+    cost_ratio: float = 0.0          # 总成本 / |净收益|
 
     def to_dict(self) -> dict:
         return {
@@ -40,6 +48,13 @@ class PerformanceReport:
             "trade_count": self.trade_count,
             "profit_factor": round(self.profit_factor, 3),
             "final_equity": round(self.final_equity, 2),
+            "total_commission": round(self.total_commission, 2),
+            "total_stamp_tax": round(self.total_stamp_tax, 2),
+            "total_impact": round(self.total_impact, 2),
+            "total_slippage": round(self.total_slippage, 2),
+            "total_cost": round(self.total_cost, 2),
+            "margin_used": round(self.margin_used, 2),
+            "cost_ratio": round(self.cost_ratio, 4),
         }
 
 

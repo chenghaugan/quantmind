@@ -24,6 +24,7 @@ def run_strategy(
     sizes: Optional[Dict[str, float]] = None,
     gateway_name: str = "ctp",
     gateway_settings: Optional[dict] = None,
+    cost=None,
 ) -> dict:
     """按模式运行策略，返回结果字典。
 
@@ -40,7 +41,8 @@ def run_strategy(
         exclude_limit = bool(setting.get("exclude_limit", False)) if setting else False
         limit_pct = (setting or {}).get("limit_pct", None)
         eng = BacktestEngine(data, sizes=sizes, event_engine=event_engine,
-                             exclude_limit=exclude_limit, limit_pct=limit_pct)
+                             exclude_limit=exclude_limit, limit_pct=limit_pct,
+                             cost_table=cost)
         eng.add_strategy(strategy_class, vt_symbol, setting)
         report = eng.run()
         return {

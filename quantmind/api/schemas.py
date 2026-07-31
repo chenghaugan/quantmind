@@ -78,6 +78,7 @@ class BacktestRequest(BaseModel):
     capital: float = 1_000_000.0
     commission: float = 0.0002
     sizes: Dict[str, float] = {}
+    cost: bool = False            # 启用真实成本模型（按品种差异化费率/平今/印花税/保证金）
 
 
 class StrategyInfo(BaseModel):

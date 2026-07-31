@@ -117,10 +117,11 @@ def backtest(
     years: int = typer.Option(1),
     exclude_limit: bool = typer.Option(False, help="剔除涨跌停日成交（A股/港股严谨回测）"),
     limit_pct: float = typer.Option(0.10, help="涨跌停幅度阈值（与 exclude_limit 配合使用）"),
+    cost: bool = typer.Option(False, help="启用真实成本模型（按品种差异化费率/平今/印花税/保证金）"),
     leg2: str = typer.Option(None, help="配对交易第二腿合约，如 hc0.SHFE（仅 strategy=pair 用）"),
 ) -> None:
     """回测 / 模拟 / 实盘（同一策略按 --mode 切换路线）。"""
-    asyncio.run(_backtest(symbol, exchange, strategy, mode, gateway, years, exclude_limit, limit_pct, leg2))
+    asyncio.run(_backtest(symbol, exchange, strategy, mode, gateway, years, exclude_limit, limit_pct, cost, leg2))
 
 
 @app.command()
@@ -238,7 +239,7 @@ async def _factor(symbol, exchange, name, expr, window, years) -> None:
     console.print(f"[bold green]综合主分={rep.composite_score:.3f}[/bold green]")
 
 
-async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_limit=False, limit_pct=0.10, leg2=None) -> None:
+async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_limit=False, limit_pct=0.10, cost=False, leg2=None) -> None:
     bars = await _fetch(symbol, exchange, years)
     if not bars:
         console.print("[red]无数据[/red]"); return
@@ -264,9 +265,10 @@ async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_li
         setting = {"size": 1, "max_pos": 1.0}
     ee = EventEngine(); await ee.start()
     Notifier().attach(ee)
-    res = run_strategy(mode, strat_class, vt, setting, bars, ee, sizes, gateway_name=gateway)
+    res = run_strategy(mode, strat_class, vt, setting, bars, ee, sizes, gateway_name=gateway, cost=cost)
     await ee.stop()
-    console.print(f"[bold]{mode.upper()} 结果 ({strategy})[/bold]")
+    console.print(f"[bold]{mode.upper()} 结果 ({strategy})[/bold]"
+                  + (" [cyan]含真实成本模型[/cyan]" if cost else ""))
     console.print(res)
     if mode == "live":
         console.print(f"[green]已切换至实盘路线（{gateway} 网关桩），委托已路由[/green]")

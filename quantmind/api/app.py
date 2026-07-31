@@ -236,7 +236,7 @@ async def backtest(req: BacktestRequest):
     sizes = dict(req.sizes) or {vt: _default_size(vt)}
     result = await asyncio.to_thread(
         run_strategy, req.mode, strat_class, vt, dict(req.setting), bars,
-        _ee, sizes, req.gateway,
+        _ee, sizes, req.gateway, None, req.cost,
     )
     return _sanitize(result)
 

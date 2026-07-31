@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 import logging
+from collections import defaultdict
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from ..core.constant import Direction, Exchange, Offset
 from ..core.event import EventType
@@ -18,13 +19,20 @@ from ..core.object import BarData, PositionData, TradeData
 from ..strategy.context import StrategyContext
 from .analyzer import PerformanceAnalyzer, PerformanceReport
 from .broker import fill_price
+from .cost import default_cost_table, lookup_cost, compute_commission, apply_slippage
 from .diagnostics import limit_day_mask
 
 _logger = logging.getLogger("quantmind.backtest")
 
 
 class BacktestEngine(StrategyContext):
-    """批量历史回测引擎。"""
+    """批量历史回测引擎。
+
+    成本模型：``cost_table`` 为 ``None``/``False`` 时退回旧式单一费率
+    （``commission``/``slippage``）；为 ``True`` 时用内置默认成本预设表
+    （按品种差异化：平今、最低手续费、印花税、tick 滑点、保证金）；为 ``dict``
+    时按用户自定义表（key 为 vt_symbol 或品种前缀）。
+    """
 
     mode = "backtest"
 
@@ -38,6 +46,8 @@ class BacktestEngine(StrategyContext):
         event_engine=None,
         exclude_limit: bool = False,
         limit_pct: Optional[float] = None,
+        cost_table: Union[None, bool, Dict[str, object]] = None,
+        enforce_margin: bool = False,
     ) -> None:
         self.data = data
         self.capital = capital
@@ -48,6 +58,22 @@ class BacktestEngine(StrategyContext):
         self.event_engine = event_engine
         self.exclude_limit = exclude_limit
         self.limit_pct = limit_pct
+        self.enforce_margin = enforce_margin
+        # 成本表解析
+        if cost_table is True:
+            self._cost_table: Optional[Dict[str, object]] = default_cost_table()
+        elif isinstance(cost_table, dict):
+            self._cost_table = cost_table
+        else:
+            self._cost_table = None
+        # 成本统计
+        self._open_lots: Dict[str, List[Tuple[datetime, float, float]]] = defaultdict(list)
+        self._margin_by_vt: Dict[str, float] = {}
+        self.total_commission = 0.0
+        self.total_stamp = 0.0
+        self.total_impact = 0.0
+        self.total_slippage_cost = 0.0
+        self.margin_used = 0.0
         self._limit_flag: Dict[str, Dict[datetime, Optional[str]]] = {}
 
         self.positions: Dict[str, PositionData] = {}  # vt_symbol -> 净持仓(NET)
@@ -87,7 +113,24 @@ class BacktestEngine(StrategyContext):
                                     direction=Direction.NET, volume=0.0)
         )
 
+    def _cost_for(self, vt_symbol: str):
+        """返回该合约的成本模型；未启用成本表时返回 None（退回旧式费率）。"""
+        if self._cost_table is None:
+            return None
+        return lookup_cost(vt_symbol, self._cost_table)
+
     def send_order(self, req: OrderRequest) -> str:
+        # 可选：保证金占用约束（默认关闭，避免破坏旧行为）
+        if self.enforce_margin and self._cost_table is not None and req.offset in (Offset.OPEN, Offset.NONE):
+            cost = self._cost_for(f"{req.symbol}.{req.exchange.value}")
+            if cost is not None and req.price and req.price > 0:
+                size = self.sizes.get(f"{req.symbol}.{req.exchange.value}", 1.0)
+                need = cost.margin_for(req.volume, req.price, size)
+                available = self.cash - self.margin_used
+                if available < need:
+                    _logger.info("保证金不足，拒单 %s x%d (可用%.0f < 需%.0f)",
+                                 f"{req.symbol}.{req.exchange.value}", req.volume, available, need)
+                    return ""
         self._order_seq += 1
         order_id = f"BT-{self._order_seq}"
         fill_date = self._next_date.get(self._current_date)
@@ -158,8 +201,9 @@ class BacktestEngine(StrategyContext):
                 return False
             if flag == "down" and req.direction == Direction.SHORT:
                 return False
-        px = fill_price(bar, req.direction, self.slippage)
-        self._apply_fill(vt, req.direction, req.volume, px)
+        cost = self._cost_for(vt)
+        px = apply_slippage(cost, bar, req.direction, self.slippage)
+        self._apply_fill(vt, req.direction, req.volume, px, req.offset, bar.datetime)
         self._order_seq += 1
         trade = TradeData(
             symbol=req.symbol, exchange=req.exchange, order_id=f"BT-{self._order_seq}",
@@ -172,7 +216,9 @@ class BacktestEngine(StrategyContext):
             self.event_engine.put_event(EventType.EVENT_POSITION, self.get_position(vt))
         return True
 
-    def _apply_fill(self, vt_symbol: str, direction: Direction, volume: float, price: float) -> None:
+    def _apply_fill(self, vt_symbol: str, direction: Direction, volume: float, price: float,
+                     offset: Offset = Offset.OPEN, fill_dt: Optional[datetime] = None) -> None:
+        cost = self._cost_for(vt_symbol)
         size = self.sizes.get(vt_symbol, 1.0)
         pos = self.get_position(vt_symbol)
         sym, exch = vt_symbol.rsplit(".", 1)
@@ -182,11 +228,40 @@ class BacktestEngine(StrategyContext):
         signed_vol = volume if direction == Direction.LONG else -volume
         cur_vol = pos.volume
         new_vol = cur_vol + signed_vol
+
         # 已实现盈亏（减仓/反手时）
         if cur_vol != 0 and signed_vol != 0 and (cur_vol * signed_vol < 0 or abs(new_vol) < abs(cur_vol)):
             closed = min(abs(signed_vol), abs(cur_vol))
             realized = (price - pos.price) * closed * size * (1 if cur_vol > 0 else -1)
             self.cash += realized
+
+        # ---- 开仓批次记账（用于平今判定）----
+        fill_dt = fill_dt or self._current_date
+        close_today_vol = 0.0
+        if cur_vol == 0 or cur_vol * signed_vol > 0:
+            # 纯开仓 / 加仓
+            self._open_lots[vt_symbol].append((fill_dt, signed_vol, price))
+        else:
+            # 含平仓：FIFO 从批次弹出，判定平今量
+            to_close = min(abs(signed_vol), abs(cur_vol))
+            remaining = to_close
+            lots = self._open_lots[vt_symbol]
+            while remaining > 1e-9 and lots:
+                od, ov, op = lots[0]
+                take = min(abs(ov), remaining)
+                if fill_dt.date() == od.date():
+                    close_today_vol += take
+                remaining -= take
+                if take >= abs(ov) - 1e-9:
+                    lots.pop(0)
+                else:
+                    lots[0] = (od, ov - (take if ov > 0 else -take), op)
+            # 反手剩余部分作为新开仓
+            new_open = abs(signed_vol) - to_close
+            if new_open > 1e-9:
+                self._open_lots[vt_symbol].append(
+                    (fill_dt, (signed_vol / abs(signed_vol)) * new_open, price))
+
         # 加权均价（加仓时更新）
         if abs(new_vol) > abs(cur_vol):
             added = abs(new_vol) - abs(cur_vol)
@@ -194,8 +269,32 @@ class BacktestEngine(StrategyContext):
         elif new_vol == 0:
             pos.price = 0.0
         pos.volume = new_vol
-        # 手续费
-        self.cash -= price * volume * size * self.commission
+
+        # ---- 成本 ----
+        if cost is not None:
+            fee, tax, impact = compute_commission(
+                cost, volume, price, size, direction, offset, close_today_vol)
+            total_cost = fee + tax + impact
+            self.cash -= total_cost
+            self.total_commission += fee
+            self.total_stamp += tax
+            self.total_impact += impact
+            # 保证金占用重算
+            new_margin = cost.margin_for(abs(new_vol), pos.price, size)
+            delta = new_margin - self._margin_by_vt.get(vt_symbol, 0.0)
+            self.margin_used += delta
+            self._margin_by_vt[vt_symbol] = new_margin
+        else:
+            # 旧式单一费率
+            comm = price * volume * size * self.commission
+            self.cash -= comm
+            self.total_commission += comm
+
+        # 隐性滑点成本：用成交价相对当根开盘价的偏离累计（买高卖低为正的成本拖累）
+        open_px = self._lookup[vt_symbol].get(fill_dt, None)
+        if open_px is not None:
+            self.total_slippage_cost += (price - open_px.open_price) * signed_vol * size
+
         self.positions[vt_symbol] = pos
 
     def _bar_at_or_after(self, vt_symbol: str, date: datetime) -> Optional[BarData]:
@@ -213,8 +312,10 @@ class BacktestEngine(StrategyContext):
             vt = p["vt_symbol"]
             bar = self._bar_at_or_after(vt, self.dates[-1]) if self.dates else None
             if bar is not None:
-                px = fill_price(bar, p["req"].direction, self.slippage)
-                self._apply_fill(vt, p["req"].direction, p["req"].volume, px)
+                cost = self._cost_for(vt)
+                px = apply_slippage(cost, bar, p["req"].direction, self.slippage)
+                self._apply_fill(vt, p["req"].direction, p["req"].volume, px,
+                                 p["req"].offset, bar.datetime)
                 self.trades.append(TradeData(
                     symbol=p["req"].symbol, exchange=p["req"].exchange,
                     order_id="BT-close", trade_id="T-close",
@@ -238,4 +339,13 @@ class BacktestEngine(StrategyContext):
             self.equity_curve.append(entry)
 
     def analyze(self) -> PerformanceReport:
-        return PerformanceAnalyzer().analyze(self.equity_curve, self.trades)
+        rep = PerformanceAnalyzer().analyze(self.equity_curve, self.trades)
+        rep.total_commission = self.total_commission
+        rep.total_stamp_tax = self.total_stamp
+        rep.total_impact = self.total_impact
+        rep.total_slippage = self.total_slippage_cost
+        rep.total_cost = self.total_commission + self.total_stamp + self.total_impact + self.total_slippage_cost
+        rep.margin_used = self.margin_used
+        net_pnl = rep.final_equity - self.capital
+        rep.cost_ratio = (rep.total_cost / abs(net_pnl)) if net_pnl not in (0.0, -self.capital) and net_pnl != 0 else 0.0
+        return rep
