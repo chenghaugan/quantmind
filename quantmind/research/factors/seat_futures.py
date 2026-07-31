@@ -28,7 +28,7 @@ seat_open_interest 接口）后构建 ``seat_df``。本模块提供 `make_synthe
 """
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -52,6 +52,24 @@ def make_synthetic_seat_df(n_days: int = 250, n_seats: int = 8, seed: int = 0) -
             walk = walk + np.linspace(0, 500, n_days)
         data[f"seat{i}"] = walk
     return pd.DataFrame(data, index=idx)
+
+
+def seat_df_from_tradingagents(root: str, symbol: str) -> Tuple[pd.DataFrame, pd.Series]:
+    """从 TradingAgents_for_Futures 仓库格式的席位排名 CSV 构造 net-position 矩阵。
+
+    参数
+    ----
+    root: 指向该仓库的 ``qihuo/database/positioning`` 目录
+    symbol: 品种代码（如 RB / CU / AG）
+
+    返回
+    ----
+    (seat_df, total_oi) —— 可直接喂给 :func:`compute_seat_factors`
+    """
+    from ...data.feed.seat_position_csv import SeatDataset
+    ds = SeatDataset.load(root, symbol)
+    return ds.to_net_position_matrix()
+
 
 
 def compute_seat_factors(

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     api_url: str = "http://api:8000"
     log_level: str = "INFO"
     local_data_root: str = ""  # 本地真实数据根目录（如 china-futures CSV 克隆路径）；非空时注册本地文件源（期货真实数据优先）
+    seat_data_root: str = ""  # 期货席位持仓排名数据根目录（如 TradingAgents_for_Futures 的 qihuo/database/positioning）；非空时启用 F1-F8 真实席位因子
 
 
 @lru_cache

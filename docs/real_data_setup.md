@@ -46,6 +46,7 @@ python -m pytest                  # 回归测试
 cp .env.example .env              # 填 QM_DB_PASSWORD / QM_LLM_PROVIDER / key
 docker compose up --build         # 首次 build 需联网拉基础镜像
 # 浏览器开 http://localhost:8501 ；API 文档 http://localhost:8000/docs
+```
 
 ## 6. 本地文件源（china-futures 仓库，CC0，最稳）
 
@@ -75,4 +76,34 @@ python -m quantmind.cli backtest --symbol rb0 --exchange SHFE       # 商品期�
 - 文件缺失时自动降级 AKShare → Mock，全链路仍可跑。
 - A 股（astock-data-toolkit 落 Parquet）/ 港股 / 期权仍走原有实时源；其本地 Parquet 接入
   可复用 `LocalFileFeed`（实现 `_resolve_paths` 即可），后续按需扩展。
+
+## 7. 期货席位因子 F1–F8（TradingAgents_for_Futures 仓库，MIT）
+
+该仓库 `qihuo/database/positioning/<品种>/` 下含交易所每日持仓排名（前 N 名）真实历史
+数据，正是 F1–F8 的原料。已落地 `SeatPositionCSVFeed`（`quantmind/data/feed/seat_position_csv.py`）
+与 `seat_futures.seat_df_from_tradingagents()`，离线可编、离线可测。
+
+```bash
+# 克隆（MIT；61 个商品期货品种，含 long/short/volume_position_ranking.csv；数据截至 2025-11）
+git clone https://github.com/foxcodehu/TradingAgents_for_Futures
+# 指向该仓库的 positioning 目录
+export QM_SEAT_DATA_ROOT=/abs/path/to/TradingAgents_for_Futures/qihuo/database/positioning
+python -m quantmind.cli info     # 确认 "席位因子源" 行出现
+python -m quantmind.cli seat --symbol RB --exchange SHFE
+#   → 计算净持仓矩阵 + F1–F8，并尝试用本地期货价格算各因子与次日收益的 IC
+```
+
+要点：
+- 文件格式（仓库实际文件名，非其自带已过期 reader 的 positioning_data.csv）：
+  `排名,会员简称,持仓量,比上交易增减,date,contract,position_type,symbol`。
+- 适配器逻辑：每个交易日选**最活跃合约**（多单总量最大），在该合约内按会员简称合并
+  多/空持仓 → 净持仓 = 多单 − 空单 → 净持仓矩阵 `seat_df`；`total_oi` 取活跃合约多单总量。
+  净持仓矩阵直接喂 `compute_seat_factors` 得到 F1–F8。
+- 覆盖：**仅商品期货（SHFE/DCE/CZCE/INE，61 品种）**，不含金融期货（CFFEX 的 IF/IC/IH/TF）。
+  金融期货席位因子仍缺口。
+- 时间范围：仓库内置数据约到 2025-11，可用其 `unified_futures_data_updater.py`（需 akshare/网络）
+  更新到最新；历史长度有限，回测样本偏短。
+- 版权：仓库代码 MIT，但数据源自交易所/akshare，「仅供学习研究」，勿商业转售。
+- 注：其自带 `positioning_provider.py` 读 `positioning_data.csv` 已失效（文件改名），
+  本适配器按真实 `long/short/volume_position_ranking.csv` 解析，不依赖其 reader。
 ```

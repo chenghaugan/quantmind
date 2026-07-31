@@ -14,6 +14,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
+import pandas as pd
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -58,12 +59,15 @@ def info() -> None:
     table.add_column("项"); table.add_column("值")
     for k, v in [("db_url", s.db_url), ("redis_url", s.redis_url),
                  ("llm_provider", s.llm_provider), ("api_url", s.api_url),
-                 ("local_data_root", s.local_data_root or "(未配置)")]:
+                 ("local_data_root", s.local_data_root or "(未配置)"),
+                 ("seat_data_root", s.seat_data_root or "(未配置)")]:
         table.add_row(k, v)
     srcs = ("china_futures_csv(本地,优先) / akshare_future / mootdx_astock / em_hk / "
             "akshare_option / mock(兜底)") if s.local_data_root else \
            "akshare_future / mootdx_astock / em_hk / akshare_option / mock(兜底)"
     console.print("[green]数据源：[/green]", srcs)
+    if s.seat_data_root:
+        console.print("[green]席位因子源：[/green] TradingAgents_for_Futures 排名 CSV（F1–F8 可用，限商品期货）")
 
 
 @app.command()
@@ -106,6 +110,20 @@ def research(idea: str = typer.Argument(..., help="投资想法（自然语言�
              asset_class: str = typer.Option("", help="资产类别")) -> None:
     """AI 研究：idea -> 研究规格 / 候选因子 / 策略代码。"""
     asyncio.run(_research(idea, asset_class))
+
+
+@app.command()
+def seat(
+    symbol: str = typer.Option("RB", help="期货品种代码（如 RB/CU/AG）"),
+    exchange: str = typer.Option("SHFE", help="关联价格所用交易所（用于算 IC）"),
+    root: str = typer.Option("", help="席位数据根目录；默认用 QM_SEAT_DATA_ROOT 或 <local_data_root>/qihuo/database/positioning"),
+) -> None:
+    """期货席位因子 F1–F8（对接 TradingAgents_for_Futures 仓库排名 CSV）。
+
+    需先 clone 该仓库并把 seat_data_root 指向 qihuo/database/positioning。
+    计算净持仓矩阵 → F1–F8，并尝试用本地期货价格算各因子与次日收益的 IC。
+    """
+    asyncio.run(_seat(symbol, exchange, root))
 
 
 @app.command()
@@ -207,6 +225,63 @@ async def _research(idea, asset_class) -> None:
     console.print(f"候选因子: {[f.name for f in out.factors]}")
     console.print(f"风险要点: {out.spec.risk_notes}")
     console.print(f"生成策略代码安全: {out.code_safe}  错误: {out.code_errors}")
+
+
+async def _seat(symbol: str, exchange: str, root: str) -> None:
+    s = get_settings()
+    root = root or s.seat_data_root or (
+        f"{s.local_data_root}/qihuo/database/positioning" if s.local_data_root else ""
+    )
+    if not root:
+        console.print("[red]未配置席位数据根目录[/red]（设置 QM_SEAT_DATA_ROOT 或 --root）")
+        return
+    try:
+        from .research.factors.seat_futures import (
+            compute_seat_factors, seat_df_from_tradingagents,
+        )
+        seat_df, total_oi = seat_df_from_tradingagents(root, symbol)
+    except FileNotFoundError as e:
+        console.print(f"[red]席位数据缺失[/red]: {e}")
+        return
+    if seat_df.empty:
+        console.print("[red]该品种无席位数据[/red]")
+        return
+    console.print(f"[green]席位数据[/green]: {symbol} 共 {len(seat_df)} 交易日, "
+                  f"{seat_df.shape[1]} 个席位（净持仓=多单-空单，按最活跃合约）")
+    factors = compute_seat_factors(seat_df, total_oi, aggregate=True)
+
+    table = Table(title=f"期货席位因子 {symbol} (F1–F8)")
+    table.add_column("因子"); table.add_column("末值"); table.add_column("均值"); table.add_column("标准差")
+    for name, ser in factors.items():
+        table.add_row(name, f"{ser.iloc[-1]:.2f}", f"{ser.mean():.2f}", f"{ser.std():.2f}")
+    console.print(table)
+
+    # 尝试关联本地期货价格，计算各因子与次日收益的 IC（spearman）
+    try:
+        bars = await _fetch(f"{symbol.lower()}0", exchange, 1)
+        from .research.factors.base import bars_to_df
+        pdf = bars_to_df(bars)
+        pdf["date"] = pd.to_datetime(pdf["datetime"]).dt.tz_localize(None).dt.normalize()
+        pdf = pdf.sort_values("date")
+        pdf["fwd_ret"] = pdf["close"].pct_change().shift(-1)
+        ret_map = pdf.dropna(subset=["fwd_ret"]).set_index("date")["fwd_ret"]
+        rows = []
+        for name, ser in factors.items():
+            sidx = pd.to_datetime(ser.index).normalize()
+            aligned = ser.set_axis(sidx)
+            common = aligned.index.intersection(ret_map.index)
+            if len(common) >= 10:
+                ic = aligned.loc[common].corr(ret_map.loc[common], method="spearman")
+            else:
+                ic = float("nan")
+            rows.append((name, ic))
+        ic_table = Table(title=f"{symbol} 席位因子 IC（vs 次日收益，spearman）")
+        ic_table.add_column("因子"); ic_table.add_column("IC")
+        for name, ic in rows:
+            ic_table.add_row(name, f"{ic:.4f}" if ic == ic else "n/a")
+        console.print(ic_table)
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]未关联价格（无本地期货数据），跳过 IC：{str(exc)[:50]}[/yellow]")
 
 
 async def _e2e() -> None:
