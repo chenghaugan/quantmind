@@ -24,13 +24,19 @@ __all__ = [
 ]
 
 
-def build_default_registry(local_data_root: str | None = None) -> DataFeedRegistry:
+def build_default_registry(
+    local_data_root: str | None = None,
+    continuous_method: str = "back_adjusted",
+) -> DataFeedRegistry:
     """按优先级注册数据源（Fallback Chain）。
 
     默认顺序：期货(AKShare) → A股(mootdx) → 港股(东财) → 期权(AKShare) → mock(兜底)。
     若 ``local_data_root`` 指向已克隆的本地数据根目录（如 china-futures CSV），则注册
     ``ChinaFuturesCSVFeed`` 且优先级最高（5）：期货请求优先吃本地真实文件；文件缺失时自动
     降级到 AKShare，再降级到 mock。单源失败自动降级，保证全链路可跑。
+
+    :param continuous_method: 主连构造方式，透传给 ``ChinaFuturesCSVFeed``
+        （"back_adjusted" 向后复权，默认/推荐；"simple" 旧式窗口拼接）。
     """
     import logging
     from pathlib import Path
@@ -39,8 +45,11 @@ def build_default_registry(local_data_root: str | None = None) -> DataFeedRegist
     reg = DataFeedRegistry()
     if local_data_root:
         if Path(local_data_root).exists():
-            reg.register(ChinaFuturesCSVFeed(local_data_root), priority=5)
-            _logger.info("已注册本地期货源: %s", local_data_root)
+            reg.register(
+                ChinaFuturesCSVFeed(local_data_root, continuous_method=continuous_method),
+                priority=5,
+            )
+            _logger.info("已注册本地期货源: %s (主连=%s)", local_data_root, continuous_method)
         else:
             _logger.warning("local_data_root 不存在，跳过本地源: %s", local_data_root)
     reg.register(AkShareFuturesFeed(), priority=10)

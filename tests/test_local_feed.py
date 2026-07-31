@@ -88,7 +88,7 @@ async def test_china_futures_specific_contract(tmp_path):
 
 async def test_china_futures_continuous(tmp_path):
     _make_tree(tmp_path)
-    feed = ChinaFuturesCSVFeed(str(tmp_path))
+    feed = ChinaFuturesCSVFeed(str(tmp_path), continuous_method="simple")
     bars = await feed.fetch_bar_data(HistoryRequest(
         symbol="IC0", exchange=Exchange.CFFEX, interval=Interval.DAILY))
     # 主连拼接：IC2401(2根) + IC2403(2根) = 4 根，按交割月窗口衔接、无重叠
@@ -96,6 +96,61 @@ async def test_china_futures_continuous(tmp_path):
     dts = [b.datetime for b in bars]
     assert dts == sorted(dts)
     assert len(set(dts)) == 4
+
+
+# 重叠合约：IC2401 与 IC2403 在 2024-01-03 同时交易，IC2403 的 OI 更大 -> 该日主力为 IC2403
+CSV_ROLL_A = """datetime,open,high,low,close,volume,open_interest
+2024-01-02 09:00:00,99,101,98,100,10,50
+2024-01-03 09:00:00,104,106,103,105,10,50
+"""
+CSV_ROLL_B = """datetime,open,high,low,close,volume,open_interest
+2024-01-03 09:00:00,199,201,198,200,10,200
+2024-01-04 09:00:00,204,206,203,205,10,200
+"""
+
+
+def _make_tree_rollover(root: Path) -> None:
+    d = root / "5min" / "CFFEX" / "IC"
+    d.mkdir(parents=True)
+    (d / "IC2401.csv").write_text(CSV_ROLL_A)
+    (d / "IC2403.csv").write_text(CSV_ROLL_B)
+
+
+async def test_china_futures_backadjusted_removes_rollover_jump(tmp_path):
+    _make_tree_rollover(tmp_path)
+    feed = ChinaFuturesCSVFeed(str(tmp_path), continuous_method="back_adjusted")
+    bars = await feed.fetch_bar_data(HistoryRequest(
+        symbol="IC0", exchange=Exchange.CFFEX, interval=Interval.DAILY))
+    # 3 个交易日：2024-01-02(A) / 01-03(重叠,主力=B) / 01-04(B)
+    assert len(bars) == 3
+    closes = [b.close_price for b in bars]
+    # 原始连续会跳变 100->200；向后复权应平滑（01-02 与 01-03 收盘价相等，无跳变）
+    assert closes[0] == closes[1]
+    # 最新价（01-04）保持真实不变
+    assert closes[2] == 205
+    # 真实收益（01-03->01-04 的 +5）被保留
+    assert round(closes[2] - closes[1], 6) == 5
+
+
+async def test_china_futures_backadjusted_continuous_and_latest_unadjusted(tmp_path):
+    _make_tree(tmp_path)  # IC2401 与 IC2403 在合约边界发生主力切换（不重叠交易日）
+    feed = ChinaFuturesCSVFeed(str(tmp_path), continuous_method="back_adjusted")
+    bars = await feed.fetch_bar_data(HistoryRequest(
+        symbol="IC0", exchange=Exchange.CFFEX, interval=Interval.DAILY))
+    # 4 个交易日；原始连续会在 01-02->02-01 出现 ~80 点合约价差跳变
+    assert len(bars) == 4
+    closes = [b.close_price for b in bars]
+    # 向后复权：最新价保持真实不变
+    assert closes[-1] == 5125
+    # 复权后序列平滑：相邻日价差不应出现换月跳变（原始会有 80 点跳，复权后应 < 30）
+    max_step = max(abs(closes[i] - closes[i - 1]) for i in range(1, len(closes)))
+    assert max_step < 30, f"复权后不应有换月跳变, max_step={max_step}"
+
+
+async def test_china_futures_default_is_backadjusted(tmp_path):
+    _make_tree(tmp_path)
+    feed = ChinaFuturesCSVFeed(str(tmp_path))  # 默认 back_adjusted
+    assert feed.continuous_method == "back_adjusted"
 
 
 async def test_local_feed_fallback_to_mock(tmp_path):

@@ -67,12 +67,16 @@ python -m quantmind.cli backtest --symbol rb0 --exchange SHFE       # 商品期�
 要点：
 - 仓库结构 `5min/<交易所>/<品种>/<品种>YYMM.csv`（交易所：CFFEX/CZCE/DCE/GFEX/INE/SHFE）。
 - 请求约定：具体交割合约 `IC2401.CFFEX`（symbol=IC2401）；主连/连续 `IC0.CFFEX` 或
-  `IC9999.CFFEX`（自动拼接该品种所有交割月 CSV 为简单主力连续）。大小写不敏感。
+  `IC9999.CFFEX`（自动拼接该品种所有交割月 CSV 为连续主力合约）。大小写不敏感。
+- 连续主力构造方式（默认 `back_adjusted`，推荐）：每个交易日按**持仓量(OIN)最大**的合约
+  选为当日主力，并对历史价格做**向后复权**（最新价不变、历史平移），消除换月跳变，使因子/
+  回测吃到的连续序列在换月处平滑、收益连续。可用 `continuous_method="simple"` 退回旧式
+  按交割月窗口拼接（可能有跳变）。
 - 频率：仓库为 5min；因子/回测主要用日频，feed 自动做 5min→日频降采样（按 UTC 自然日
   聚合，等价于中国交易日，因 UTC 日界≈北京时间 08:00，位于夜盘后、日盘前）。
 - 时区：CSV 北京时间为 naive，自动减 8h 转 UTC 存储（与体系一致）。
-- 主连是**简单主力连续**（按交割月月末窗口衔接拼接，重叠期归近月），非成交量加权换月，
-  价格可能有跳变；如需严格主力连续，后续可接 `ak.futures_main_sina` 或自行构造。
+- 主连默认是**向后复权主力连续**（按 OI 选主力 + 历史平移消除跳变）。如需旧式按交割月窗口
+  拼接（可能有跳变），设 `continuous_method="simple"`。
 - 文件缺失时自动降级 AKShare → Mock，全链路仍可跑。
 - A 股（astock-data-toolkit 落 Parquet）/ 港股 / 期权仍走原有实时源；其本地 Parquet 接入
   可复用 `LocalFileFeed`（实现 `_resolve_paths` 即可），后续按需扩展。
