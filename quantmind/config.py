@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     llm_provider: str = "mock"
     api_url: str = "http://api:8000"
     log_level: str = "INFO"
+    local_data_root: str = ""  # 本地真实数据根目录（如 china-futures CSV 克隆路径）；非空时注册本地文件源（期货真实数据优先）
 
 
 @lru_cache

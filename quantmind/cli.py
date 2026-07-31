@@ -43,7 +43,9 @@ SMOKE_CASES = [
 
 
 def _make_dm():
-    registry = build_default_registry()
+    s = get_settings()
+    root = s.local_data_root or None
+    registry = build_default_registry(local_data_root=root)
     store = InMemoryStore()
     return DataManager(registry, store)
 
@@ -55,10 +57,13 @@ def info() -> None:
     table = Table(title="QuantMind 配置")
     table.add_column("项"); table.add_column("值")
     for k, v in [("db_url", s.db_url), ("redis_url", s.redis_url),
-                 ("llm_provider", s.llm_provider), ("api_url", s.api_url)]:
+                 ("llm_provider", s.llm_provider), ("api_url", s.api_url),
+                 ("local_data_root", s.local_data_root or "(未配置)")]:
         table.add_row(k, v)
-    console.print(table)
-    console.print("[green]数据源：[/green]", "akshare_future / mootdx_astock / em_hk / akshare_option / mock(兜底)")
+    srcs = ("china_futures_csv(本地,优先) / akshare_future / mootdx_astock / em_hk / "
+            "akshare_option / mock(兜底)") if s.local_data_root else \
+           "akshare_future / mootdx_astock / em_hk / akshare_option / mock(兜底)"
+    console.print("[green]数据源：[/green]", srcs)
 
 
 @app.command()
