@@ -48,7 +48,8 @@ SMOKE_CASES = [
 def _make_dm():
     s = get_settings()
     root = s.local_data_root or None
-    registry = build_default_registry(local_data_root=root)
+    stock_root = s.local_stock_root or None
+    registry = build_default_registry(local_data_root=root, local_stock_root=stock_root)
     store = InMemoryStore()
     return DataManager(registry, store)
 
@@ -62,11 +63,14 @@ def info() -> None:
     for k, v in [("db_url", s.db_url), ("redis_url", s.redis_url),
                  ("llm_provider", s.llm_provider), ("api_url", s.api_url),
                  ("local_data_root", s.local_data_root or "(未配置)"),
+                 ("local_stock_root", s.local_stock_root or "(未配置)"),
                  ("seat_data_root", s.seat_data_root or "(未配置)")]:
         table.add_row(k, v)
-    srcs = ("china_futures_csv(本地,优先) / akshare_future / mootdx_astock / em_hk / "
-            "akshare_option / mock(兜底)") if s.local_data_root else \
-           "akshare_future / mootdx_astock / em_hk / akshare_option / mock(兜底)"
+    console.print(table)
+    srcs = ("china_futures_csv(本地,优先) / china_astock_parquet(本地) / akshare_future / "
+            "mootdx_astock / em_hk / akshare_option / mock(兜底)") \
+        if (s.local_data_root or s.local_stock_root) else \
+        "akshare_future / mootdx_astock / em_hk / akshare_option / mock(兜底)"
     console.print("[green]数据源：[/green]", srcs)
     if s.seat_data_root:
         console.print("[green]席位因子源：[/green] TradingAgents_for_Futures 排名 CSV（F1–F8 可用，限商品期货）")

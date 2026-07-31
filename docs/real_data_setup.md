@@ -78,8 +78,7 @@ python -m quantmind.cli backtest --symbol rb0 --exchange SHFE       # 商品期�
 - 主连默认是**向后复权主力连续**（按 OI 选主力 + 历史平移消除跳变）。如需旧式按交割月窗口
   拼接（可能有跳变），设 `continuous_method="simple"`。
 - 文件缺失时自动降级 AKShare → Mock，全链路仍可跑。
-- A 股（astock-data-toolkit 落 Parquet）/ 港股 / 期权仍走原有实时源；其本地 Parquet 接入
-  可复用 `LocalFileFeed`（实现 `_resolve_paths` 即可），后续按需扩展。
+- A 股本地 Parquet/CSV 接入已实现（见第 8 节）；港股 / 期权仍走原有实时源。
 
 ## 7. 期货席位因子 F1–F8（TradingAgents_for_Futures 仓库，MIT）
 
@@ -111,3 +110,37 @@ python -m quantmind.cli seat --symbol RB --exchange SHFE
 - 注：其自带 `positioning_provider.py` 读 `positioning_data.csv` 已失效（文件改名），
   本适配器按真实 `long/short/volume_position_ranking.csv` 解析，不依赖其 reader。
 ```
+
+## 8. A 股（沪深）本地 Parquet/CSV 接入（astock-data-toolkit / a-stock-data）
+
+把 A 股日频 K 线落地为 Parquet/CSV 后直接吃真实数据，A 股回测/因子不再依赖 mootdx 的
+限频与稳定性。已落地 `ChinaAStockParquetFeed`（`quantmind/data/feed/astock_parquet.py`），
+离线可编、离线可测（CSV 走测试，Parquet 需 `pyarrow`/装包后自动生效）。
+
+```bash
+# 以 astock-data-toolkit 为例，把数据导出/落地到某目录（以下任一布局均可被自动探测）：
+#   600000.SH.parquet         (推荐)
+#   600000.parquet
+#   SH/600000.parquet         或 SSE/600000.parquet
+#   data/600000.SH.parquet    或 daily/600000.SH.parquet  / stock/600000.SH.parquet
+# 同时兼容同名 .csv / .txt（离线调试或部分工具导出 CSV）
+export QM_LOCAL_STOCK_ROOT=/abs/path/to/astock-data
+
+python -m quantmind.cli info      # 确认 "数据源" 行出现 china_astock_parquet(本地)
+python -m quantmind.cli backtest --symbol 600000 --exchange SSE --strategy multifactor --cost
+#   → A 股回测走本地真实数据；未配置时自动降级 mootdx(在线) → mock
+```
+
+要点：
+- 仅服务 **SSE（沪）/ SZSE（深）**；其它交易所（期货/港股/期权）请求不会被该源接走，
+  正确降级到对应源。
+- **时间约定**：文件为交易日期（日频、无具体时刻）时保持交易日期不变；若带具体时刻
+  （如盘后 15:00）则按北京时间减 8h 转 UTC。避免 UTC 日界把日期前移一天。
+- **列名宽匹配**：`date/datetime`→时间；`open/high/low/close`；`volume/vol`；`amount`/`turnover`
+  → `turnover`（成交额）。与 `LocalFileFeed` 同一套别名表。
+- A 股无主力连续概念，`_resolve_paths` 恒返回 `is_main=False`，不做换月拼接。
+- 读取 `.parquet` 需要 `pyarrow`（或 `fastparquet`）；未安装时该源静默降级到下一数据源
+  （mootdx / mock），不会报错中断。
+- 与期货本地源共用 Fallback Chain：期货本地源优先级 5、A 股本地源 15、mootdx 20。
+- 回测 A 股请加 `--cost`：A 股成本模型含**卖出千 1 印花税 + 最低 5 元手续费**
+  （见 `docs/cost_model.md`），否则绩效被严重高估。
