@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     local_data_root: str = ""  # 本地真实数据根目录（如 china-futures CSV 克隆路径）；非空时注册本地文件源（期货真实数据优先）
     local_stock_root: str = ""  # 本地 A 股数据根目录（如 astock-data-toolkit / a-stock-data 的 Parquet/CSV）；非空时注册 ChinaAStockParquetFeed（优先于 mootdx）
+    local_hk_root: str = ""  # 本地港股数据根目录（东方财富/第三方导出的港股日频 Parquet/CSV）；非空时注册 ChinaHKAStockParquetFeed（优先于 em_hk）
+    local_option_root: str = ""  # 本地期权数据根目录（股指/ETF/商品期权日频 Parquet/CSV）；非空时注册 ChinaOptionParquetFeed（优先于 akshare_option）
     seat_data_root: str = ""  # 期货席位持仓排名数据根目录（如 TradingAgents_for_Futures 的 qihuo/database/positioning）；非空时启用 F1-F8 真实席位因子
 
 

@@ -144,3 +144,32 @@ python -m quantmind.cli backtest --symbol 600000 --exchange SSE --strategy multi
 - 与期货本地源共用 Fallback Chain：期货本地源优先级 5、A 股本地源 15、mootdx 20。
 - 回测 A 股请加 `--cost`：A 股成本模型含**卖出千 1 印花税 + 最低 5 元手续费**
   （见 `docs/cost_model.md`），否则绩效被严重高估。
+
+## 9. 港股 / 期权 本地 Parquet/CSV 接入（多资产本地源补齐）
+
+港股与场内期权日频 K 线同样可落地为 Parquet/CSV 后直接吃真实数据，不再依赖 em_hk /
+akshare_option 的限频与稳定性。已落地 `ChinaHKAStockParquetFeed` 与 `ChinaOptionParquetFeed`
+（`quantmind/data/feed/local_daily.py`），二者与 A 股源共用通用基类 `LocalDailyParquetFeed`
+（时间归一、路径探测、列匹配逻辑完全一致），离线可编、CSV 走测试，Parquet 需 `pyarrow`。
+
+```bash
+export QM_LOCAL_HK_ROOT=/abs/path/to/hk-data        # 港股日频根目录
+export QM_LOCAL_OPTION_ROOT=/abs/path/to/option-data # 期权日频根目录
+
+python -m quantmind.cli info      # 确认数据源行出现 china_hk_parquet / china_option_parquet
+python -m quantmind.cli backtest --symbol 00700 --exchange HKEX --strategy multifactor --cost
+python -m quantmind.cli backtest --symbol IO2409-C-3900 --exchange CFFEX --strategy multifactor --cost
+```
+
+要点：
+
+- **港股源** `ChinaHKAStockParquetFeed` 仅接管 **HKEX**；**期权源** `ChinaOptionParquetFeed`
+  接管股指/ETF/商品期权所在交易所（CFFEX / SSE / SZSE / DCE / CZCE / SHFE / INE）。
+  非对应交易所请求不被接走，正确降级到对应实时源。
+- 路径探测布局同 A 股：`{code}.{SUFFIX}.parquet` / `{code}.parquet` /
+  `{EXCHANGE}/` 或 `{SUFFIX}/` 或自定义子目录（`hk/`、`option/` 等）/ 递归兜底；兼容 `.csv/.txt`。
+- Fallback Chain 优先级：期货本地 5、**港股本地 25**（高于 em_hk 30）、**期权本地 35**
+  （高于 akshare_option 40）、mootdx 20、mock 100。未配置对应根目录则不注册本地源。
+- 期权目前仅接入 OHLCV 序列，期权链（expiry/strike/Greeks）建模未做；回测按普通日频标的处理。
+- 读取 `.parquet` 需 `pyarrow`；未安装时该源静默降级下一源。
+

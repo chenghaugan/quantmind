@@ -47,9 +47,12 @@ SMOKE_CASES = [
 
 def _make_dm():
     s = get_settings()
-    root = s.local_data_root or None
-    stock_root = s.local_stock_root or None
-    registry = build_default_registry(local_data_root=root, local_stock_root=stock_root)
+    registry = build_default_registry(
+        local_data_root=s.local_data_root or None,
+        local_stock_root=s.local_stock_root or None,
+        local_hk_root=s.local_hk_root or None,
+        local_option_root=s.local_option_root or None,
+    )
     store = InMemoryStore()
     return DataManager(registry, store)
 
@@ -64,12 +67,15 @@ def info() -> None:
                  ("llm_provider", s.llm_provider), ("api_url", s.api_url),
                  ("local_data_root", s.local_data_root or "(未配置)"),
                  ("local_stock_root", s.local_stock_root or "(未配置)"),
+                 ("local_hk_root", s.local_hk_root or "(未配置)"),
+                 ("local_option_root", s.local_option_root or "(未配置)"),
                  ("seat_data_root", s.seat_data_root or "(未配置)")]:
         table.add_row(k, v)
     console.print(table)
-    srcs = ("china_futures_csv(本地,优先) / china_astock_parquet(本地) / akshare_future / "
-            "mootdx_astock / em_hk / akshare_option / mock(兜底)") \
-        if (s.local_data_root or s.local_stock_root) else \
+    has_local = any([s.local_data_root, s.local_stock_root, s.local_hk_root, s.local_option_root])
+    srcs = ("china_futures_csv(本地,优先) / china_astock_parquet / china_hk_parquet / "
+            "china_option_parquet / akshare_future / mootdx_astock / em_hk / "
+            "akshare_option / mock(兜底)") if has_local else \
         "akshare_future / mootdx_astock / em_hk / akshare_option / mock(兜底)"
     console.print("[green]数据源：[/green]", srcs)
     if s.seat_data_root:
@@ -96,19 +102,20 @@ def factor(
 
 
 @app.command()
-@app.command()
 def cs(
     symbols: str = typer.Option("rb0,hc0,bu0,i0", help="多标的，逗号分隔，如 rb0,hc0,bu0,i0"),
     exchange: str = typer.Option("SHFE", help="所有标的共用交易所"),
     name: str = typer.Option("alpha021", help="截面 Alpha 因子名（alpha002..alpha101 / alpha191_*）"),
     years: int = typer.Option(1),
+    bt: bool = typer.Option(False, help="同时把该截面因子跑成多空组合回测（研究与回测闭环）"),
 ) -> None:
     """多标的截面因子评估（严格截面 rank）：构建面板→算因子→截面 IC/组合。
 
     与 ``factor``（单标的滚动近似）不同，此处对每个交易日横截面上对所有标的做 rank，
     得到 WorldQuant 公式本意的截面因子，再算截面 Spearman IC 与多空组合。需 ≥2 标的。
+    加 --bt 会把该因子直接转成每日横截面多空组合的回测绩效。
     """
-    asyncio.run(_cs(symbols, exchange, name, years))
+    asyncio.run(_cs(symbols, exchange, name, years, bt))
 
 
 @app.command()
@@ -155,6 +162,21 @@ def e2e() -> None:
     asyncio.run(_e2e())
 
 
+@app.command()
+def wf(
+    symbol: str = typer.Option("rb0"),
+    exchange: str = typer.Option("SHFE"),
+    strategy: str = typer.Option("multifactor", help="dual_ma | multifactor | vol_target | pair"),
+    years: int = typer.Option(3),
+    train_window: int = typer.Option(250, help="训练/预热窗口（根）"),
+    test_window: int = typer.Option(60, help="每折测试窗口（根）"),
+    step: int = typer.Option(60, help="滚动步长（根）；默认=test_window 不重叠"),
+    cost: bool = typer.Option(False, help="启用真实成本模型"),
+) -> None:
+    """Walk-forward 滚动样本外验证：把历史切成多折，给出样本外稳定性与过拟合预警。"""
+    asyncio.run(_wf(symbol, exchange, strategy, years, train_window, test_window, step, cost))
+
+
 # ---- 实现 ----
 async def _smoke() -> None:
     dm = _make_dm()
@@ -182,7 +204,7 @@ async def _fetch(symbol, exchange, years):
     return bars
 
 
-async def _cs(symbols, exchange, name, years) -> None:
+async def _cs(symbols, exchange, name, years, bt=False) -> None:
     syms = [s.strip() for s in symbols.split(",") if s.strip()]
     if len(syms) < 2:
         console.print("[red]截面评估需要至少 2 个标的[/red]"); return
@@ -218,6 +240,18 @@ async def _cs(symbols, exchange, name, years) -> None:
     for k, v in rep.to_dict().items():
         table.add_row(k, str(v))
     console.print(table)
+
+    if bt:
+        from .research.cross_sectional_backtest import cross_sectional_backtest
+        res = cross_sectional_backtest(panel, name, forward_periods=1, n_groups=5)
+        p = res["portfolio"]
+        console.print(f"[bold green]截面因子多空组合回测[/bold green] {name}  "
+                      f"标的数={res['n_symbols']} 截面数={res['n_dates']}")
+        btab = Table(title=f"多空组合 {name}")
+        btab.add_column("指标"); btab.add_column("值")
+        for k in ("total_return", "annual_return", "sharpe", "sortino", "max_drawdown", "calmar"):
+            btab.add_row(k, str(p.get(k)))
+        console.print(btab)
 
 
 async def _factor(symbol, exchange, name, expr, window, years) -> None:
@@ -276,6 +310,39 @@ async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_li
     console.print(res)
     if mode == "live":
         console.print(f"[green]已切换至实盘路线（{gateway} 网关桩），委托已路由[/green]")
+
+
+async def _wf(symbol, exchange, strategy, years, train_window, test_window, step, cost) -> None:
+    from .backtest import walk_forward
+    bars = await _fetch(symbol, exchange, years)
+    if not bars:
+        console.print("[red]无数据[/red]"); return
+    if len(bars) < train_window + test_window:
+        console.print(f"[red]样本不足：需 ≥ {train_window + test_window} 根，仅 {len(bars)}[/red]"); return
+    vt = f"{symbol}.{exchange.upper()}"
+    sizes = {vt: default_size(vt)}
+    strat_class = {"multifactor": MultiFactorStrategy, "dual_ma": DualMaStrategy,
+                   "vol_target": VolTargetStrategy, "pair": PairTradingStrategy}.get(strategy, MultiFactorStrategy)
+    setting = {"size": sizes[vt], "max_pos": 1.0}
+    res = walk_forward(bars, strat_class, setting, vt,
+                       train_window=train_window, test_window=test_window, step=step,
+                       sizes=sizes, cost=cost)
+    agg = res.aggregate
+    console.print(f"[bold]Walk-forward 验证 ({strategy})[/bold]"
+                  + (" [cyan]含真实成本模型[/cyan]" if cost else ""))
+    console.print(f"折数={agg['n_folds']}  训练窗={agg['train_window']}  测试窗={agg['test_window']}  步长={agg['step']}")
+    console.print(f"样本外均值 Sharpe={agg['mean_sharpe']}  收益={agg['mean_total_return']}  "
+                  f"收益波动={agg['std_total_return']}  盈利折占比={agg['positive_rate']}")
+    table = Table(title="各折样本外绩效")
+    table.add_column("折"); table.add_column("区间"); table.add_column("Sharpe"); table.add_column("收益")
+    for f in res.folds:
+        d = f.to_dict()
+        table.add_row(str(d["fold"]), f"{d['start'][:10]}~{d['end'][:10]}",
+                      str(d["sharpe"]), str(d["total_return"]))
+    console.print(table)
+    flag = "[red]⚠ 疑似过拟合[/red]" if res.overfit_suspected else "[green]样本外稳定[/green]"
+    console.print(f"过拟合判定：{flag}  （全样本 Sharpe={res.detail.get('train_sharpe')}, "
+                  f"样本外均值 Sharpe={res.detail.get('test_sharpe')}）")
 
 
 async def _research(idea, asset_class) -> None:

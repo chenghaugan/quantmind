@@ -51,11 +51,13 @@ def _delta(s: pd.Series, d: int) -> pd.Series:
 
 
 def _corr(a: pd.Series, b: pd.Series, d: int) -> pd.Series:
-    return a.rolling(d, min_periods=max(2, d // 2)).corr(b)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return a.rolling(d, min_periods=max(2, d // 2)).corr(b)
 
 
 def _cov(a: pd.Series, b: pd.Series, d: int) -> pd.Series:
-    return a.rolling(d, min_periods=max(2, d // 2)).cov(b)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return a.rolling(d, min_periods=max(2, d // 2)).cov(b)
 
 
 def _ts_min(s: pd.Series, d: int) -> pd.Series:

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import random
 from datetime import datetime, timedelta
 from typing import List
@@ -13,6 +14,12 @@ from typing import List
 from .base import BaseDataFeed, HistoryRequest
 from ...core.constant import Interval
 from ...core.object import BarData
+
+
+def _stable_seed(symbol: str, exchange: str) -> int:
+    """稳定的整数种子（不依赖 Python 进程盐化的 hash()，保证跨进程可复现）。"""
+    h = hashlib.md5(f"{symbol}.{exchange}".encode("utf-8")).hexdigest()
+    return int(h, 16) % (2 ** 31)
 
 
 class MockFeed(BaseDataFeed):
@@ -23,8 +30,9 @@ class MockFeed(BaseDataFeed):
         start = req.start or (end - timedelta(days=30))
         days = max(1, (end - start).days)
         bars: List[BarData] = []
-        price = 100.0 + hash((req.symbol, req.exchange.value)) % 50
-        random.seed(hash((req.symbol, req.exchange.value)))
+        seed = _stable_seed(req.symbol, req.exchange.value)
+        price = 100.0 + seed % 50
+        random.seed(seed)
         for i in range(days):
             dt = start + timedelta(days=i)
             drift = random.uniform(-2, 2)

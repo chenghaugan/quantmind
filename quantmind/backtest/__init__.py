@@ -10,6 +10,7 @@ from .optimizer import grid_search, optuna_optimize, OptimizeResult
 from .diagnostics import (
     limit_day_mask, detect_lookahead, diagnose_overfitting, health_checks, HealthReport,
 )
+from .walkforward import walk_forward, WalkForwardResult, WalkForwardFold
 
 __all__ = [
     "BacktestEngine",
@@ -32,4 +33,7 @@ __all__ = [
     "diagnose_overfitting",
     "health_checks",
     "HealthReport",
+    "walk_forward",
+    "WalkForwardResult",
+    "WalkForwardFold",
 ]
