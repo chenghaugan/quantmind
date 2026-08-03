@@ -12,20 +12,11 @@ import logging
 from datetime import datetime
 from typing import List
 
-from .base import BaseDataFeed, HistoryRequest
+from .base import BaseDataFeed, HistoryRequest, resolve_ohlc_columns
 from ...core.constant import Exchange, Interval
 from ...core.object import BarData
 
 _logger = logging.getLogger("quantmind.data.akshare_future")
-
-# 各交易所对应的具体合约日线函数
-_DAILY_BY_EXCHANGE = {
-    Exchange.SHFE: "futures_daily_shfe",
-    Exchange.DCE: "futures_daily_dce",
-    Exchange.CZCE: "futures_daily_czce",
-    Exchange.INE: "futures_daily_ine",
-    Exchange.CFFEX: "futures_daily_cffex",
-}
 
 
 def _parse_dt(value) -> datetime:
@@ -47,16 +38,10 @@ class AkShareFuturesFeed(BaseDataFeed):
         import akshare as ak
 
         symbol = req.symbol
-        # 主连/指数约定：symbol 以 '0' 结尾（如 rb0 / IF0）走 Sina 主连接口
-        is_main = symbol.endswith("0")
         if req.interval == Interval.DAILY:
-            if is_main:
-                df = await asyncio.to_thread(ak.futures_zh_daily_sina, symbol=symbol)
-            else:
-                func = _DAILY_BY_EXCHANGE.get(req.exchange)
-                if func is None:
-                    raise ValueError(f"不支持的期货交易所: {req.exchange}")
-                df = await asyncio.to_thread(getattr(ak, func), symbol=symbol)
+            # AKShare 1.18 起 futures_daily_<exchange> 系列已移除；
+            # futures_zh_daily_sina 对主连（rb0/IF0）与具体合约（rb2401）均可用，统一走它。
+            df = await asyncio.to_thread(ak.futures_zh_daily_sina, symbol=symbol)
         else:
             df = await asyncio.to_thread(
                 ak.futures_zh_minute_sina, symbol=symbol, period=req.interval.value.replace("m", "")
@@ -69,15 +54,17 @@ class AkShareFuturesFeed(BaseDataFeed):
         bars: List[BarData] = []
         if df is None or len(df) == 0:
             return bars
-        cols = {c.lower(): c for c in df.columns}
-        date_col = cols.get("date") or cols.get("datetime") or cols.get("trade_date")
+        cols = resolve_ohlc_columns(df)
+        date_col = cols.get("date")
         o = cols.get("open")
         h = cols.get("high")
         l = cols.get("low")
         c = cols.get("close")
         v = cols.get("volume")
-        oi = cols.get("open_interest") or cols.get("hold")
-        to = cols.get("turnover") or cols.get("amount")
+        oi = cols.get("open_interest")
+        to = cols.get("turnover")
+        if not (date_col and o and h and l and c):
+            raise ValueError(f"期货数据缺少关键列，实际列名={list(df.columns)}")
         for _, row in df.iterrows():
             bars.append(
                 BarData(

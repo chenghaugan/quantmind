@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 from typing import List
 
-from .base import BaseDataFeed, HistoryRequest
+from .base import BaseDataFeed, HistoryRequest, resolve_ohlc_columns
 from ...core.constant import Exchange, Interval
 from ...core.object import BarData
 
@@ -69,13 +69,16 @@ class EmHkFeed(BaseDataFeed):
         bars: List[BarData] = []
         if df is None or len(df) == 0:
             return bars
-        cols = {c.lower(): c for c in df.columns}
-        date_col = cols.get("date") or cols.get("datetime") or cols.get("trade_date")
-        o = cols.get("open") or cols.get("开盘")
-        h = cols.get("high") or cols.get("最高")
-        l = cols.get("low") or cols.get("最低")
-        c = cols.get("close") or cols.get("收盘")
-        v = cols.get("volume") or cols.get("成交量")
+        cols = resolve_ohlc_columns(df)
+        date_col = cols.get("date")
+        o = cols.get("open")
+        h = cols.get("high")
+        l = cols.get("low")
+        c = cols.get("close")
+        v = cols.get("volume")
+        to = cols.get("turnover")
+        if not (date_col and o and h and l and c):
+            raise ValueError(f"港股数据缺少关键列，实际列名={list(df.columns)}")
         for _, row in df.iterrows():
             bars.append(
                 BarData(
@@ -88,6 +91,7 @@ class EmHkFeed(BaseDataFeed):
                     low_price=float(row[l]),
                     close_price=float(row[c]),
                     volume=float(row[v]) if v else 0.0,
+                    turnover=float(row[to]) if to else 0.0,
                 )
             )
         return bars

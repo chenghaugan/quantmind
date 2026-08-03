@@ -63,3 +63,33 @@ class BaseDataFeed(ABC):
             open_interest=oi,
             turnover=turnover,
         )
+
+
+# 中英文列名别名 -> 规范字段名。AKShare 不同接口（stock_zh_a_hist / option_*/futures_*）
+# 返回中文或英文列头，统一在此映射，避免 _df_to_bars 按固定英文列名取数导致 KeyError。
+_OHLC_ALIASES = {
+    "date": ["date", "datetime", "trade_date", "日期", "时间"],
+    "open": ["open", "开盘", "开盘价"],
+    "high": ["high", "最高", "最高价"],
+    "low": ["low", "最低", "最低价"],
+    "close": ["close", "收盘", "收盘价"],
+    "volume": ["volume", "成交量", "成交量_手"],
+    "turnover": ["turnover", "amount", "成交额", "成交金额"],
+    "open_interest": ["open_interest", "hold", "持仓量", "持仓"],
+}
+
+
+def resolve_ohlc_columns(df) -> Dict[str, str]:
+    """把 DataFrame 的列解析为规范字段名 -> 实际列名。
+
+    大小写不敏感，兼容中文（如 ``日期``）与英文（如 ``date``）两种表头。
+    缺失的字段不会出现在返回 dict 中（调用方据此给默认值）。
+    """
+    lower = {c.lower(): c for c in df.columns}
+    out: Dict[str, str] = {}
+    for canon, aliases in _OHLC_ALIASES.items():
+        for alias in aliases:
+            if alias in lower:
+                out[canon] = lower[alias]
+                break
+    return out
