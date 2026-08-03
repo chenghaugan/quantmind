@@ -84,7 +84,7 @@ class Alpha191Factor(Factor):
         df = bars_to_df(bars)
         if df.empty:
             return pd.Series(dtype=float)
-        return _ALPHA191_FUNCS[self._name](df).fillna(0.0)
+        return _ALPHA191_FUNCS[self._name](df).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def list_alpha191() -> List[str]:

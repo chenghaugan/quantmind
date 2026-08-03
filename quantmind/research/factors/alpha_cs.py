@@ -22,7 +22,7 @@ import pandas as pd
 from ...core.object import BarData
 from .base import bars_to_df
 from .wq import (
-    _rank_cs, _delay, _delta, _corr, _cov, _ts_min, _ts_max, _ts_arg_max,
+    _rank_cs, _delay, _delta, _corr, _cov, _ts_min, _ts_max, _ts_arg_max, _ts_rank,
     _signed_power, _scale, _decay_linear, _slope, _sma, _std, _sum,
 )
 
@@ -232,6 +232,68 @@ def a101(P):  # -rank(cov(rank(close), rank(volume), 10))
     return -_rank_cs(_cov(_rank_cs(P.close), _rank_cs(P.volume), 10))
 
 
+# ----------------------------- 补充高价值经典 Alpha（截面面板版，显式真实公式） -----------------------------
+def a001(P):  # rank(Ts_ArgMax(SignedPower(((ret<0)?std(ret,20):close), 2), 5)) - 0.5
+    ret = P.close.pct_change()
+    std_ret = _std(ret, 20)
+    base = pd.DataFrame(np.where(ret < 0, std_ret.values, P.close.values),
+                        index=P.close.index, columns=P.close.columns)
+    sp = np.sign(base) * (np.abs(base) ** 2.0)
+    return _rank_cs(_ts_arg_max(sp, 5)) - 0.5
+
+
+def a004(P):  # -Ts_Rank(rank(low), 9)
+    return -_ts_rank(_rank_cs(P.low), 9)
+
+
+def a005(P):  # rank(open - sma(vwap,10)) * (-1 * abs(rank(close - vwap)))
+    vwap = _vwap(P)
+    r1 = _rank_cs(P.open - _sma(vwap, 10))
+    r2 = _rank_cs(P.close - vwap).abs()
+    return r1 * (-1.0 * r2)
+
+
+def a007(P):  # (rank(max(open-close,0))+rank(max(low-close,0))+rank(min(open-close,0))+rank(min(high-close,0)))^2
+    oc = P.open - P.close
+    lc = P.low - P.close
+    hc = P.high - P.close
+    r = (_rank_cs(oc.clip(lower=0)) + _rank_cs(lc.clip(lower=0))
+         + _rank_cs(oc.clip(upper=0)) + _rank_cs(hc.clip(upper=0)))
+    return r * r
+
+
+def a008(P):  # -rank((sum(open,5)*sum(ret,5)) - delay(., 10))
+    prod = _sum(P.open, 5) * _sum(_ret(P), 5)
+    return -_rank_cs(prod - prod.shift(10))
+
+
+def a011(P):  # (rank(TsMax(vwap-close,3)) + rank(TsMin(vwap-close,3))) * rank(Δvolume 3)
+    vwap = _vwap(P)
+    diff = vwap - P.close
+    return (_rank_cs(_ts_max(diff, 3)) + _rank_cs(_ts_min(diff, 3))) * _rank_cs(_delta(P.volume, 3))
+
+
+def a028(P):  # scale((((close-low)-(high-close))/(high-low)))  价格位置
+    hl = (P.high - P.low).replace(0, np.nan)
+    inner = ((P.close - P.low) - (P.high - P.close)) / hl
+    inner = inner.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return _scale(inner)
+
+
+def a053(P):  # -delta(价格位置, 9)
+    hl = (P.high - P.low).replace(0, np.nan)
+    inner = ((P.close - P.low) - (P.high - P.close)) / hl
+    inner = inner.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return -_delta(inner, 9)
+
+
+def a055(P):  # -corr(rank(价格位置), rank(volume), 5)
+    hl = (P.high - P.low).replace(0, np.nan)
+    inner = ((P.close - P.low) - (P.high - P.close)) / hl
+    inner = inner.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return -_corr(_rank_cs(inner), _rank_cs(P.volume), 5)
+
+
 # ----------------------------- Alpha191 面板公式 -----------------------------
 def a191_007(P):  # 收盘价的滚动回归斜率（趋势强度）
     return _slope(P.close, 10)
@@ -274,14 +336,16 @@ def a191_099(P):  # rank(TsMax(close,10)-close) 反转信号
 
 
 _ALPHA_CS_FUNCS: Dict[str, Callable[[Panel], pd.DataFrame]] = {
-    "alpha002": a002, "alpha003": a003, "alpha006": a006, "alpha012": a012,
-    "alpha013": a013, "alpha014": a014, "alpha015": a015, "alpha016": a016,
-    "alpha017": a017, "alpha018": a018, "alpha019": a019, "alpha020": a020,
-    "alpha021": a021, "alpha022": a022, "alpha024": a024, "alpha026": a026,
-    "alpha033": a033, "alpha037": a037, "alpha038": a038, "alpha040": a040,
-    "alpha049": a049, "alpha051": a051, "alpha054": a054, "alpha060": a060,
-    "alpha062": a062, "alpha071": a071, "alpha075": a075, "alpha083": a083,
-    "alpha093": a093, "alpha099": a099, "alpha101": a101,
+    "alpha001": a001, "alpha002": a002, "alpha003": a003, "alpha004": a004,
+    "alpha005": a005, "alpha006": a006, "alpha007": a007, "alpha008": a008,
+    "alpha011": a011, "alpha012": a012, "alpha013": a013, "alpha014": a014,
+    "alpha015": a015, "alpha016": a016, "alpha017": a017, "alpha018": a018,
+    "alpha019": a019, "alpha020": a020, "alpha021": a021, "alpha022": a022,
+    "alpha024": a024, "alpha026": a026, "alpha028": a028, "alpha033": a033,
+    "alpha037": a037, "alpha038": a038, "alpha040": a040, "alpha049": a049,
+    "alpha051": a051, "alpha053": a053, "alpha054": a054, "alpha055": a055,
+    "alpha060": a060, "alpha062": a062, "alpha071": a071, "alpha075": a075,
+    "alpha083": a083, "alpha093": a093, "alpha099": a099, "alpha101": a101,
     "alpha191_007": a191_007, "alpha191_012": a191_012, "alpha191_019": a191_019,
     "alpha191_042": a191_042, "alpha191_056": a191_056, "alpha191_065": a191_065,
     "alpha191_081": a191_081, "alpha191_009": a191_009, "alpha191_038": a191_038,
@@ -304,5 +368,5 @@ def compute_alpha_cross_sectional(
     for name in names:
         if name not in _ALPHA_CS_FUNCS:
             raise KeyError(f"未知截面 Alpha 因子: {name}")
-        out[name] = _ALPHA_CS_FUNCS[name](panel).fillna(0.0)
+        out[name] = _ALPHA_CS_FUNCS[name](panel).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return out

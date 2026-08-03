@@ -14,8 +14,8 @@ import pandas as pd
 from ...core.object import BarData
 from .base import Factor, FactorMeta, bars_to_df
 from .wq import (
-    _rank, _delay, _delta, _corr, _cov, _ts_min, _ts_max, _ts_arg_max,
-    _signed_power, _scale, _decay_linear, _slope, _sma, _std, _sum,
+    _rank, _delay, _delta, _corr, _cov, _ts_min, _ts_max, _ts_arg_max, _ts_rank,
+    _signed_power, _scale, _decay_linear, _slope, _sma, _std, _sum, _vwap,
 )
 
 
@@ -165,15 +165,78 @@ def a101(df):  # -rank(cov(rank(close), rank(volume), 10))
     return -_rank(_cov(_rank(df["close"]), _rank(df["volume"]), 10))
 
 
+# ----------------------------- 补充高价值经典 Alpha（显式真实公式） -----------------------------
+def a001(df):  # rank(Ts_ArgMax(SignedPower(((ret<0)?std(ret,20):close), 2), 5)) - 0.5
+    ret = df["close"].pct_change()
+    std_ret = _std(ret, 20)
+    base = np.where(ret < 0, std_ret.values, df["close"].values)
+    sp = _signed_power(pd.Series(base, index=df.index), 2.0)
+    return _rank(_ts_arg_max(sp, 5)) - 0.5
+
+
+def a004(df):  # -Ts_Rank(rank(low), 9)
+    return -_ts_rank(_rank(df["low"]), 9)
+
+
+def a005(df):  # rank(open - sma(vwap,10)) * (-1 * abs(rank(close - vwap)))
+    vwap = _vwap(df)
+    r1 = _rank(df["open"] - _sma(vwap, 10))
+    r2 = _rank(df["close"] - vwap).abs()
+    return r1 * (-1.0 * r2)
+
+
+def a007(df):  # (rank(max(open-close,0))+rank(max(low-close,0))+rank(min(open-close,0))+rank(min(high-close,0)))^2
+    oc = df["open"] - df["close"]
+    lc = df["low"] - df["close"]
+    hc = df["high"] - df["close"]
+    r = (_rank(oc.clip(lower=0)) + _rank(lc.clip(lower=0))
+         + _rank(oc.clip(upper=0)) + _rank(hc.clip(upper=0)))
+    return r * r
+
+
+def a008(df):  # -rank((sum(open,5)*sum(ret,5)) - delay(., 10))
+    prod = _sum(df["open"], 5) * _sum(_ret(df), 5)
+    return -_rank(prod - prod.shift(10))
+
+
+def a011(df):  # (rank(TsMax(vwap-close,3)) + rank(TsMin(vwap-close,3))) * rank(Δvolume 3)
+    vwap = _vwap(df)
+    diff = vwap - df["close"]
+    return (_rank(_ts_max(diff, 3)) + _rank(_ts_min(diff, 3))) * _rank(_delta(df["volume"], 3))
+
+
+def a028(df):  # scale((((close-low)-(high-close))/(high-low)))  价格位置
+    hl = (df["high"] - df["low"]).replace(0, np.nan)
+    inner = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / hl
+    inner = inner.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return _scale(inner)
+
+
+def a053(df):  # -delta(价格位置, 9)
+    hl = (df["high"] - df["low"]).replace(0, np.nan)
+    inner = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / hl
+    inner = inner.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return -_delta(inner, 9)
+
+
+def a055(df):  # -corr(rank(价格位置), rank(volume), 5)
+    hl = (df["high"] - df["low"]).replace(0, np.nan)
+    inner = ((df["close"] - df["low"]) - (df["high"] - df["close"])) / hl
+    inner = inner.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return -_corr(_rank(inner), _rank(df["volume"]), 5)
+
+
 _ALPHA_FUNCS: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {
-    "alpha002": a002, "alpha003": a003, "alpha006": a006, "alpha012": a012,
-    "alpha013": a013, "alpha014": a014, "alpha015": a015, "alpha016": a016,
-    "alpha017": a017, "alpha018": a018, "alpha019": a019, "alpha020": a020,
-    "alpha021": a021, "alpha022": a022, "alpha024": a024, "alpha026": a026,
-    "alpha033": a033, "alpha037": a037, "alpha038": a038, "alpha040": a040,
-    "alpha049": a049, "alpha051": a051, "alpha054": a054, "alpha060": a060,
-    "alpha062": a062, "alpha071": a071, "alpha075": a075, "alpha083": a083,
-    "alpha093": a093, "alpha099": a099, "alpha101": a101,
+    "alpha001": a001, "alpha002": a002, "alpha003": a003, "alpha004": a004,
+    "alpha005": a005, "alpha006": a006, "alpha007": a007, "alpha008": a008,
+    "alpha011": a011, "alpha012": a012, "alpha013": a013, "alpha014": a014,
+    "alpha015": a015, "alpha016": a016, "alpha017": a017, "alpha018": a018,
+    "alpha019": a019, "alpha020": a020, "alpha021": a021, "alpha022": a022,
+    "alpha024": a024, "alpha026": a026, "alpha028": a028, "alpha033": a033,
+    "alpha037": a037, "alpha038": a038, "alpha040": a040, "alpha049": a049,
+    "alpha051": a051, "alpha053": a053, "alpha054": a054, "alpha055": a055,
+    "alpha060": a060, "alpha062": a062, "alpha071": a071, "alpha075": a075,
+    "alpha083": a083, "alpha093": a093, "alpha099": a099, "alpha101": a101,
 }
 
 
@@ -192,7 +255,7 @@ class AlphaFactor(Factor):
         df = bars_to_df(bars)
         if df.empty:
             return pd.Series(dtype=float)
-        return _ALPHA_FUNCS[self._name](df).fillna(0.0)
+        return _ALPHA_FUNCS[self._name](df).replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def list_alpha101() -> List[str]:
