@@ -136,3 +136,84 @@ def _std(s: pd.Series, d: int) -> pd.Series:
 
 def _sum(s: pd.Series, d: int) -> pd.Series:
     return s.rolling(d, min_periods=1).sum()
+
+
+def _ts_arg_min(s: pd.Series, d: int) -> pd.Series:
+    """距窗口内最小值的周期数（d-1 - argmin）。"""
+    def f(x: np.ndarray) -> float:
+        return d - 1 - int(np.argmin(x))
+    return s.rolling(d, min_periods=1).apply(f, raw=True)
+
+
+def _ts_product(s: pd.Series, d: int) -> pd.Series:
+    """滚动窗口内乘积（Alpha191 Product 用）。"""
+    return s.rolling(d, min_periods=1).apply(lambda x: float(np.prod(x)), raw=True)
+
+
+def _ts_zscore(s: pd.Series, d: int) -> pd.Series:
+    """滚动 z-score（均值/标准差标准化）。"""
+    m = s.rolling(d, min_periods=1).mean()
+    sd = s.rolling(d, min_periods=1).std().replace(0, np.nan)
+    return (s - m) / sd
+
+
+def _ts_median(s: pd.Series, d: int) -> pd.Series:
+    """滚动窗口中位数（Alpha191 Med 用）。"""
+    return s.rolling(d, min_periods=1).median()
+
+
+def _reg_resi(y: pd.Series, x: pd.Series, d: int) -> pd.Series:
+    """滚动窗口 OLS 残差（Alpha191 RegResi）：以窗口内 x 对 y 回归，取末点残差。"""
+
+    def f(win: np.ndarray) -> float:
+        ys = win[:, 0]
+        xs = win[:, 1]
+        n = len(xs)
+        if n < 2:
+            return 0.0
+        xc = xs - xs.mean()
+        denom = float((xc ** 2).sum())
+        if denom == 0:
+            return 0.0
+        beta = float((xc * (ys - ys.mean())).sum() / denom)
+        alpha = float(ys.mean() - beta * xs.mean())
+        return float(ys[-1] - (beta * xs[-1] + alpha))
+
+    df = pd.concat([y, x], axis=1)
+    return df.rolling(d, min_periods=max(2, d // 2)).apply(f, raw=True)
+
+
+def _reg_beta(y: pd.Series, x: pd.Series, d: int) -> pd.Series:
+    """滚动窗口 OLS 斜率（Alpha191 RegBeta）：以窗口内 x 对 y 回归的 beta。"""
+
+    def f(win: np.ndarray) -> float:
+        ys = win[:, 0]
+        xs = win[:, 1]
+        n = len(xs)
+        if n < 2:
+            return 0.0
+        xc = xs - xs.mean()
+        denom = float((xc ** 2).sum())
+        if denom == 0:
+            return 0.0
+        return float((xc * (ys - ys.mean())).sum() / denom)
+
+    df = pd.concat([y, x], axis=1)
+    return df.rolling(d, min_periods=max(2, d // 2)).apply(f, raw=True)
+
+
+# ----------------------------- 金额/均价辅助（turnover=成交额） -----------------------------
+def _vwap(df: pd.DataFrame) -> pd.Series:
+    """成交量加权均价：成交额 / 成交量；成交额缺失或为零时退化为 (H+L+C)/3 典型价。"""
+    amt = df["turnover"].replace(0, np.nan) if "turnover" in df else np.nan
+    v = df["volume"].replace(0, np.nan)
+    out = (amt / v)
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    return out.fillna(typical)
+
+
+def _adv(df: pd.DataFrame, d: int) -> pd.Series:
+    """平均日成交额（滚动 d 日均值），用于 Alpha 公式中 advN。"""
+    if "turnover" in df:
+        return df["turnover"].rolling(d, min_periods=1).mean()
+    return (df["close"] * df["volume"]).rolling(d, min_periods=1).mean()

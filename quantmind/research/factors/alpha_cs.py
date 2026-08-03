@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List
 
 import numpy as np
@@ -36,11 +36,12 @@ class Panel:
     high: pd.DataFrame
     low: pd.DataFrame
     volume: pd.DataFrame
+    amount: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @classmethod
     def from_bars(cls, bars_by_symbol: Dict[str, List[BarData]]) -> "Panel":
         """由 ``{symbol: List[BarData]}`` 构建对齐面板（取所有标的日期交集）。"""
-        fields = ["open", "high", "low", "close", "volume"]
+        fields = ["open", "high", "low", "close", "volume", "turnover"]
         per_sym: Dict[str, pd.DataFrame] = {}
         for sym, bars in bars_by_symbol.items():
             df = bars_to_df(bars)
@@ -49,7 +50,7 @@ class Panel:
             per_sym[sym] = df.set_index("datetime")[fields]
         if not per_sym:
             empty = pd.DataFrame()
-            return cls(empty, empty, empty, empty, empty)
+            return cls(empty, empty, empty, empty, empty, empty)
         # 以 close 的共同日期为对齐基准
         close = pd.DataFrame({s: d["close"] for s, d in per_sym.items()}).dropna(how="all")
         idx = close.index
@@ -58,7 +59,8 @@ class Panel:
         high = pd.DataFrame({s: per_sym[s]["high"] for s in cols}).reindex(idx)
         low = pd.DataFrame({s: per_sym[s]["low"] for s in cols}).reindex(idx)
         volume = pd.DataFrame({s: per_sym[s]["volume"] for s in cols}).reindex(idx)
-        return cls(close=close, open=open_, high=high, low=low, volume=volume)
+        amount = pd.DataFrame({s: per_sym[s]["turnover"] for s in cols}).reindex(idx)
+        return cls(close=close, open=open_, high=high, low=low, volume=volume, amount=amount)
 
     @property
     def symbols(self) -> List[str]:
@@ -72,6 +74,23 @@ class Panel:
 # ----------------------------- 面板辅助 -----------------------------
 def _ret(P: Panel) -> pd.DataFrame:
     return P.close.pct_change()
+
+
+def _vwap(P: Panel) -> pd.DataFrame:
+    """面板成交量加权均价：amount / volume；amount 缺失/为空时退化为 (H+L+C)/3。"""
+    typical = (P.high + P.low + P.close) / 3.0
+    if P.amount is None or P.amount.empty:
+        return typical
+    v = P.volume.replace(0, np.nan)
+    out = P.amount / v
+    return out.fillna(typical)
+
+
+def _adv(P: Panel, n: int) -> pd.DataFrame:
+    """面板平均日成交额（滚动 n 日均值）；amount 缺失/为空时退化为 volume 近似。"""
+    if P.amount is None or P.amount.empty:
+        return P.volume
+    return P.amount.rolling(n, min_periods=1).mean()
 
 
 # ----------------------------- Alpha101 面板公式 -----------------------------
