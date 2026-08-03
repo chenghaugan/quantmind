@@ -54,6 +54,7 @@ class PaperEngine:
         commission: float = 0.0002,
         slippage: float = 0.0,
         sizes: Optional[Dict[str, float]] = None,
+        risk_engine=None,
     ) -> None:
         self.event_engine = event_engine
         self.capital = capital
@@ -61,6 +62,11 @@ class PaperEngine:
         self.commission = commission
         self.slippage = slippage
         self.sizes = sizes or {}
+        # 风控引擎（可选）。模拟盘默认不启用，以免历史回放被交易时段闸门拦下；
+        # 做「实盘前演练」时应显式传入与实盘同一份 RiskLimits，验证限额是否合理。
+        self.risk = risk_engine
+        self.risk_rejected: List[dict] = []
+        self.equity: float = capital
         self.positions: Dict[str, PositionData] = {}
         self.pending: List[dict] = []
         self.trades: List[TradeData] = []
@@ -83,6 +89,19 @@ class PaperEngine:
 
     # ---- StrategyContext 接口（供 PaperContext 委托） ----
     def send_order(self, req: OrderRequest) -> str:
+        vt_symbol = f"{req.symbol}.{req.exchange.value}"
+        if self.risk is not None:
+            decision = self.risk.check_order(
+                req,
+                position=self.get_position(vt_symbol),
+                last_price=self._last_price(vt_symbol),
+                equity=self.equity,
+                now=self._current_date,
+            )
+            if not decision.passed:
+                self.risk_rejected.append(decision.to_dict())
+                _logger.warning("[PAPER] 风控拒单 %s: %s", decision.code.value, decision.reason)
+                return ""
         self._order_seq += 1
         order_id = f"PAPER-{self._order_seq}"
         fill_date = self._next_date.get(self._current_date)
@@ -160,6 +179,8 @@ class PaperEngine:
             price=px, volume=req.volume, datetime=bar.datetime,
         )
         self.trades.append(trade)
+        if self.risk is not None:
+            self.risk.on_trade(req.volume, bar.datetime)
         self._emit(EventType.EVENT_TRADE, trade)
         self._emit(EventType.EVENT_POSITION, self.get_position(vt))
 
@@ -211,15 +232,25 @@ class PaperEngine:
             bar = self._bar_at_or_after(vt, date)
             if bar is not None:
                 equity += pos.volume * (bar.close_price - pos.price) * size
+        self.equity = equity
+        if self.risk is not None:
+            self.risk.update_equity(equity, date)
         acct = AccountData(account_id="PAPER", balance=equity, available=equity)
         self._emit(EventType.EVENT_ACCOUNT, acct)
+
+    def _last_price(self, vt_symbol: str) -> float:
+        """当前日期该合约收盘价（供风控价格偏离/市值检查）。"""
+        if self._current_date is None:
+            return 0.0
+        bar = self._lookup.get(vt_symbol, {}).get(self._current_date)
+        return bar.close_price if bar is not None else 0.0
 
     def _emit(self, etype, data) -> None:
         if self.event_engine is not None:
             self.event_engine.put_event(etype, data)
 
     def summary(self) -> dict:
-        return {
+        out = {
             "mode": "paper",
             "cash": round(self.cash, 2),
             "positions": {
@@ -228,3 +259,9 @@ class PaperEngine:
             },
             "trade_count": len(self.trades),
         }
+        if self.risk is not None:
+            out["risk"] = {
+                "rejected": len(self.risk_rejected),
+                "state": self.risk.state.to_dict(),
+            }
+        return out

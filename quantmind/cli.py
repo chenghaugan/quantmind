@@ -177,6 +177,19 @@ def wf(
     asyncio.run(_wf(symbol, exchange, strategy, years, train_window, test_window, step, cost))
 
 
+@app.command()
+def risk(
+    profile: str = typer.Option("default", help="限额档：default | conservative | unlimited(仅测试)"),
+    symbol: str = typer.Option("rb2410", help="合约代码"),
+    exchange: str = typer.Option("SHFE"),
+    volume: float = typer.Option(5.0, help="示例委托手数"),
+    price: float = typer.Option(3500.0, help="示例委托价格（0=市价）"),
+    equity: float = typer.Option(1_000_000.0, help="账户权益（用于保证金/亏损熔断判断）"),
+) -> None:
+    """风控体检：打印限额档、当前交易时段，并对一笔示例委托做拒/放行试算。"""
+    asyncio.run(_risk_report(profile, symbol, exchange, volume, price, equity))
+
+
 # ---- 实现 ----
 async def _smoke() -> None:
     dm = _make_dm()
@@ -456,6 +469,75 @@ async def _e2e() -> None:
     await ee.stop()
     await dm.close()
     console.print(f"[bold green]事件总线共分发 {evt_count['n']} 个事件（驱动 Web 实时推送）[/bold green]")
+
+
+async def _risk_report(profile, symbol, exchange, volume, price, equity) -> None:
+    from datetime import datetime, timezone
+
+    from .core.constant import Direction, Exchange as Ex, Offset
+    from .core.gateway import OrderRequest
+    from .risk import RiskEngine, RiskLimits
+    from .risk.calendar import beijing_time, is_trading_time
+
+    UTC = timezone.utc
+    profile = (profile or "default").lower()
+    if profile == "conservative":
+        limits = RiskLimits.conservative()
+    elif profile == "unlimited":
+        limits = RiskLimits.unlimited()
+    else:
+        limits = RiskLimits()
+
+    engine = RiskEngine(limits, initial_equity=equity)
+    now = datetime.now(UTC)
+    bj = beijing_time(now)
+    vt = f"{symbol}.{exchange.upper()}"
+
+    console.print("[bold cyan]==== 风控体检 ====[/bold cyan]")
+    console.print(f"档位: [yellow]{profile}[/yellow]  合约: [yellow]{vt}[/yellow]  "
+                  f"权益: ¥{equity:,.0f}  示例委托: {volume}手 @ {price}")
+
+    # 限额档
+    ltab = Table(title="限额档")
+    ltab.add_column("项"); ltab.add_column("值")
+    d = limits.to_dict()
+    for k in ("max_order_volume", "max_position_volume", "max_margin_ratio",
+              "max_daily_loss_ratio", "max_drawdown_ratio", "max_orders_per_day",
+              "max_orders_per_minute", "check_trading_session", "allow_open",
+              "self_trade_guard", "forbidden_symbols", "allowed_symbols"):
+        ltab.add_row(k, str(d.get(k)))
+    console.print(ltab)
+
+    # 交易时段（实时）
+    trading = is_trading_time(now, symbol, exchange)
+    sess = engine.calendar.session_name(now, symbol, exchange)
+    console.print(f"[bold]当前交易时段[/bold]: 北京时间 {bj:%Y-%m-%d %H:%M:%S}  "
+                  f"交易日={engine.calendar.is_trading_day(bj.date())}  "
+                  f"交易中={trading}  时段={sess}  "
+                  f"今夜夜盘={engine.calendar.has_night_session(bj.date())}")
+
+    # 示例委托：开仓
+    open_req = OrderRequest(symbol=symbol, exchange=Ex(exchange.upper()),
+                            direction=Direction.LONG, offset=Offset.OPEN,
+                            volume=volume, price=price)
+    open_dec = engine.check_order(open_req, equity=equity, now=now)
+    _print_decision("开仓示例", open_dec)
+    if not open_dec.passed and open_dec.code.value == "NOT_TRADING_TIME":
+        console.print("[dim]提示：开仓被拒仅因当前非交易时段（时段闸门生效），并非配置错误。[/dim]")
+
+    # 示例委托：平仓（无持仓 → 演示「平仓超持仓」守卫）
+    close_req = OrderRequest(symbol=symbol, exchange=Ex(exchange.upper()),
+                             direction=Direction.SHORT, offset=Offset.CLOSE,
+                             volume=volume, price=price)
+    close_dec = engine.check_order(close_req, equity=equity, now=now)
+    _print_decision("平仓示例(无持仓)", close_dec)
+
+
+def _print_decision(label: str, decision) -> None:
+    if decision.passed:
+        console.print(f"[green]✓ {label} 放行[/green] ({decision.code.value})")
+    else:
+        console.print(f"[red]✗ {label} 拒单[/red] {decision.code.value}: {decision.reason}")
 
 
 if __name__ == "__main__":
