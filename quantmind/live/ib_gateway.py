@@ -1,9 +1,14 @@
-"""IB 网关桩（Interactive Brokers，港股 + 港股期权）。接口对齐 vnpy ``BaseGateway``。"""
+"""IB 网关桩（Interactive Brokers，港股 + 港股期权）。接口对齐 vnpy ``BaseGateway``。
+
+「半可用」增强：发单用 :func:`~quantmind.live.sim.simulate_one_trade` 产出真实
+OrderData/TradeData 回报，使实盘闭环可离线演练；接真实 IB 网关后由回调驱动。
+"""
 from __future__ import annotations
 
 import logging
 
 from ..core.gateway import BaseGateway, SubscribeRequest, OrderRequest, CancelRequest
+from .sim import simulate_one_trade
 
 _logger = logging.getLogger("quantmind.live.ib")
 
@@ -27,6 +32,9 @@ class IbGateway(BaseGateway):
         self._seq += 1
         oid = f"IB-{self._seq}"
         _logger.info("[IB] 发单 %s %s %.2f x%.0f", oid, req.direction.value, req.price, req.volume)
+        simulate_one_trade(self.event_engine, oid, req,
+                           price=req.price if req.price > 0 else 1.0,
+                           gateway_name=self.gateway_name)
         return oid
 
     def cancel_order(self, req: CancelRequest) -> None:

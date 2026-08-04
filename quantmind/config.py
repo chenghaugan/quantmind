@@ -13,7 +13,11 @@ class Settings(BaseSettings):
 
     db_url: str = "postgresql://qm:quantmind@timescaledb:5432/quantmind"
     redis_url: str = "redis://redis:6379/0"
-    llm_provider: str = "mock"
+    llm_provider: str = "mock"          # mock | openai（含 DeepSeek/通义/OpenRouter 等兼容实现）
+    llm_api_key: str = ""               # AI 模型 API Key
+    llm_base_url: str = ""              # AI 模型 Base URL（如 https://api.deepseek.com/v1）
+    llm_model: str = ""                 # 模型名称（如 deepseek-chat / gpt-4o-mini）
+    llm_temperature: float = 0.7        # 采样温度
     api_url: str = "http://api:8000"
     log_level: str = "INFO"
     local_data_root: str = ""  # 本地真实数据根目录（如 china-futures CSV 克隆路径）；非空时注册本地文件源（期货真实数据优先）

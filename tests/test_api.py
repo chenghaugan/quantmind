@@ -22,9 +22,16 @@ def test_health(client):
 def test_data_offline(client):
     r = client.get("/data", params={"symbol": "rb0", "exchange": "SHFE", "interval": "1d"})
     assert r.status_code == 200
-    bars = r.json()
+    body = r.json()
+    # 新分页结构: {"data": [...], "pagination": {...}}
+    assert "data" in body
+    assert "pagination" in body
+    bars = body["data"]
     assert len(bars) > 0
     assert "close" in bars[0]
+    # 验证分页字段
+    assert body["pagination"]["page"] == 1
+    assert body["pagination"]["total"] > 0
 
 
 def test_research(client):

@@ -80,7 +80,7 @@ def optuna_optimize(
         return grid_search(strategy_class, data, vt_symbol, grid, metric, sizes)
 
     def objective(trial):
-        setting = {k: trial.suggest_int(k, low, high, step)
+        setting = {k: trial.suggest_int(name=k, low=low, high=high, step=step)
                    for k, (low, high, step) in param_defs.items()}
         engine = BacktestEngine(data, sizes=sizes)
         engine.add_strategy(strategy_class, vt_symbol, setting)
@@ -92,5 +92,5 @@ def optuna_optimize(
     return OptimizeResult(
         best_setting=study.best_params,
         best_metric=round(study.best_value, 4),
-        results=[{"setting": dict(t), "value": round(t.value, 4)} for t in study.trials],
+        results=[{"setting": dict(t.params), "value": round(t.value, 4)} for t in study.trials],
     )

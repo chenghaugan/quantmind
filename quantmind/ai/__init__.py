@@ -14,6 +14,16 @@ from .idea_parser import ResearchSpec, parse_idea
 from .factor_gen import generate_factors
 from .codegen import generate_strategy_code
 from .sandbox import validate_code, compile_strategy, SandboxViolation
+from .safety import lookahead_warnings
+from .agent import (
+    Hypothesis,
+    HypothesisStatus,
+    ResearchLogEntry,
+    AutoResearchOutput,
+    AutoResearchAgent,
+    generate_explanation,
+    generate_fact_sheet,
+)
 from ..research.target import FactorSpec
 
 _logger = logging.getLogger("quantmind.ai")
@@ -70,4 +80,12 @@ __all__ = [
     "FactorSpec",
     "ResearchAgent",
     "ResearchOutput",
+    "lookahead_warnings",
+    "Hypothesis",
+    "HypothesisStatus",
+    "ResearchLogEntry",
+    "AutoResearchOutput",
+    "AutoResearchAgent",
+    "generate_explanation",
+    "generate_fact_sheet",
 ]

@@ -12,10 +12,25 @@
   - :mod:`quantmind.risk.limits`   —— 限额定义（单笔/单品种/组合/频率/时段）
   - :mod:`quantmind.risk.calendar` —— 交易日历与交易时段（含期货夜盘）
   - :mod:`quantmind.risk.engine`   —— 风控引擎 + 熔断开关（kill switch）
+  - :mod:`quantmind.risk.portfolio`—— 组合级风控（多策略暴露/集中度/相关性）
+  - :mod:`quantmind.risk.turbulence`- Turbulence 市场状态检测（马氏距离）
 """
 from .limits import RiskLimits, RiskCode, RiskDecision
 from .calendar import TradingCalendar, is_trading_time, is_trading_day
 from .engine import RiskEngine, RiskState
+from .portfolio import (
+    PortfolioRiskState,
+    PortfolioRiskEngine,
+    PortfolioLimits,
+    PositionBookEntry,
+    compute_strategy_correlation,
+)
+from .turbulence import (
+    Regime,
+    TurbulenceConfig,
+    TurbulenceDetector,
+    TurbulenceRiskAdapter,
+)
 
 __all__ = [
     "RiskLimits",
@@ -26,4 +41,13 @@ __all__ = [
     "is_trading_day",
     "RiskEngine",
     "RiskState",
+    "PortfolioRiskState",
+    "PortfolioRiskEngine",
+    "PortfolioLimits",
+    "PositionBookEntry",
+    "compute_strategy_correlation",
+    "Regime",
+    "TurbulenceConfig",
+    "TurbulenceDetector",
+    "TurbulenceRiskAdapter",
 ]

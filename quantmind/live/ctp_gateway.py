@@ -2,6 +2,11 @@
 
 MVP 阶段为 stub：实现 vnpy ``BaseGateway`` 接口，连接/发单仅打日志并模拟即时回执，
 填真实凭证或接 simnow/openctp 后即可启用实盘。平今/平昨由 ``OffsetConverter`` 处理。
+
+「半可用」增强：发单通过 :func:`~quantmind.live.sim.simulate_one_trade` 产出
+真实的 OrderData/TradeData 回报（而非仅打日志），使 ``LiveEngine``+``OrderManager``
++``reconcile`` 的完整闭环可在**离线**状态下演练；真正的 simnow/openctp 回执
+留待接入 provider 后由回调驱动。
 """
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ from typing import Dict
 from ..core.constant import Exchange
 from ..core.gateway import BaseGateway, SubscribeRequest, OrderRequest, CancelRequest
 from ..core.offset import OffsetConverter
+from .sim import simulate_one_trade
 
 _logger = logging.getLogger("quantmind.live.ctp")
 
@@ -38,12 +44,10 @@ class CtpGateway(BaseGateway):
         oid = f"CTP-{self._seq}"
         _logger.info("[CTP] 发单 %s %s %s %.2f x%.0f [%s]",
                      oid, req.direction.value, req.offset.value, req.price, req.volume, req.exchange.value)
-        # 桩：模拟交易所回执（实际应走 on_order / on_trade 回调）
-        from ..core.event import EventType
-        from ..core.object import OrderData, TradeData, Status
-        self.event_engine.put_event(EventType.EVENT_ORDER, OrderData(
-            symbol=req.symbol, exchange=req.exchange, order_id=oid, direction=req.direction,
-            offset=req.offset, price=req.price, volume=req.volume, status=Status.SUBMITTED))
+        # 半可用：模拟成交回报（离线演练用；接 simnow 后改为真实回调）
+        simulate_one_trade(self.event_engine, oid, req,
+                           price=req.price if req.price > 0 else 1.0,
+                           gateway_name=self.gateway_name)
         return oid
 
     def cancel_order(self, req: CancelRequest) -> None:

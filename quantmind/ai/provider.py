@@ -1,7 +1,8 @@
 """可插拔 LLM Provider（对应规划「LLM 可插拔 + Mock 默认」）。
 
-真实接入 Anthropic/DeepSeek/OpenAI 时填写 API key（.env 的 QM_LLM_PROVIDER/KEY），
-框架默认用 ``MockProvider`` 使全流程在无 key、无网络时也能跑通演示。
+真实接入 DeepSeek/OpenAI/通义/OpenRouter 等 OpenAI 兼容服务时填写 API key 与
+Base URL（环境变量 ``QM_LLM_*`` 或「设置」页）。框架默认用 ``MockProvider`` 使
+全流程在无 key、无网络时也能跑通演示。
 """
 from __future__ import annotations
 
@@ -10,6 +11,8 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from typing import List, Optional
+
+import httpx
 
 _logger = logging.getLogger("quantmind.ai.provider")
 
@@ -97,25 +100,53 @@ class MockProvider(LLMProvider):
 
 
 class _RealProvider(LLMProvider):
-    """真实 Provider 骨架（Anthropic/DeepSeek/OpenAI 通用）。
+    """真实 Provider：OpenAI 兼容 Chat Completions 协议。
 
-    通过 SDK 调用；未安装对应 SDK 时回退 Mock。配置从环境变量读取。
+    支持 DeepSeek（https://api.deepseek.com/v1）、OpenAI、通义千问、
+    OpenRouter 等所有兼容 ``/v1/chat/completions`` 的服务。纯 ``httpx``
+    实现，无额外 SDK 依赖。未配置 key 或网络失败时由调用方决定回退策略。
     """
 
-    def __init__(self, api_key: str, base_url: Optional[str] = None, model: str = "") -> None:
+    name = "openai"
+
+    def __init__(self, api_key: str, base_url: Optional[str] = None, model: str = "",
+                 temperature: float = 0.7, timeout: float = 60.0) -> None:
         self.api_key = api_key
-        self.base_url = base_url
-        self.model = model
+        self.base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self.model = model or "gpt-4o-mini"
+        self.temperature = temperature
+        self.timeout = timeout
 
     async def chat(self, system: str, user: str) -> str:
-        raise NotImplementedError("请安装对应 SDK 并在 ai/provider.py 实现 _RealProvider.chat")
+        url = f"{self.base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": user})
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        return data["choices"][0]["message"]["content"]
 
 
-def build_provider(name: str, api_key: str = "", **kwargs) -> LLMProvider:
-    """按名称构造 Provider。"""
+def build_provider(name: str = "mock", api_key: str = "", base_url: str = "",
+                   model: str = "", temperature: float = 0.7, **kwargs) -> LLMProvider:
+    """按名称与凭据构造 Provider。
+
+    - ``mock`` 或缺少 api_key 时返回离线 ``MockProvider``。
+    - 否则返回走 OpenAI 兼容协议的 ``_RealProvider``。
+    """
     name = (name or "mock").lower()
-    if name == "mock":
+    if name == "mock" or not api_key:
         return MockProvider()
-    # 真实 Provider：此处统一回退 Mock（避免强制依赖），并在日志提示
-    _logger.warning("未实现真实 Provider %s，回退 Mock", name)
-    return MockProvider()
+    return _RealProvider(api_key, base_url or None, model or "", temperature)
