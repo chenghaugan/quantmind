@@ -26,6 +26,8 @@ from ...research import (
     list_algos,
     dedup_expressions as _dedup_exprs,
     factor_expression_backtest as _expr_backtest,
+    run_pipeline as _run_pipeline,
+    PipelineConfig,
 )
 from ...research.factors.alpha_cs import Panel
 
@@ -297,3 +299,77 @@ class SearchService:
             ),
         )
         return _sanitize(out)
+
+    # -- 端到端因子挖掘流水线（挖掘→去冗余→逐因子OOS→复合组合） --------------
+    async def pipeline(
+        self,
+        seeds: List[str],
+        symbols: List[str],
+        exchange: str = "SHFE",
+        interval: str = "1d",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        algo: str = "co",
+        rounds: int = 3,
+        forward_periods: int = 1,
+        market: str = "",
+        dedup_threshold: float = 0.7,
+        min_abs_ic: float = 0.0,
+        train_frac: float = 0.6,
+        val_frac: float = 0.2,
+        run_composite: bool = True,
+        composite_scheme: str = "icir",
+        n_groups: int = 5,
+        long_short: bool = True,
+        cost_rate: float = 0.0,
+        max_candidates: int = 8,
+    ) -> dict:
+        """端到端因子挖掘流水线。
+
+        在标的面板上：每个 seed 用指定算法（co/ea/tot）迭代挖掘 → 相关性去冗余
+        → 防泄漏切分（train/val/test）→ 逐代表做 test 期 OOS 多空回测 →（可选）
+        用组合权重方案把代表合成为复合 alpha 并回测。
+        """
+        panel = await self._build_panel(symbols, exchange, interval, start, end)
+        seed_list = [s for s in (seeds or []) if s and s.strip()]
+        if not seed_list:
+            raise ValueError("至少需要 1 个 seed 表达式")
+        cfg = PipelineConfig(
+            seeds=seed_list,
+            algo=algo if algo in ("co", "ea", "tot") else "co",
+            rounds=rounds,
+            forward_periods=forward_periods,
+            train_frac=train_frac,
+            val_frac=val_frac,
+            market=market,
+            dedup_threshold=dedup_threshold,
+            min_abs_ic=min_abs_ic,
+            run_composite=run_composite,
+            composite_scheme=composite_scheme,
+            n_groups=n_groups,
+            long_short=long_short,
+            cost_rate=cost_rate,
+            max_candidates=max_candidates,
+            persist_pairs=False,
+        )
+        loop = asyncio.get_running_loop()
+        report = await loop.run_in_executor(
+            None, lambda: _run_pipeline(panel, config=cfg, provider=self.provider),
+        )
+
+        # 去掉不可 JSON 序列化的内存对象（复合面板 DataFrame）
+        composite = report.get("composite")
+        if isinstance(composite, dict):
+            composite.pop("composite", None)
+
+        out = {
+            "algo": report["config"]["algo"],
+            "n_symbols": len(panel.symbols),
+            "n_dates": len(panel.dates),
+            "date_range": [panel.dates[0].isoformat() if len(panel.dates) else None,
+                           panel.dates[-1].isoformat() if len(panel.dates) else None],
+            "summary": _sanitize(report["summary"]),
+            "steps": _sanitize(report["steps"]),
+            "composite": _sanitize(composite),
+        }
+        return out

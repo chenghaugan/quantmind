@@ -42,7 +42,7 @@ from .schemas import (
     OptimizeRequest, CrossSectionRequest, RiskCheckRequest,
     SeatFactorRequest, SeatFactorResult, DataDownloadRequest,
     ExprEvalRequest, ExprEvalBatchRequest, FactorSearchRequest,
-    FactorDedupRequest, ExpressionBacktestRequest,
+    FactorDedupRequest, ExpressionBacktestRequest, FactorPipelineRequest,
 )
 from .ws import manager
 from .services import (
@@ -433,6 +433,31 @@ async def expression_backtest(req: ExpressionBacktestRequest):
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:  # noqa: BLE001
         _logger.exception("表达式回测失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/factor/pipeline")
+async def factor_pipeline(req: FactorPipelineRequest):
+    """端到端因子挖掘流水线：挖掘 → 去冗余 → 逐因子OOS回测 → 复合组合。"""
+    service: SearchService = app.state.search_service
+    try:
+        th = max(0.0, min(1.0, req.dedup_threshold))
+        result = await service.pipeline(
+            req.seeds, req.symbols, req.exchange, req.interval,
+            req.start, req.end, algo=req.algo, rounds=req.rounds,
+            forward_periods=req.forward_periods, market=req.market,
+            dedup_threshold=th, min_abs_ic=req.min_abs_ic,
+            train_frac=req.train_frac, val_frac=req.val_frac,
+            run_composite=req.run_composite,
+            composite_scheme=req.composite_scheme,
+            n_groups=req.n_groups, long_short=req.long_short,
+            cost_rate=req.cost_rate, max_candidates=req.max_candidates,
+        )
+        return result
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("因子挖掘流水线失败")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

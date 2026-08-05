@@ -312,3 +312,32 @@ class ExpressionBacktestRequest(BaseModel):
     long_short: bool = True
     cost_rate: float = 0.0
 
+
+class FactorPipelineRequest(BaseModel):
+    """端到端因子挖掘流水线请求（挖掘 → 去冗余 → 逐因子OOS回测 → 复合组合）。"""
+
+    seeds: List[str] = ["delta(close, 5)", "ts_zscore(close, 20)", "rank(close, 10)"]
+    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    exchange: str = "SHFE"
+    interval: str = "1d"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    algo: str = "co"                        # co | ea | tot
+    rounds: int = 3                         # 每 seed 迭代深度
+    forward_periods: int = 1
+    market: str = ""
+    # 去冗余
+    dedup_threshold: float = 0.7            # 并簇相关阈值 [0,1]
+    min_abs_ic: float = 0.0                 # |rank_ic| 底线（低于视为噪声丢弃）
+    # 防泄漏切分
+    train_frac: float = 0.6
+    val_frac: float = 0.2
+    # 复合组合
+    run_composite: bool = True
+    composite_scheme: str = "icir"          # equal | icir | inv_var | min_var
+    # 回测
+    n_groups: int = 5
+    long_short: bool = True
+    cost_rate: float = 0.0
+    max_candidates: int = 8
+

@@ -86,3 +86,42 @@ def test_factor_search_lt2_symbols(client):
     })
     assert r.status_code == 400
     assert "error" in r.json() or "detail" in r.json()
+
+
+def test_factor_pipeline_ep(client):
+    """POST /factor/pipeline 返回端到端挖掘流水线报告（汇总/代表/复合）。"""
+    r = client.post("/factor/pipeline", json={
+        "seeds": ["delta(close,5)", "ts_zscore(close,20)", "rank(close,10)"],
+        "symbols": SYMBOLS,
+        "algo": "co",
+        "rounds": 1,
+        "forward_periods": 1,
+        "run_composite": True,
+        "composite_scheme": "icir",
+        "train_frac": 0.6,
+        "val_frac": 0.2,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["n_symbols"] >= 2
+    assert "summary" in body and "steps" in body
+    # 至少有一个候选/代表（搜索可能失败→退回 seed，但仍应有 steps）
+    assert body["summary"]["backtested_count"] >= 1
+    # 复合组合关键结构
+    assert body["composite"] is not None
+    assert "weights" in body["composite"]
+    assert "portfolio" in body["composite"]
+    # 每个 step 有表达式
+    for s in body["steps"]:
+        assert s["expression"]
+
+
+def test_factor_pipeline_lt2_symbols(client):
+    """少于 2 个标的 → 400。"""
+    r = client.post("/factor/pipeline", json={
+        "seeds": ["delta(close,5)"],
+        "symbols": ["rb0"],
+    })
+    assert r.status_code == 400
+    assert "error" in r.json() or "detail" in r.json()
+

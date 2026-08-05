@@ -283,6 +283,11 @@ class APIClient:
         """因子迭代搜索（POST /factor/search）。"""
         return APIClient.post("/factor/search", json=payload, timeout=timeout)
 
+    @staticmethod
+    def factor_pipeline(payload: Dict[str, Any], timeout: int = 900) -> Dict:
+        """端到端因子挖掘流水线（POST /factor/pipeline）：挖掘→去冗余→OOS回测→复合组合。"""
+        return APIClient.post("/factor/pipeline", json=payload, timeout=timeout)
+
     # ------------------------------------------------------------------
     # 席位因子（商品期货）
     # ------------------------------------------------------------------
