@@ -1,21 +1,87 @@
-"""因子迭代搜索的基础数据结构与离线变异器（对标 AlphaBench ``searcher/``）。
+"""因子迭代搜索的基础数据结构、离线变异器与算法抽象（对标 AlphaBench ``searcher/``）。
 
-本模块定义搜索运行的数据结构（``SearchStep`` / ``SearchResult``）与一条
+本模块定义搜索运行的数据结构（``SearchStep`` / ``SearchResult``）、一条
 **确定性变异器**（``mutate_expressions``）——在离线/无 LLM 时可作为
-``search_fn`` 的回落实现，产生可评估的新候选表达式，使 CoT 迭代链路在
-无网络时也能端到端跑通与测试。
+``search_fn`` 的回落实现，产生可评估的新候选表达式，使迭代链路在
+无网络时也能端到端跑通与测试；以及 ``BaseAlgo`` 算法抽象 + 注册表，
+供 CoT / EA / ToT 三种搜索范式遵循统一 ``run()`` 契约并可按名调用。
 """
 from __future__ import annotations
 
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional
 
 __all__ = [
     "SearchStep",
     "SearchResult",
     "mutate_expressions",
+    "BaseAlgo",
+    "register_algo",
+    "list_algos",
+    "create_algo",
 ]
+
+# 算法注册表：name -> 工厂（lambda **kw -> BaseAlgo）。
+_searcher_registry: Dict[str, Callable[..., "BaseAlgo"]] = {}
+
+
+def register_algo(name: str):
+    """装饰器：注册一个搜索算法类（子类 :class:`BaseAlgo`）。"""
+
+    def _wrap(cls):
+        _searcher_registry[name] = cls
+        return cls
+
+    return _wrap
+
+
+def list_algos() -> List[str]:
+    """列出已注册的搜索算法名（co/ea/tot）。"""
+    return sorted(_searcher_registry)
+
+
+def create_algo(name: str, **kwargs) -> "BaseAlgo":
+    """按名称构造搜索算法实例（失败抛 ``ValueError``）。"""
+    name = name.lower()
+    if name not in _searcher_registry:
+        raise ValueError(
+            f"未知搜索算法: {name}（可用: {list_algos()}）"
+        )
+    return _searcher_registry[name](**kwargs)
+
+
+# 各算法通用回调签名（与 CoT 一致，便于注入/测试/回落）
+EvalFn = Callable[[str], Awaitable[Dict[str, float]]]
+SearchFn = Callable[..., Awaitable[List[str]]]
+
+
+class BaseAlgo(ABC):
+    """搜索算法抽象基类。
+
+    所有算法遵循同一 ``run()`` 契约，返回 :class:`SearchResult`，使其可通过
+    :func:`create_algo` 按名互换（CoT → EA → ToT），从而在同一评估/面板/数据集
+    上做可复现的横向对比（对标 AlphaBench ``searcher/algo/``）。
+    """
+
+    name: str = "base"
+
+    def __init__(self, evaluate_fn: Optional[EvalFn] = None, **kwargs) -> None:
+        self.evaluate_fn = evaluate_fn
+
+    @abstractmethod
+    async def run(
+        self,
+        seed: str,
+        panel,
+        val_panel=None,
+        forward_periods: int = 1,
+        market: str = "",
+        instruction: str = "",
+        **kwargs,
+    ) -> SearchResult:
+        """执行一次基于 seed 的迭代搜索，返回 ``SearchResult``。"""
 
 
 @dataclass

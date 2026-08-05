@@ -22,6 +22,8 @@ from ...research import (
     batch_evaluate_expressions,
     FactorSearcher,
     SearchResult,
+    create_algo,
+    list_algos,
 )
 from ...research.factors.alpha_cs import Panel
 
@@ -143,7 +145,60 @@ class SearchService:
         )
         return [_sanitize(r.to_dict()) for r in reports]
 
-    # -- CoT 迭代搜索 ---------------------------------------------------------
+    # -- 迭代搜索（co / ea / tot） ---------------------------------------------
+    async def search(
+        self,
+        seed: str,
+        symbols: List[str],
+        exchange: str = "SHFE",
+        interval: str = "1d",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        algo: str = "co",
+        rounds: int = 6,
+        forward_periods: int = 1,
+        market: str = "",
+        val_symbols: Optional[List[str]] = None,
+        val_start: Optional[str] = None,
+        val_end: Optional[str] = None,
+    ) -> dict:
+        """对 seed 表达式做指定算法（co/ea/tot）的迭代搜索，返回 ``SearchResult`` dict。
+
+        可选 ``val_symbols/val_start/val_end`` 提供独立验证期面板做防泄漏评估。
+        ``algo`` 未知时按默认回落 ``co``（链式精炼）。
+        """
+        panel = await self._build_panel(symbols, exchange, interval, start, end)
+
+        val_panel: Optional[Panel] = None
+        if val_symbols:
+            val_panel = await self._build_panel(
+                val_symbols, exchange, interval, val_start, val_end)
+
+        algo_name = algo if algo in list_algos() else "co"
+        # 每类算法的迭代参数：co=rounds, ea=generations, tot=depth
+        algo_kwargs = {
+            "co": {"rounds": rounds},
+            "ea": {"generations": rounds},
+            "tot": {"depth": rounds},
+        }.get(algo_name, {"rounds": rounds})
+
+        searcher = create_algo(algo_name, provider=self.provider, **algo_kwargs)
+
+        async def _run() -> SearchResult:
+            return await searcher.run(
+                seed, panel, val_panel=val_panel,
+                forward_periods=forward_periods, market=market,
+            )
+
+        # search 内部是 async（LLM/评估），直接在事件循环中跑（评估经 executor）
+        result = await _run()
+        out = result.to_dict()
+        out["algo"] = algo_name
+        out["n_symbols"] = len(panel.symbols)
+        out["date_range"] = [panel.dates[0].isoformat() if len(panel.dates) else None,
+                             panel.dates[-1].isoformat() if len(panel.dates) else None]
+        return _sanitize(out)
+
     async def cot_search(
         self,
         seed: str,
@@ -158,31 +213,11 @@ class SearchService:
         val_symbols: Optional[List[str]] = None,
         val_start: Optional[str] = None,
         val_end: Optional[str] = None,
+        algo: str = "co",
     ) -> dict:
-        """对 seed 表达式做链式精炼搜索，返回 ``SearchResult`` dict。
-
-        可选 ``val_symbols/val_start/val_end`` 提供独立验证期面板做防泄漏评估。
-        """
-        panel = await self._build_panel(symbols, exchange, interval, start, end)
-
-        val_panel: Optional[Panel] = None
-        if val_symbols:
-            val_panel = await self._build_panel(
-                val_symbols, exchange, interval, val_start, val_end)
-
-        searcher = FactorSearcher(provider=self.provider, rounds=rounds)
-        loop = asyncio.get_running_loop()
-
-        async def _run() -> SearchResult:
-            return await searcher.cot_search(
-                seed, panel, val_panel=val_panel,
-                forward_periods=forward_periods, market=market,
-            )
-
-        # search 内部是 async（LLM/评估），直接在事件循环中跑（评估经 executor）
-        result = await _run()
-        out = result.to_dict()
-        out["n_symbols"] = len(panel.symbols)
-        out["date_range"] = [panel.dates[0].isoformat() if len(panel.dates) else None,
-                             panel.dates[-1].isoformat() if len(panel.dates) else None]
-        return _sanitize(out)
+        """``cot_search`` 为 :meth:`search` 的向后兼容别名（默认 algo=co）。"""
+        return await self.search(
+            seed, symbols, exchange=exchange, interval=interval, start=start,
+            end=end, algo=algo, rounds=rounds, forward_periods=forward_periods,
+            market=market, val_symbols=val_symbols, val_start=val_start, val_end=val_end,
+        )

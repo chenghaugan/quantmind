@@ -21,7 +21,29 @@ from .eval import (
     FactorEvalCache,
 )
 from .factors.panel_expr import panel_eval_expression, list_panel_operators
-from .search import FactorSearcher, SearchResult, SearchStep, mutate_expressions
+from .search import (
+    FactorSearcher,
+    EASearcher,
+    ToTSearcher,
+    SearchResult,
+    SearchStep,
+    mutate_expressions,
+    BaseAlgo,
+    create_algo,
+    list_algos,
+)
+from .judge import (
+    judge_signal,
+    judge_pairwise,
+    judge_ranking,
+    judge_scoring,
+    score_signal_accuracy,
+    score_pairwise_accuracy,
+    score_ranking,
+    score_scoring,
+)
+from .split import time_split, regime_labels, PanelSplitter, SplitResult
+from .factors.seed_pool import list_seed_pool, DEFAULT_SEED_POOL
 from .target import FactorSpec, MultiFactorModel, build_model_from_specs, icir_weights
 from .neutralize import winsorize, cross_sectional_neutralize, orthogonalize_factors
 
@@ -59,9 +81,28 @@ __all__ = [
     "panel_eval_expression",
     "list_panel_operators",
     "FactorSearcher",
+    "EASearcher",
+    "ToTSearcher",
     "SearchResult",
     "SearchStep",
     "mutate_expressions",
+    "BaseAlgo",
+    "create_algo",
+    "list_algos",
+    "judge_signal",
+    "judge_pairwise",
+    "judge_ranking",
+    "judge_scoring",
+    "score_signal_accuracy",
+    "score_pairwise_accuracy",
+    "score_ranking",
+    "score_scoring",
+    "time_split",
+    "regime_labels",
+    "PanelSplitter",
+    "SplitResult",
+    "list_seed_pool",
+    "DEFAULT_SEED_POOL",
     "FactorSpec",
     "MultiFactorModel",
     "build_model_from_specs",

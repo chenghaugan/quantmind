@@ -276,6 +276,14 @@ class APIClient:
         return APIClient.post("/cross-section", json=payload, timeout=timeout)
 
     # ------------------------------------------------------------------
+    # 因子搜索（co / ea / tot）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def search_factor(payload: Dict[str, Any], timeout: int = 600) -> Dict:
+        """因子迭代搜索（POST /factor/search）。"""
+        return APIClient.post("/factor/search", json=payload, timeout=timeout)
+
+    # ------------------------------------------------------------------
     # 席位因子（商品期货）
     # ------------------------------------------------------------------
     @staticmethod

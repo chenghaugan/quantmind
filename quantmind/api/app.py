@@ -384,12 +384,13 @@ async def factor_expr_batch(req: ExprEvalBatchRequest):
 
 @app.post("/factor/search")
 async def factor_search(req: FactorSearchRequest):
-    """CoT 迭代因子搜索（seed → 逐轮精炼 → best + 轨迹）。"""
+    """因子迭代搜索（co 链式精炼 / ea 进化 / tot 树状，seed → best + 轨迹）。"""
     service: SearchService = app.state.search_service
     try:
-        return await service.cot_search(
+        return await service.search(
             req.seed, req.symbols, req.exchange, req.interval,
-            req.start, req.end, req.rounds, req.forward_periods, req.market,
+            req.start, req.end, algo=req.algo, rounds=req.rounds,
+            forward_periods=req.forward_periods, market=req.market,
             val_symbols=req.val_symbols, val_start=req.val_start, val_end=req.val_end,
         )
     except ValueError as e:

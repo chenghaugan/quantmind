@@ -264,7 +264,7 @@ class ExprEvalBatchRequest(BaseModel):
 
 
 class FactorSearchRequest(BaseModel):
-    """CoT 迭代因子搜索请求。"""
+    """因子迭代搜索请求（co / ea / tot 三种算法）。"""
 
     seed: str = "Mean($close, 20)"         # 初始因子表达式
     symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
@@ -272,7 +272,8 @@ class FactorSearchRequest(BaseModel):
     interval: str = "1d"
     start: Optional[str] = None
     end: Optional[str] = None
-    rounds: int = 6
+    algo: str = "co"                        # co | ea | tot（缺失默认 CoT 链式精炼）
+    rounds: int = 6                          # co/ea/tot 的迭代深度（generations/depth）
     forward_periods: int = 1
     market: str = ""
     # 可选独立验证期（防泄漏）

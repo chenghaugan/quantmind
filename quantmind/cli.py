@@ -26,7 +26,7 @@ from .data.feed.base import HistoryRequest
 from .core.constant import Exchange, Interval
 from .core.engine import EventEngine
 from .core.contracts import default_size
-from .research import MomentumFactor, FactorEvaluator, FactorSpec, build_model_from_specs, build_factor_registry, eval_factor_expression, FactorSearcher
+from .research import MomentumFactor, FactorEvaluator, FactorSpec, build_model_from_specs, build_factor_registry, eval_factor_expression, FactorSearcher, create_algo
 from .research.factors.alpha_cs import Panel, list_alpha_cs
 from .strategy import run_strategy, MultiFactorStrategy, DualMaStrategy, VolTargetStrategy, PairTradingStrategy, build_spread_bars
 from .strategy.components import ComposableStrategy, MultiFactorAlpha, MomentumAlpha
@@ -132,15 +132,16 @@ def factor_search(
     seed: str = typer.Option("Mean($close, 20)", help="初始因子表达式"),
     symbols: str = typer.Option("rb0,hc0,bu0,i0", help="多标的，逗号分隔"),
     exchange: str = typer.Option("SHFE"),
-    rounds: int = typer.Option(6, help="迭代轮数"),
+    algo: str = typer.Option("co", help="搜索算法: co(链式精炼) | ea(进化) | tot(树状)"),
+    rounds: int = typer.Option(6, help="迭代轮数（co=rounds / ea=generations / tot=depth）"),
     years: int = typer.Option(1, help="历史年数（搜索期）"),
 ) -> None:
-    """CoT 迭代因子搜索：seed → 逐轮精炼 → 输出 best 与完整轨迹。
+    """迭代因子搜索：seed → 逐轮精炼 → 输出 best 与完整轨迹（co/ea/tot）。
 
     在给定标的面板上构建因子表达式，用 P0 的截面 IC 评估当裁判，
     让 LLM（或离线变异器）逐轮改进。输出 SearchResult。
     """
-    asyncio.run(_factor_search(seed, symbols, exchange, rounds, years))
+    asyncio.run(_factor_search(seed, symbols, exchange, algo, rounds, years))
 
 
 @app.command()
@@ -315,8 +316,8 @@ async def _factor(symbol, exchange, name, expr, window, years) -> None:
     console.print(f"[bold green]综合主分={rep.composite_score:.3f}[/bold green]")
 
 
-async def _factor_search(seed, symbols, exchange, rounds, years) -> None:
-    """CoT 迭代因子搜索。"""
+async def _factor_search(seed, symbols, exchange, algo, rounds, years) -> None:
+    """迭代因子搜索（co/ea/tot）。"""
     syms = [s.strip() for s in symbols.split(",") if s.strip()]
     if len(syms) < 2:
         console.print("[red]迭代搜索需要至少 2 个标的[/red]"); return
@@ -338,9 +339,14 @@ async def _factor_search(seed, symbols, exchange, rounds, years) -> None:
     if panel.close.empty:
         console.print("[red]面板为空[/red]"); return
 
-    console.print(f"[green]CoT 迭代因子搜索[/green] seed='{seed}' 标的数={len(panel.symbols)} rounds={rounds}")
-    searcher = FactorSearcher(provider=None, rounds=rounds)
-    res = await searcher.cot_search(seed, panel, market=exchange)
+    # 按算法构造
+    kwargs = {"co": {"rounds": rounds}, "ea": {"generations": rounds},
+              "tot": {"depth": rounds}}.get(algo, {"rounds": rounds})
+    searcher = create_algo(algo if algo in ("co", "ea", "tot") else "co",
+                           provider=None, **kwargs)
+    console.print(f"[green]{algo.upper()} 迭代因子搜索[/green] seed='{seed}' "
+                  f"标的数={len(panel.symbols)} rounds={rounds}")
+    res = await searcher.run(seed, panel, market=exchange)
     console.print(f"seed_rank_ic={res.seed_rank_ic:.4f}  best_rank_ic={res.best_rank_ic:.4f}  "
                   f"improved={'是' if res.improved else '否'}")
     console.print(f"[bold green]best 表达式:[/bold green] {res.best_expression}")

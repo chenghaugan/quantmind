@@ -1,4 +1,4 @@
-"""链式精炼（Chain-of-Thought）因子搜索 —— 对标 AlphaBench ``searcher/algo/cot.py``。
+﻿"""链式精炼（Chain-of-Thought）因子搜索 —— 对标 AlphaBench ``searcher/algo/cot.py``。
 
 ``FactorSearcher.cot_search`` 实现单条路径的迭代精炼：
   1. 评估 seed 得到基线指标；
@@ -18,7 +18,7 @@ from typing import Awaitable, Callable, Dict, List, Optional
 
 from ...ai.provider import LLMProvider
 from ..factors.alpha_cs import Panel
-from .base import SearchResult, SearchStep, mutate_expressions
+from .base import BaseAlgo, SearchResult, SearchStep, mutate_expressions, register_algo
 from .prompts import SEARCH_SYSTEM, build_chain_prompt, parse_expression_response
 
 _logger = logging.getLogger("quantmind.research.search.cot")
@@ -43,8 +43,15 @@ async def _default_evaluate(panel: Panel, forward_periods: int, market: str):
     return _ev
 
 
-class FactorSearcher:
-    """LLM 引导的因子迭代搜索执行器（CoT 单路径）。"""
+@register_algo("co")
+class FactorSearcher(BaseAlgo):
+    """LLM 引导的因子迭代搜索执行器（CoT 链式单路径）。
+
+    实现 :class:`BaseAlgo` 的 ``run()`` 契约；``cot_search`` 作为向后兼容
+    的别名保留（等同 ``run``）。
+    """
+
+    name = "co"
 
     def __init__(
         self,
@@ -62,26 +69,27 @@ class FactorSearcher:
             rounds: 迭代轮数。
             cold_start: True 时首轮不评估 seed（直接当作上一轮上下文）。
         """
+        super().__init__(evaluate_fn=evaluate_fn)
         self.provider = provider
-        self._evaluate_fn = evaluate_fn
         self.rounds = rounds
         self.cold_start = cold_start
 
-    # -- 对外主入口 ----------------------------------------------------------
-    async def cot_search(
+    # -- 对外主入口（BaseAlgo 契约） ----------------------------------------
+    async def run(
         self,
-        seed_expr: str,
+        seed: str,
         panel: Panel,
         val_panel: Optional[Panel] = None,
         forward_periods: int = 1,
         market: str = "",
         instruction: str = "",
         search_fn: Optional[SearchFn] = None,
+        **kwargs,
     ) -> SearchResult:
-        """执行链式精炼搜索。
+        """执行链式精炼搜索（== ``cot_search``）。
 
         Args:
-            seed_expr: 初始因子表达式。
+            seed: 初始因子表达式。
             panel: 搜索期面板（决策依据）。
             val_panel: 可选的独立验证期面板（仅评估最终 best，防泄漏）。
             forward_periods: 前向收益周期。
@@ -92,28 +100,28 @@ class FactorSearcher:
         Returns:
             ``SearchResult``（含轨迹 history、best 与可选 val 指标）。
         """
-        evaluate_fn = self._evaluate_fn or await _default_evaluate(panel, forward_periods, market)
+        evaluate_fn = self.evaluate_fn or await _default_evaluate(panel, forward_periods, market)
         search_fn = search_fn or self._build_default_search_fn(instruction)
 
-        result = SearchResult(seed=seed_expr, _best_expression=seed_expr)
+        result = SearchResult(seed=seed, _best_expression=seed)
 
         # 1) 评估 seed 作为基线
-        seed_metrics = await evaluate_fn(seed_expr)
+        seed_metrics = await evaluate_fn(seed)
         result.seed_rank_ic = seed_metrics.get("rank_ic", float("nan"))
         rseed = map_rank(seed_metrics.get("rank_ic"))
         result.best_rank_ic = rseed
         result.best_ic = seed_metrics.get("ic", float("nan"))
-        _logger.info("seed=%s seed_rank_ic=%.4f", seed_expr, rseed)
+        _logger.info("seed=%s seed_rank_ic=%.4f", seed, rseed)
 
         history: List[dict] = []
 
         # 2) 逐步精炼
         for rnd in range(1, self.rounds + 1):
-            best_so_far = result._best_expression or seed_expr
+            best_so_far = result._best_expression or seed
             best_ric = result.best_rank_ic
 
             chain = build_chain_prompt(
-                seed=seed_expr,
+                seed=seed,
                 history=history,
                 best_expression=best_so_far,
                 best_rank_ic=best_ric,
@@ -124,7 +132,7 @@ class FactorSearcher:
             try:
                 candidates = await search_fn(
                     chain=chain,
-                    seed=seed_expr,
+                    seed=seed,
                     best={"expression": best_so_far, "rank_ic": best_ric},
                 )
             except Exception as exc:  # noqa: BLE001
@@ -184,9 +192,26 @@ class FactorSearcher:
         # 3) 可选 val 防泄漏评估
         if val_panel is not None:
             result.val_rank_ic, result.val_ic = await self._val_eval(
-                result._best_expression or seed_expr, val_panel, forward_periods, market)
+                result._best_expression or seed, val_panel, forward_periods, market)
 
         return result
+
+    # -- 向后兼容别名 --------------------------------------------------------
+    async def cot_search(
+        self,
+        seed: str,
+        panel: Panel,
+        val_panel: Optional[Panel] = None,
+        forward_periods: int = 1,
+        market: str = "",
+        instruction: str = "",
+        search_fn: Optional[SearchFn] = None,
+    ) -> SearchResult:
+        """``cot_search`` 是 :meth:`run` 的向后兼容别名（等价）。"""
+        return await self.run(
+            seed, panel, val_panel=val_panel, forward_periods=forward_periods,
+            market=market, instruction=instruction, search_fn=search_fn,
+        )
 
     # -- val 独立评估 ----------------------------------------------------------
     async def _val_eval(self, expr: str, val_panel: Panel, forward_periods: int, market: str):
