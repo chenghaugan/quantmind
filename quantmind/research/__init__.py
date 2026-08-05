@@ -55,6 +55,18 @@ from .cross_sectional_backtest import (
     factor_expression_backtest,
 )
 from .pipeline import PipelineConfig, StepReport, run_pipeline
+from .combine import (
+    cs_rank_panel,
+    cs_zscore_panel,
+    standardize_panel,
+    equal_weights,
+    icir_weights as combine_icir_weights,
+    inverse_variance_weights,
+    min_variance_weights,
+    combine_factor_panels,
+    optimize_weights,
+    composite_backtest,
+)
 from .target import FactorSpec, MultiFactorModel, build_model_from_specs, icir_weights
 from .neutralize import winsorize, cross_sectional_neutralize, orthogonalize_factors
 
@@ -124,6 +136,16 @@ __all__ = [
     "PipelineConfig",
     "StepReport",
     "run_pipeline",
+    "cs_rank_panel",
+    "cs_zscore_panel",
+    "standardize_panel",
+    "equal_weights",
+    "combine_icir_weights",
+    "inverse_variance_weights",
+    "min_variance_weights",
+    "combine_factor_panels",
+    "optimize_weights",
+    "composite_backtest",
     "FactorSpec",
     "MultiFactorModel",
     "build_model_from_specs",

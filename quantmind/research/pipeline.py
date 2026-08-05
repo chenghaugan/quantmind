@@ -42,6 +42,7 @@ from .search import create_algo
 from .eval import evaluate_expression
 from .dedup import dedup_expressions
 from .cross_sectional_backtest import factor_expression_backtest
+from .combine import composite_backtest
 
 _logger = logging.getLogger("quantmind.research.pipeline")
 
@@ -74,6 +75,10 @@ class PipelineConfig:
     n_groups: int = 5
     long_short: bool = True
     cost_rate: float = 0.0
+    # 复合组合（可选）：把代表因子合成一个可交易 alpha 组合
+    run_composite: bool = False          # True 时在 test 期对代表因子做复合回测
+    composite_scheme: str = "icir"       # equal | icir | inv_var | min_var
+    composite_standardize: str = "zscore"
     # 控制
     max_candidates: int = 12               # 去重后最多回测的代表数
     persist_pairs: bool = True             # 把 (expr, IC) 落库（FactorPairStore）
@@ -274,6 +279,26 @@ def run_pipeline(
         except Exception as exc:  # noqa: BLE001
             _logger.warning("持久化因子配对失败: %s", exc)
 
+    # 7)（可选）复合组合：在 test 期把代表因子合成一个可交易 alpha 组合
+    composite_res: Optional[Dict[str, object]] = None
+    if (config.run_composite and rep_exprs and test_p is not None
+            and len(test_p.dates) >= config.n_groups):
+        try:
+            composite_res = composite_backtest(
+                rep_exprs, test_p,
+                training_panel=train_p,          # 权重在 train 上拟合，test 上 OOS
+                scheme=config.composite_scheme,
+                forward_periods=config.forward_periods,
+                n_groups=config.n_groups,
+                long_short=config.long_short,
+                cost_rate=config.cost_rate,
+                standardize=config.composite_standardize,
+                market=config.market,
+            )
+            composite_res.pop("composite", None)  # 避免返回整个大面板
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("复合组合回测失败: %s", exc)
+
     # 汇总
     n_test = len(steps)
     def _mean(key):
@@ -295,9 +320,12 @@ def run_pipeline(
         "config": {
             "seeds": config.seeds, "algo": config.algo, "rounds": config.rounds,
             "dedup_threshold": config.dedup_threshold,
+            "run_composite": config.run_composite,
+            "composite_scheme": config.composite_scheme,
             "cast": (n_test, len(train_p.dates), len(val_p.dates) if val_p else 0,
                      len(test_p.dates) if test_p else 0),
         },
         "steps": steps,
+        "composite": composite_res,
         "summary": summary,
     }
