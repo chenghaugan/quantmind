@@ -19,6 +19,18 @@ from utils.charts import (  # noqa: E402
 )
 from utils.constants import EXCHANGES, EXCHANGE_NAMES, STRATEGIES, GATEWAYS  # noqa: E402
 
+
+def _fmt_val(v):
+    """把结果字段值转成可安全展示的字符串（避免混类型数字/布尔破坏 DataFrame 列）。"""
+    if v is None:
+        return "—"
+    if isinstance(v, bool):
+        return "是" if v else "否"
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    return str(v)
+
+
 setup_page("策略回测", "⚙️")
 page_header(
     "策略回测",
@@ -174,7 +186,7 @@ if res.get("mode") == "paper":
     verdict(f"模拟盘回放完成，共成交 {res.get('trades', 0)} 笔。", "ok")
     section("模拟盘摘要")
     if summary:
-        st.dataframe([{"指标": k, "数值": v} for k, v in summary.items()],
+        st.dataframe([{"指标": k, "数值": _fmt_val(v)} for k, v in summary.items()],
                      width="stretch", hide_index=True)
     else:
         st.caption("引擎未返回摘要。")
@@ -269,7 +281,7 @@ if cr is not None:
 st.caption(f"保证金占用峰值：{fmt_money(report.get('margin_used'))}")
 
 with st.expander("📄 完整报告字段", expanded=False):
-    st.dataframe([{"字段": k, "值": v} for k, v in report.items()],
+    st.dataframe([{"字段": k, "值": _fmt_val(v)} for k, v in report.items()],
                  width="stretch", hide_index=True)
 
 if curve:

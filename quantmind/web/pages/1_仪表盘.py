@@ -12,6 +12,18 @@ from utils.theme import (  # noqa: E402
 from utils.api_client import APIClient  # noqa: E402
 from utils.charts import create_event_timeline  # noqa: E402
 
+
+def _fmt_param(v):
+    """将默认参数值格式化为可显示字符串（避免混合数字类型导致 pyarrow 转换失败）。"""
+    if v is None:
+        return "—"
+    if isinstance(v, bool):
+        return "是" if v else "否"
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    return str(v)
+
+
 setup_page("仪表盘", "📊")
 page_header("系统仪表盘", "后端健康度、数据源、策略与因子资产的一屏总览", "📊")
 
@@ -100,7 +112,10 @@ elif strategies:
             params = s.get("parameters", {}) or {}
             if params:
                 st.dataframe(
-                    [{"参数": k, "默认值": v} for k, v in params.items()],
+                    [
+                        {"参数": k, "默认值": _fmt_param(v)}
+                        for k, v in params.items()
+                    ],
                     width="stretch", hide_index=True,
                 )
             else:

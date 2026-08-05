@@ -38,16 +38,20 @@ limit_labels = profiles.get("labels", {})
 code_labels = profiles.get("codes", {})
 
 def _fmt_limit(v):
-    """把限额值转成可安全展示的字符串（列表/字典不混进 DataFrame）。"""
+    """把限额值转成可安全展示的字符串（列表/字典/标量统一转 str，避免混类型破坏 DataFrame）。"""
     if isinstance(v, (list, tuple)):
         if not v:
             return "—"
         return "、".join(str(x) for x in v)
     if isinstance(v, dict):
         return "、".join(f"{k}:{val}" for k, val in v.items()) or "—"
+    if isinstance(v, set):
+        return "、".join(str(x) for x in v) or "—"
     if v is None:
         return "—"
-    return v
+    if isinstance(v, bool):
+        return "是" if v else "否"
+    return str(v)
 
 tabs = st.tabs([f"{p['name']}" for p in profile_list] or ["默认"])
 for i, p in enumerate(profile_list):

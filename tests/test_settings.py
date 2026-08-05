@@ -1,10 +1,12 @@
 """AI 设置服务（SettingsService）单元测试：JSON 持久化 + .env 双向同步（离线）。"""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
+from quantmind.api.services import settings_service as ss
 from quantmind.api.services.settings_service import SettingsService
 
 
@@ -14,8 +16,27 @@ def _make_service(tmp_path: Path) -> SettingsService:
     svc.path = tmp_path / "config" / "ai_settings.json"
     env = tmp_path / ".env"
     svc._env_path = lambda: env  # type: ignore[method-assign]
+    # 阻断对真实环境变量 / 项目根 .env 的读入，保证无其它配置时默认即 mock（保持用例隔离）
+    for k in list(os.environ):
+        if k.startswith("QM_"):
+            os.environ.pop(k, None)
+    ss.get_settings = lambda: _CleanSettings()
     svc.data = svc._load()  # 用临时路径重算（模拟启动时路径即就绪）
     return svc
+
+
+class _CleanSettings:
+    """隔离环境下的“默认”设置：所有 llm_* 都回到代码默认值（provider=mock）。"""
+
+    def __getattr__(self, name: str):
+        defaults = {
+            "llm_provider": "mock",
+            "llm_api_key": "",
+            "llm_base_url": "",
+            "llm_model": "",
+            "llm_temperature": 0.7,
+        }
+        return defaults.get(name, "")
 
 
 def test_defaults_mock(tmp_path: Path):
