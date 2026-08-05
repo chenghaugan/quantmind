@@ -234,3 +234,49 @@ class SeatFactorResult(BaseModel):
     long_short_return: Optional[float] = None
     composite_score: Optional[float] = None
     error: Optional[str] = None
+
+
+# ---- 表达式截面评估 / 因子迭代搜索（P0 State / P1 CoT）----
+class ExprEvalRequest(BaseModel):
+    """表达式截面评估请求（多标的面板，index=日期 × columns=标的）。"""
+
+    expression: str                        # 因子表达式（函数式 mean(close,20) 或 Qlib 式 Mean($close,20)）
+    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    exchange: str = "SHFE"
+    interval: str = "1d"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    forward_periods: int = 1
+    market: str = ""
+
+
+class ExprEvalBatchRequest(BaseModel):
+    """批量表达式评估请求。"""
+
+    expressions: List[str] = ["Mean($close, 5)", "Rank($close, 20)"]
+    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    exchange: str = "SHFE"
+    interval: str = "1d"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    forward_periods: int = 1
+    market: str = ""
+
+
+class FactorSearchRequest(BaseModel):
+    """CoT 迭代因子搜索请求。"""
+
+    seed: str = "Mean($close, 20)"         # 初始因子表达式
+    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    exchange: str = "SHFE"
+    interval: str = "1d"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    rounds: int = 6
+    forward_periods: int = 1
+    market: str = ""
+    # 可选独立验证期（防泄漏）
+    val_symbols: Optional[List[str]] = None
+    val_start: Optional[str] = None
+    val_end: Optional[str] = None
+

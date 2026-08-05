@@ -26,6 +26,7 @@ from .factor_gen import generate_factors
 from .codegen import generate_strategy_code
 from .sandbox import validate_code
 from .safety import lookahead_warnings
+from .expr_map import factor_spec_to_expression
 from ..research.target import FactorSpec
 
 _logger = logging.getLogger("quantmind.ai.agent")
@@ -189,6 +190,183 @@ class AutoResearchAgent:
                   output=f"explanation_len={len(out.explanation)}")
 
         return out
+
+    async def research_with_evidence(
+        self,
+        idea: str,
+        panel,
+        asset_class: str = "",
+        verify_threshold: float = 0.02,
+        forward_periods: int = 1,
+        market: str = "",
+        run_search: bool = False,
+        max_rounds: int = 2,
+        use_cache: bool = False,
+    ) -> AutoResearchOutput:
+        """闭环研究：用**真实面板截面 IC 证据**验证因子假设（而非离线启发式）。
+
+        复用 :meth:`research` 的步骤 0-2（想法解析、因子生成、代码沙箱校验），但把
+        「每条因子假设的验证」改为：将因子映射为面板 DSL 表达式 → 用 P0 统一评估入口
+        ``evaluate_expression`` 求真实截面 IC → 依据阈值标记 VERIFIED / REJECTED，
+        并把真实指标写入 evidence 与事实表。
+
+        可选 ``run_search=True``：以 IC 绝对值最高的因子为 seed，调用 P1 ``FactorSearcher``
+        链式精炼搜索改进表达式。
+
+        :param idea: 投资想法。
+        :param panel: ``Panel`` 或 ``{symbol: List[BarData]}``（评估/搜索用的面板）。
+        :param asset_class: 资产类别，透传想法解析。
+        :param verify_threshold: |IC| 通过阈值（默认 0.02），用于 VERIFIED 判定。
+        :param forward_periods: 前向收益周期，透传评估。
+        :param market: 市场标识，透传评估/缓存键。
+        :param run_search: 是否额外运行 CoT 迭代搜索改进。
+        :param max_rounds: CoT 搜索轮数（``run_search=True`` 时生效）。
+        :param use_cache: 评估是否启用 SQLite 持久缓存。
+        :return: ``AutoResearchOutput``（hypotheses 携带真实 IC 证据，fact_sheet 带 metrics）。
+        """
+        # 延迟导入，避免 research.search.cot -> ai.agent 的循环依赖
+        from ..research import evaluate_expression
+        from ..research.search.cot import FactorSearcher
+
+        out = AutoResearchOutput(
+            spec=ResearchSpec(idea=idea, asset_class=asset_class),
+        )
+
+        # 步骤 0-2 与 research() 保持一致
+        spec = await parse_idea(self.provider, idea, asset_class)
+        out.spec = spec
+        self._log(out, 0, "parse_idea", input=idea, output=spec.to_dict().__repr__())
+
+        h0 = Hypothesis(
+            id="H0",
+            statement=spec.hypothesis or f"基于「{idea}」的因子具有稳定预测能力",
+            status=HypothesisStatus.PROPOSED,
+            evidence="由想法解析产出",
+        )
+        out.hypotheses.append(h0)
+
+        factors = await generate_factors(self.provider, idea)
+        out.factors = factors
+        self._log(out, 1, "generate_factors", input=idea,
+                  output=f"[{', '.join(f.name for f in factors)}]")
+
+        # 闭环：真实 IC 验证每条因子假设
+        metrics_summary: Dict[str, dict] = {}
+        best_seed: Optional[str] = None
+        best_abs_ic = 0.0
+        for i, f in enumerate(factors):
+            expr = factor_spec_to_expression(f)
+            f.expression = expr  # 写回表达式便于下游复核/复评
+            h = Hypothesis(
+                id=f"H{i+1}",
+                statement=f"因子 {f.name}(kind={f.kind}, window={f.window}) 具有预测能力",
+                status=HypothesisStatus.PROPOSED,
+                evidence="待面板 IC 评估",
+            )
+            try:
+                rep = evaluate_expression(
+                    expr, panel, forward_periods=forward_periods,
+                    market=market, use_cache=use_cache,
+                    factor_name=f.name,
+                )
+                metrics = _report_metrics(rep)
+                metrics_summary[f.name] = metrics
+                ic_mean = metrics.get("ic_mean")
+                if metrics.get("n_samples", 0) > 0 and ic_mean is not None:
+                    h.evidence = (f"面板IC评估：ic_mean={ic_mean:.4f}, "
+                                  f"ir={metrics.get('ir')}, "
+                                  f"ic_positive_ratio={metrics.get('ic_positive_ratio')}, "
+                                  f"n_samples={metrics['n_samples']}")
+                    if abs(ic_mean) >= verify_threshold:
+                        h.status = HypothesisStatus.VERIFIED
+                    else:
+                        h.status = HypothesisStatus.REJECTED
+                else:
+                    h.status = HypothesisStatus.REJECTED
+                    h.evidence = "面板 IC 评估无有效样本（n_samples=0 或 ic_mean 缺失）"
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("因子 %s 评估失败: %s", f.name, exc)
+                h.status = HypothesisStatus.REJECTED
+                h.evidence = f"评估异常：{exc}"
+                self._log(out, 1, "evaluate_factor", input=expr, output=f"error={exc}")
+            else:
+                self._log(out, 1, "evaluate_factor", input=expr,
+                          output=f"ic_mean={metrics.get('ic_mean')}, "
+                                 f"status={h.status.value}")
+                if metrics.get("ic_mean") is not None and abs(metrics["ic_mean"]) > best_abs_ic:
+                    best_abs_ic = abs(metrics["ic_mean"])
+                    best_seed = expr
+            out.hypotheses.append(h)
+
+        # 可选：CoT 迭代搜索改进
+        if run_search and best_seed:
+            try:
+                self._log(out, 1, "cot_search", input=best_seed,
+                          output=f"rounds={max_rounds}")
+                searcher = FactorSearcher(provider=self.provider, rounds=max_rounds)
+                res = await searcher.cot_search(
+                    best_seed, panel, forward_periods=forward_periods,
+                    market=market, instruction=spec.hypothesis or "",
+                )
+                best_expr = res.best_expression
+                best_ic = res.best_ic if res.best_ic == res.best_ic else float("nan")
+                h_search = Hypothesis(
+                    id=f"H{COT_H_PREFIX}",
+                    statement=f"CoT 搜索改进表达式「{best_expr}」预测能力",
+                    status=(HypothesisStatus.VERIFIED if best_ic == best_ic
+                            and abs(best_ic) >= verify_threshold else HypothesisStatus.REJECTED),
+                    evidence=(f"CoT 搜索 best_ic={best_ic:.4f}, "
+                              f"steps={len(res.steps)}" if best_ic == best_ic
+                              else "CoT 搜索无有效 IC"),
+                )
+                out.hypotheses.append(h_search)
+                metrics_summary["_cot_search_best"] = {
+                    "expression": best_expr,
+                    "ic": round(float(best_ic), 6) if best_ic == best_ic else None,
+                }
+                self._log(out, 1, "cot_search", input=best_seed,
+                          output=f"best={best_expr}, best_ic={best_ic}")
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("CoT 搜索失败: %s", exc)
+                self._log(out, 1, "cot_search", input=best_seed, output=f"error={exc}")
+
+        # 步骤 2：策略代码生成 + 沙箱校验 + 前视扫描（与 research 一致，但跳过重复假设标记）
+        code = await generate_strategy_code(self.provider, idea, factors)
+        out.code = code
+        self._log(out, 2, "generate_strategy_code", input=idea, output=f"code_len={len(code)}")
+
+        ok_sandbox, errors = validate_code(code)
+        lookahead = lookahead_warnings(code)
+        out.code_errors = list(errors)
+        out.lookahead_warnings = lookahead
+        out.code_safe = bool(ok_sandbox) and not lookahead
+        self._log(out, 3, "validate_strategy", input=code,
+                  output=f"sandbox={ok_sandbox}, lookahead={len(lookahead)}")
+
+        # 步骤 3：解释 + 事实表（并入真实评估 metrics）
+        out.explanation = generate_explanation(out)
+        out.fact_sheet = generate_fact_sheet(out, metrics=metrics_summary)
+        self._log(out, 4, "generate_explanation_factsheet", input="",
+                  output=f"explanation_len={len(out.explanation)}")
+
+        return out
+
+
+def _report_metrics(rep) -> dict:
+    """把 ``FactorReport`` 规整为 JSON 友好的指标 dict（NaN → None）。"""
+    d = rep.to_dict() if hasattr(rep, "to_dict") else {}
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, float):
+            out[k] = v if v == v else None  # NaN → None
+        else:
+            out[k] = v
+    return out
+
+
+# CoT 搜索追加假设的 id 延续序号由 agent 实例维护；此处用固定前缀+索引占位，
+# 实际 id 在运行时据此生成。
+COT_H_PREFIX = "cot"
 
 
 def generate_explanation(out: AutoResearchOutput) -> str:

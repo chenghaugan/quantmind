@@ -15,6 +15,13 @@ from .factors.alpha101 import AlphaFactor, build_alpha_factor, list_alpha101
 from .factors.alpha191 import Alpha191Factor, build_alpha191_factor, list_alpha191
 from .factors.seat_futures import SeatFactor, compute_seat_factors, make_synthetic_seat_df
 from .evaluator import FactorEvaluator, FactorReport
+from .eval import (
+    evaluate_expression,
+    batch_evaluate_expressions,
+    FactorEvalCache,
+)
+from .factors.panel_expr import panel_eval_expression, list_panel_operators
+from .search import FactorSearcher, SearchResult, SearchStep, mutate_expressions
 from .target import FactorSpec, MultiFactorModel, build_model_from_specs, icir_weights
 from .neutralize import winsorize, cross_sectional_neutralize, orthogonalize_factors
 
@@ -46,6 +53,15 @@ __all__ = [
     "make_synthetic_seat_df",
     "FactorEvaluator",
     "FactorReport",
+    "evaluate_expression",
+    "batch_evaluate_expressions",
+    "FactorEvalCache",
+    "panel_eval_expression",
+    "list_panel_operators",
+    "FactorSearcher",
+    "SearchResult",
+    "SearchStep",
+    "mutate_expressions",
     "FactorSpec",
     "MultiFactorModel",
     "build_model_from_specs",

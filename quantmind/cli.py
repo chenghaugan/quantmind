@@ -26,7 +26,7 @@ from .data.feed.base import HistoryRequest
 from .core.constant import Exchange, Interval
 from .core.engine import EventEngine
 from .core.contracts import default_size
-from .research import MomentumFactor, FactorEvaluator, FactorSpec, build_model_from_specs, build_factor_registry, eval_factor_expression
+from .research import MomentumFactor, FactorEvaluator, FactorSpec, build_model_from_specs, build_factor_registry, eval_factor_expression, FactorSearcher
 from .research.factors.alpha_cs import Panel, list_alpha_cs
 from .strategy import run_strategy, MultiFactorStrategy, DualMaStrategy, VolTargetStrategy, PairTradingStrategy, build_spread_bars
 from .strategy.components import ComposableStrategy, MultiFactorAlpha, MomentumAlpha
@@ -125,6 +125,22 @@ def cs(
     加 --bt 会把该因子直接转成每日横截面多空组合的回测绩效。
     """
     asyncio.run(_cs(symbols, exchange, name, years, bt))
+
+
+@app.command()
+def factor_search(
+    seed: str = typer.Option("Mean($close, 20)", help="初始因子表达式"),
+    symbols: str = typer.Option("rb0,hc0,bu0,i0", help="多标的，逗号分隔"),
+    exchange: str = typer.Option("SHFE"),
+    rounds: int = typer.Option(6, help="迭代轮数"),
+    years: int = typer.Option(1, help="历史年数（搜索期）"),
+) -> None:
+    """CoT 迭代因子搜索：seed → 逐轮精炼 → 输出 best 与完整轨迹。
+
+    在给定标的面板上构建因子表达式，用 P0 的截面 IC 评估当裁判，
+    让 LLM（或离线变异器）逐轮改进。输出 SearchResult。
+    """
+    asyncio.run(_factor_search(seed, symbols, exchange, rounds, years))
 
 
 @app.command()
@@ -297,6 +313,40 @@ async def _factor(symbol, exchange, name, expr, window, years) -> None:
     console.print(f"单调性(5/10组)={rep.monotonicity_5:.3f}/{rep.monotonicity_10:.3f}  年化换手={rep.turnover_annual:.2f}")
     console.print(f"多空组合: 收益={rep.ls_portfolio_return:.4f}  Sharpe={rep.ls_portfolio_sharpe:.3f}  MDD={rep.ls_portfolio_mdd:.4f}")
     console.print(f"[bold green]综合主分={rep.composite_score:.3f}[/bold green]")
+
+
+async def _factor_search(seed, symbols, exchange, rounds, years) -> None:
+    """CoT 迭代因子搜索。"""
+    syms = [s.strip() for s in symbols.split(",") if s.strip()]
+    if len(syms) < 2:
+        console.print("[red]迭代搜索需要至少 2 个标的[/red]"); return
+    dm = _make_dm(); await dm.connect()
+    end = datetime.now(); start = end - timedelta(days=365 * years)
+    bars_by_symbol: Dict[str, list] = {}
+    for sym in syms:
+        try:
+            bars = await dm.get_bar_data(HistoryRequest(symbol=sym, exchange=Exchange(exchange.upper()),
+                                                       interval=Interval.DAILY, start=start, end=end))
+            if bars:
+                bars_by_symbol[sym] = bars
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]{sym} 取数失败: {exc}[/yellow]")
+    await dm.close()
+    if len(bars_by_symbol) < 2:
+        console.print("[red]可用标的不足 2 个，无法搜索[/red]"); return
+    panel = Panel.from_bars(bars_by_symbol)
+    if panel.close.empty:
+        console.print("[red]面板为空[/red]"); return
+
+    console.print(f"[green]CoT 迭代因子搜索[/green] seed='{seed}' 标的数={len(panel.symbols)} rounds={rounds}")
+    searcher = FactorSearcher(provider=None, rounds=rounds)
+    res = await searcher.cot_search(seed, panel, market=exchange)
+    console.print(f"seed_rank_ic={res.seed_rank_ic:.4f}  best_rank_ic={res.best_rank_ic:.4f}  "
+                  f"improved={'是' if res.improved else '否'}")
+    console.print(f"[bold green]best 表达式:[/bold green] {res.best_expression}")
+    for i, step in enumerate(res.history, 1):
+        flag = " ←best" if step.is_best else ""
+        console.print(f"  第{i}轮: {step.expression}  RankIC={step.rank_ic:.4f}{flag}")
 
 
 async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_limit=False, limit_pct=0.10, cost=False, leg2=None) -> None:

@@ -41,12 +41,13 @@ from .schemas import (
     BacktestRequest, WalkForwardRequest, StrategyInfo, OrderRequestSchema, LifecycleRequest,
     OptimizeRequest, CrossSectionRequest, RiskCheckRequest,
     SeatFactorRequest, SeatFactorResult, DataDownloadRequest,
+    ExprEvalRequest, ExprEvalBatchRequest, FactorSearchRequest,
 )
 from .ws import manager
 from .services import (
     DataService, FactorService, BacktestService, LifecycleService, ResearchService,
     RiskService, OptimizeService, CrossSectionService, SettingsService, SeatService,
-    DataSettingsService, DataAdminService, AlertSettingsService,
+    DataSettingsService, DataAdminService, AlertSettingsService, SearchService,
 )
 from .logging_config import setup_api_logger
 from .routes_auth import router as auth_router
@@ -127,6 +128,7 @@ async def lifespan(app: FastAPI):
     app.state.optimize_service = OptimizeService(dm)
     app.state.cross_section_service = CrossSectionService(dm)
     app.state.settings_service = settings_service
+    app.state.search_service = SearchService(dm, provider)
     app.state.seat_service = SeatService(dm)
     data_settings = DataSettingsService()
     app.state.data_settings_service = data_settings
@@ -346,6 +348,55 @@ async def put_alert_settings(payload: Dict[str, Any]):
 async def factor(req: FactorRequest):
     service: FactorService = app.state.factor_service
     return await service.evaluate(req)
+
+
+@app.post("/factor/expr-eval")
+async def factor_expr_eval(req: ExprEvalRequest):
+    """表达式截面评估（多标的面板 → IC/RankIC/衰减…）。"""
+    service: SearchService = app.state.search_service
+    try:
+        return await service.evaluate_expression(
+            req.expression, req.symbols, req.exchange, req.interval,
+            req.start, req.end, req.forward_periods, req.market,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("因子表达式评估失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/factor/expr-batch")
+async def factor_expr_batch(req: ExprEvalBatchRequest):
+    """批量评估多个表达式。"""
+    service: SearchService = app.state.search_service
+    try:
+        return await service.evaluate_expressions_batch(
+            req.expressions, req.symbols, req.exchange, req.interval,
+            req.start, req.end, req.forward_periods, req.market,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("批量表达式评估失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/factor/search")
+async def factor_search(req: FactorSearchRequest):
+    """CoT 迭代因子搜索（seed → 逐轮精炼 → best + 轨迹）。"""
+    service: SearchService = app.state.search_service
+    try:
+        return await service.cot_search(
+            req.seed, req.symbols, req.exchange, req.interval,
+            req.start, req.end, req.rounds, req.forward_periods, req.market,
+            val_symbols=req.val_symbols, val_start=req.val_start, val_end=req.val_end,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("因子搜索失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/backtest")

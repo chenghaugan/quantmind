@@ -16,6 +16,7 @@ from .seat_service import SeatService
 from .data_settings_service import DataSettingsService
 from .data_admin_service import DataAdminService
 from .alert_settings_service import AlertSettingsService
+from .search_service import SearchService
 
 __all__ = [
     "DataService",
@@ -31,4 +32,5 @@ __all__ = [
     "DataSettingsService",
     "DataAdminService",
     "AlertSettingsService",
+    "SearchService",
 ]
