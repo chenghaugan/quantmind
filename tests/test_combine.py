@@ -196,6 +196,23 @@ class TestCompositeBacktest:
         assert r["n_dates"] > 0
         assert abs(sum(r["weights"].values()) - 1.0) < 1e-6
 
+    def test_composite_correlation_matrix(self, panel):
+        """复合回测返回因子相关矩阵（供前端热力图）。"""
+        r = composite_backtest(
+            ["delta(close,10)", "ts_zscore(close,20)", "rank(close,5)"],
+            panel, scheme="equal")
+        corr = r["correlation"]
+        assert set(corr["columns"]) == {"delta(close,10)", "ts_zscore(close,20)",
+                                        "rank(close,5)"}
+        assert len(corr["values"]) == len(corr["columns"])
+        # 对角线为 1，对称
+        for i, c in enumerate(corr["columns"]):
+            assert corr["values"][i][i] == 1 or corr["values"][i][i] is None
+        v01 = corr["values"][0][1]
+        v10 = corr["values"][1][0]
+        if v01 is not None and v10 is not None:
+            assert abs(v01 - v10) < 1e-6
+
     def test_composite_backtest_oos_split(self, panel):
         # train 拟合权重, test 期 OOS 回测（防泄漏）
         train = _make_panel(n_dates=60, seed=1)

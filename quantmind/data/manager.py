@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .feed.base import BaseDataFeed, HistoryRequest
 from .feed.registry import DataFeedRegistry
@@ -41,7 +41,16 @@ class DataManager:
         if self.cache is not None:
             await self.cache.close()
 
-    async def get_bar_data(self, req: HistoryRequest) -> List[BarData]:
+    async def get_bar_data(
+        self,
+        req: HistoryRequest,
+        source_sink: Optional[Dict[str, str]] = None,
+    ) -> List[BarData]:
+        """统一数据访问。
+
+        ``source_sink``（可选）：dict，实际数据源成功时写入
+        ``source_sink[req.symbol] = feed.name``（真实 / mock）。
+        """
         # 1) 持久库（失败容错：离线/未连 DB 时回退到数据源）
         bars: List[BarData] = []
         try:
@@ -57,10 +66,12 @@ class DataManager:
             bars = []
         if bars:
             _logger.debug("命中持久库: %s.%s (%d)", req.symbol, req.exchange.value, len(bars))
+            if source_sink is not None:
+                source_sink[req.symbol] = "persistent_store"
             return bars
 
         # 2) 数据源 Fallback Chain
-        bars = await self.registry.get_bar_data(req)
+        bars = await self.registry.get_bar_data(req, source_sink=source_sink)
 
         # 3) 回写（容错）
         if bars:

@@ -35,8 +35,12 @@ class DataFeedRegistry:
     def list_feeds(self) -> List[str]:
         return [name for name in self._feeds]
 
-    async def get_bar_data(self, req: HistoryRequest) -> List[BarData]:
-        """按优先级回退拉取；任一源成功即返回，全部失败抛 ``DataUnavailable``。"""
+    async def get_bar_data(self, req: HistoryRequest, source_sink: Dict[str, str] | None = None) -> List[BarData]:
+        """按优先级回退拉取；任一源成功即返回，全部失败抛 ``DataUnavailable``。
+
+        ``source_sink``（可选）：dict，成功时写入 ``source_sink[req.symbol] = feed.name``，
+        供调用方知道该标的实际由哪个数据源（真实 / mock）提供。
+        """
         errors: List[str] = []
         for feed, _priority in self.ordered():
             try:
@@ -49,6 +53,8 @@ class DataFeedRegistry:
                         req.symbol,
                         req.exchange.value,
                     )
+                    if source_sink is not None:
+                        source_sink[req.symbol] = feed.name
                     return bars
                 errors.append(f"{feed.name}: 空结果")
             except Exception as exc:  # noqa: BLE001

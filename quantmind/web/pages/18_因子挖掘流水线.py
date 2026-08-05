@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pandas as pd  # noqa: E402
 import plotly.express as px  # noqa: E402
+import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
 from utils.theme import (  # noqa: E402
@@ -118,6 +119,19 @@ summary = result.get("summary") or {}
 steps = result.get("steps") or []
 composite = result.get("composite") or {}
 
+# ------------------------------------------------------------- 数据源标识
+_data_src = result.get("data_sources") or {}
+_src_label = {k: v for k, v in _data_src.items()}
+if result.get("is_real"):
+    st.markdown(
+        badge(f"✅ 真实行情 · {', '.join(sorted(set(_src_label.values())))}", "success"),
+        unsafe_allow_html=True,
+    )
+    st.caption("本次因子挖掘基于真实行情数据（akshare/本地源）。")
+else:
+    st.markdown(badge("🧪 Mock 合成数据（离线）", "warning"), unsafe_allow_html=True)
+    st.caption("未取到真实行情，已回退 Mock 合成数据。配置真实数据源后可跑真实标的。")
+
 # ------------------------------------------------------------- 结论
 mean_oos = summary.get("mean_test_sharpe")
 if mean_oos is not None and mean_oos > 0:
@@ -170,6 +184,34 @@ if steps:
             if s.get("removed_redundant"):
                 st.caption("吸收冗余: " + " · ".join(s["removed_redundant"]))
             st.divider()
+
+    # 各因子 Train/Val/Test IC 分组柱状图
+    ic_rows = []
+    for s in steps:
+        ic_rows.append({
+            "因子": s.get("expression", "")[:24] + ("…" if len(s.get("expression", "")) > 24 else ""),
+            "Train IC": s.get("train_ic"),
+            "Val IC": s.get("val_ic"),
+            "Test IC": s.get("test_ic"),
+        })
+    if len(ic_rows) >= 1:
+        icdf = pd.DataFrame(ic_rows).set_index("因子")
+        # 仅保留至少有一个非空 IC 的行
+        icdf = icdf.dropna(how="all")
+        if not icdf.empty:
+            import plotly.graph_objects as go_ic
+            figic = go_ic.Figure()
+            colors = {"Train IC": "#60a5fa", "Val IC": "#a78bfa", "Test IC": "#22d3ee"}
+            for col in ["Train IC", "Val IC", "Test IC"]:
+                ys = [None if pd.isna(v) else v for v in icdf[col]]
+                figic.add_trace(go_ic.Bar(name=col, x=icdf.index, y=ys,
+                                         marker_color=colors[col],
+                                         marker_line_width=0))
+            figic.update_layout(barmode="group", height=340,
+                                title="各代表因子 IC（Train / Val / Test）",
+                                margin=dict(t=44, b=30))
+            figic.add_hline(y=0, line=dict(color="rgba(148,163,184,.4)", dash="dash"))
+            st.plotly_chart(figic, use_container_width=True, config={"displayModeBar": False})
 else:
     st.caption("无代表因子产出（可能全部被 min_abs_ic / 去冗余过滤，或搜索失败）。")
 
@@ -227,6 +269,25 @@ if composite:
             st.dataframe(fdf, width="stretch", hide_index=True)
         else:
             st.caption("无因子 IC 数据。")
+
+    # 因子相关矩阵热力图（去冗余后代表间的残差相关性）
+    corr = composite.get("correlation")
+    if corr and corr.get("columns") and corr.get("values"):
+        import plotly.graph_objects as go_hm
+        cols = corr["columns"]
+        z = [[(float(v) if v is not None else float("nan"))
+              for v in row] for row in corr["values"]]
+        fig_hm = go_hm.Figure(go_hm.Heatmap(
+            z=z, x=cols, y=cols, zmin=-1, zmax=1,
+            colorscale=[[0, "#22d3ee"], [0.5, "#1e293b"], [1, "#f43f5e"]],
+            zmid=0, texttemplate="%{z:.2f}", textfont=dict(size=9),
+            colorbar=dict(title="r", thickness=10),
+        ))
+        fig_hm.update_layout(height=420, title="去冗余后代表因子相关性热力图",
+                             margin=dict(t=44, b=30, l=8, r=8),
+                             xaxis=dict(side="bottom", tickangle=-30),
+                             yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_hm, use_container_width=True, config={"displayModeBar": False})
 else:
     if run_composite:
         note("未启用复合组合，或面板过小无法分组。可调大训练期占比后重试。", "info")

@@ -111,6 +111,10 @@ def test_factor_pipeline_ep(client):
     assert body["composite"] is not None
     assert "weights" in body["composite"]
     assert "portfolio" in body["composite"]
+    # 数据源透明度 + 因子相关矩阵
+    assert isinstance(body.get("data_sources"), dict)
+    assert isinstance(body.get("is_real"), bool)
+    assert "correlation" in body["composite"]
     # 每个 step 有表达式
     for s in body["steps"]:
         assert s["expression"]

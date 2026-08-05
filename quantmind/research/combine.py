@@ -420,6 +420,9 @@ def composite_backtest(
         composite, panel, forward_periods=forward_periods,
         n_groups=n_groups, factor_name="composite")
 
+    # 6) 因子两两相关矩阵（供前端热力图；标准化后跨期 stack 相关）
+    corr_df = _panel_corr(back_factor_dfs, standardize)
+
     return {
         "scheme": scheme,
         "weights": {k: round(float(v), 4) for k, v in weights.items()},
@@ -427,6 +430,11 @@ def composite_backtest(
         "n_dates": len(curve),
         "ic_report": comp_ic.to_dict(),
         "factor_ics": {k: round(float(v["ic_mean"]), 4) for k, v in ic_rep_map.items()},
+        "correlation": {
+            "columns": list(corr_df.columns),
+            "values": [[None if v != v else round(float(v), 4) for v in corr_df.loc[c]]
+                       for c in corr_df.index],
+        },
         "portfolio": {**perf.to_dict(), "daily_returns": [float(x) for x in port_ret]},
         "composite": composite,
     }

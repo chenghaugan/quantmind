@@ -73,6 +73,7 @@ class SearchService:
         interval: str = "1d",
         start: Optional[str] = None,
         end: Optional[str] = None,
+        source_sink: Optional[Dict[str, str]] = None,
     ) -> Panel:
         symbols = [s for s in (symbols or []) if s and s.strip()]
         if len(symbols) < 2:
@@ -87,7 +88,8 @@ class SearchService:
                     interval=interv,
                     start=datetime.fromisoformat(start) if start else None,
                     end=datetime.fromisoformat(end) if end else None,
-                )
+                ),
+                source_sink=source_sink,
             )
             for s in symbols
         ]
@@ -330,7 +332,9 @@ class SearchService:
         → 防泄漏切分（train/val/test）→ 逐代表做 test 期 OOS 多空回测 →（可选）
         用组合权重方案把代表合成为复合 alpha 并回测。
         """
-        panel = await self._build_panel(symbols, exchange, interval, start, end)
+        sources: Dict[str, str] = {}
+        panel = await self._build_panel(symbols, exchange, interval, start, end,
+                                        source_sink=sources)
         seed_list = [s for s in (seeds or []) if s and s.strip()]
         if not seed_list:
             raise ValueError("至少需要 1 个 seed 表达式")
@@ -362,12 +366,17 @@ class SearchService:
         if isinstance(composite, dict):
             composite.pop("composite", None)
 
+        # 数据源透明度：到底用了真实行情还是 mock
+        src_names = {k: v for k, v in sources.items() if v}
+
         out = {
             "algo": report["config"]["algo"],
             "n_symbols": len(panel.symbols),
             "n_dates": len(panel.dates),
             "date_range": [panel.dates[0].isoformat() if len(panel.dates) else None,
                            panel.dates[-1].isoformat() if len(panel.dates) else None],
+            "data_sources": src_names,
+            "is_real": bool(src_names) and any(v and v != "mock" for v in src_names.values()),
             "summary": _sanitize(report["summary"]),
             "steps": _sanitize(report["steps"]),
             "composite": _sanitize(composite),
