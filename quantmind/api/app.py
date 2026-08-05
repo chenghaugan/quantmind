@@ -50,6 +50,7 @@ from .services import (
 )
 from .logging_config import setup_api_logger
 from .routes_auth import router as auth_router
+from .scheduler import QuantMindScheduler, build_scheduler
 
 _logger = setup_api_logger("INFO")
 
@@ -136,8 +137,16 @@ async def lifespan(app: FastAPI):
     app.state.ee = _ee
     app.state.lifecycle = lifecycle_mgr
 
+    # ---- 任务调度器（APScheduler）----
+    sys_state = {"dm": dm, "ee": _ee, "lifecycle": lifecycle_mgr}
+    scheduler = build_scheduler(sys_state, register_defaults=True)
+    scheduler.start()
+    app.state.scheduler = scheduler
+
     yield
 
+    if app.state.scheduler:
+        app.state.scheduler.stop()
     if dm:
         await dm.close()
     if _ee:
@@ -359,7 +368,10 @@ async def strategies():
 @app.post("/order")
 async def order(req: OrderRequestSchema):
     service: LifecycleService = app.state.lifecycle_service
-    return await service.place_order(req)
+    result = await service.place_order(req)
+    if "error" in result:
+        return JSONResponse(status_code=400, content=result)
+    return result
 
 
 @app.get("/orders")
@@ -384,6 +396,40 @@ async def cancel_order(order_id: str):
 async def lifecycle(req: LifecycleRequest):
     service: LifecycleService = app.state.lifecycle_service
     return await service.promote(req)
+
+
+# --------------------------------------------------------------------------
+# 任务调度器
+# --------------------------------------------------------------------------
+@app.get("/scheduler")
+async def scheduler_list():
+    """列出已注册的周期任务及其下次触发时间。"""
+    sched: QuantMindScheduler = app.state.scheduler
+    return {
+        "available": sched.available,
+        "running": sched._sched.running if sched._sched else False,
+        "jobs": sched.list_jobs(),
+    }
+
+
+@app.post("/scheduler/start")
+async def scheduler_start():
+    """启动调度器（若未运行）。"""
+    sched: QuantMindScheduler = app.state.scheduler
+    if not sched.available:
+        return {"ok": False, "error": "apscheduler 未安装"}
+    sched.start()
+    return {"ok": True, "running": sched._sched.running}
+
+
+@app.post("/scheduler/stop")
+async def scheduler_stop():
+    """停止调度器。"""
+    sched: QuantMindScheduler = app.state.scheduler
+    if not sched.available:
+        return {"ok": False, "error": "apscheduler 未安装"}
+    sched.stop()
+    return {"ok": True, "running": False}
 
 
 # --------------------------------------------------------------------------

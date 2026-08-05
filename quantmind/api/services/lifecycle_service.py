@@ -47,9 +47,16 @@ class LifecycleService:
         return position
 
     async def place_order(self, req: OrderRequestSchema) -> Dict[str, Any]:
-        direction = Direction(req.direction)
-        offset = Offset(req.offset)
-        sym, exch = req.vt_symbol.rsplit(".", 1)
+        try:
+            direction = Direction(req.direction)
+            offset = Offset(req.offset)
+        except ValueError as e:
+            return {"error": f"非法方向/开平：{e}"}
+        try:
+            sym, exch = req.vt_symbol.rsplit(".", 1)
+            exchange = Exchange(exch)
+        except Exception as e:
+            return {"error": f"非法合约代码：{req.vt_symbol}（{e}）"}
         order_id = f"WEB-{uuid.uuid4().hex[:8].upper()}"
         self._seq += 1
         od = OrderData(

@@ -12,6 +12,9 @@ venv/
 .env.*
 !.env.example
 
+# Local runtime config (may contain plaintext API keys / endpoints)
+quantmind/config/
+
 # Databases / local caches
 *.db
 *.duckdb
