@@ -145,6 +145,26 @@ def factor_search(
 
 
 @app.command()
+def factor_pipeline(
+    seeds: str = typer.Option("Mean($close,20),Rank($close,20)", help="多个 seed 表达式，逗号分隔"),
+    symbols: str = typer.Option("rb0,hc0,bu0,i0", help="多标的，逗号分隔"),
+    exchange: str = typer.Option("SHFE"),
+    algo: str = typer.Option("co", help="搜索算法: co | ea | tot"),
+    rounds: int = typer.Option(4, help="每 seed 迭代轮数"),
+    years: int = typer.Option(1, help="历史年数（train 期）"),
+    dedup_threshold: float = typer.Option(0.7, help="去冗余相关阈值 [0,1]"),
+    run_judge: bool = typer.Option(False, help="对候选池跑 LLM judge 打分/排序"),
+) -> None:
+    """端到端因子挖掘流水线：seed→搜索→去冗余→OOS 回测→报告（真实 LLM 或离线 mock）。
+
+    构建面板后自动切分 train/val/test（防泄漏）：train 期搜索+去冗余选代表，
+    test 期对代表做样本外多空组合回测。provider 取「设置」页已配的 LLM（无 key 走 mock）。
+    """
+    asyncio.run(_factor_pipeline(seeds, symbols, exchange, algo, rounds, years,
+                                 dedup_threshold, run_judge))
+
+
+@app.command()
 def backtest(
     symbol: str = typer.Option("rb0"),
     exchange: str = typer.Option("SHFE"),
@@ -353,6 +373,62 @@ async def _factor_search(seed, symbols, exchange, algo, rounds, years) -> None:
     for i, step in enumerate(res.history, 1):
         flag = " ←best" if step.is_best else ""
         console.print(f"  第{i}轮: {step.expression}  RankIC={step.rank_ic:.4f}{flag}")
+
+
+async def _factor_pipeline(seeds, symbols, exchange, algo, rounds, years,
+                           dedup_threshold, run_judge) -> None:
+    """端到端因子挖掘流水线（构建面板 → run_pipeline）。"""
+    from .research import run_pipeline, PipelineConfig
+    from .api.services.settings_service import SettingsService
+
+    seed_list = [s.strip() for s in seeds.split(",") if s.strip()]
+    syms = [s.strip() for s in symbols.split(",") if s.strip()]
+    if len(syms) < 2 or not seed_list:
+        console.print("[red]至少需要 2 个标的与 1 个 seed[/red]"); return
+    if algo not in ("co", "ea", "tot"):
+        algo = "co"
+
+    dm = _make_dm(); await dm.connect()
+    end = datetime.now(); start = end - timedelta(days=365 * years)
+    bars_by_symbol: Dict[str, list] = {}
+    for sym in syms:
+        try:
+            bars = await dm.get_bar_data(HistoryRequest(symbol=sym, exchange=Exchange(exchange.upper()),
+                                                       interval=Interval.DAILY, start=start, end=end))
+            if bars:
+                bars_by_symbol[sym] = bars
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]{sym} 取数失败: {exc}[/yellow]")
+    await dm.close()
+    if len(bars_by_symbol) < 2:
+        console.print("[red]可用标的不足 2 个[/red]"); return
+    panel = Panel.from_bars(bars_by_symbol)
+    if panel.close.empty:
+        console.print("[red]面板为空[/red]"); return
+
+    # provider：取已配置的 LLM（无 key → mock）
+    try:
+        svc = SettingsService()
+        provider = svc.rebuild_provider()
+    except Exception:  # noqa: BLE001
+        provider = None
+
+    cfg = PipelineConfig(seeds=seed_list, algo=algo, rounds=rounds,
+                         dedup_threshold=dedup_threshold, run_judge=run_judge)
+    console.print(f"[green]端到端因子挖掘流水线[/green] algo={algo.upper()} "
+                  f"seeds={len(seed_list)} 标的={len(panel.symbols)} rounds={rounds} "
+                  f"去冗余阈值={dedup_threshold}")
+    report = await asyncio.to_thread(run_pipeline, panel, cfg, provider)
+    s = report["summary"]
+    console.print(f"[bold]候选={s['candidate_count']} 代表={s['representative_count']} "
+                  f"回测={s['backtested_count']}[/bold]")
+    console.print(f"mean_train_ic={s['mean_train_ic']}  mean_val_ic={s['mean_val_ic']}  "
+                  f"mean_test_ic={s['mean_test_ic']}  mean_test_sharpe={s['mean_test_sharpe']}")
+    for st in report["steps"]:
+        console.print(f"  {st['expression'][:44]:44} train_ic={st['train_ic']} "
+                      f"val_ic={st['val_ic']} OOS_sharpe={st['test_sharpe']}"
+                      + (f" [dim]去冗余吸收 {len(st['removed_redundant'])}[/dim]"
+                         if st["removed_redundant"] else ""))
 
 
 async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_limit=False, limit_pct=0.10, cost=False, leg2=None) -> None:

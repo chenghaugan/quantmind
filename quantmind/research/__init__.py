@@ -43,7 +43,18 @@ from .judge import (
     score_scoring,
 )
 from .split import time_split, regime_labels, PanelSplitter, SplitResult
-from .factors.seed_pool import list_seed_pool, DEFAULT_SEED_POOL
+from .factors.seed_pool import list_seed_pool, DEFAULT_SEED_POOL, FactorPairStore
+from .dedup import (
+    dedup_expressions,
+    dedup_factor_panels,
+    factor_correlation_matrix,
+    greedy_cluster_dedup,
+)
+from .cross_sectional_backtest import (
+    cross_sectional_backtest,
+    factor_expression_backtest,
+)
+from .pipeline import PipelineConfig, StepReport, run_pipeline
 from .target import FactorSpec, MultiFactorModel, build_model_from_specs, icir_weights
 from .neutralize import winsorize, cross_sectional_neutralize, orthogonalize_factors
 
@@ -103,6 +114,16 @@ __all__ = [
     "SplitResult",
     "list_seed_pool",
     "DEFAULT_SEED_POOL",
+    "FactorPairStore",
+    "dedup_expressions",
+    "dedup_factor_panels",
+    "factor_correlation_matrix",
+    "greedy_cluster_dedup",
+    "cross_sectional_backtest",
+    "factor_expression_backtest",
+    "PipelineConfig",
+    "StepReport",
+    "run_pipeline",
     "FactorSpec",
     "MultiFactorModel",
     "build_model_from_specs",

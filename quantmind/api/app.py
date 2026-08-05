@@ -42,6 +42,7 @@ from .schemas import (
     OptimizeRequest, CrossSectionRequest, RiskCheckRequest,
     SeatFactorRequest, SeatFactorResult, DataDownloadRequest,
     ExprEvalRequest, ExprEvalBatchRequest, FactorSearchRequest,
+    FactorDedupRequest, ExpressionBacktestRequest,
 )
 from .ws import manager
 from .services import (
@@ -397,6 +398,41 @@ async def factor_search(req: FactorSearchRequest):
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:  # noqa: BLE001
         _logger.exception("因子搜索失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/factor/dedup")
+async def factor_dedup(req: FactorDedupRequest):
+    """因子相关性聚类去冗余：输入一批表达式，返回每簇代表性因子。"""
+    service: SearchService = app.state.search_service
+    try:
+        th = max(0.0, min(1.0, req.correlation_threshold))
+        return await service.dedup(
+            req.expressions, req.symbols, req.exchange, req.interval,
+            req.start, req.end, th, req.min_abs_metric,
+            req.forward_periods, req.market, req.compute_ic,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("因子去冗余失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/factor/backtest")
+async def expression_backtest(req: ExpressionBacktestRequest):
+    """对挖掘出的 DSL 因子表达式直接做截面多空组合回测（研究→组合闭环）。"""
+    service: SearchService = app.state.search_service
+    try:
+        return await service.backtest_expression(
+            req.expression, req.symbols, req.exchange, req.interval,
+            req.start, req.end, req.forward_periods, req.n_groups,
+            req.long_short, req.cost_rate,
+        )
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("表达式回测失败")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

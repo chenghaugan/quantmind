@@ -15,10 +15,11 @@
 
   - **时序**（逐标的列上计算，返回同型 DataFrame）：
     ``mean/sma/std/sum/ts_rank/ts_min/ts_max/ts_arg_max/ts_arg_min/ts_product/
-    ts_zscore/ts_median/slope/decay_linear/delay/delta/corr/cov``
+    ts_zscore/ts_median/ts_percentile/ts_skew/ts_kurt/slope/decay_linear/
+    delay/delta/corr/cov``
   - **截面**（每个时间截面跨标的计算）：``rank/cs_rank``（百分位排名）、
-    ``cs_zscore``（截面 z-score）
-  - **标量**：``sign/abs/log/power/signed_power/scale``
+    ``cs_zscore``（截面 z-score）、``winsorize_q``（分位数截尾）
+  - **标量**：``sign/abs/log/power/signed_power/scale/winsorize``
 
 安全性：沿用项目 AST 沙箱理念，通过受限 AST 解释器执行（仅允许白名单函数与
 面板变量，禁止任意 Python 调用、属性访问、import），避免 LLM 生成代码带来的风险。
@@ -136,6 +137,80 @@ def _ts_med(x, n: int) -> pd.DataFrame:
     return x.rolling(int(n), min_periods=1).median()
 
 
+def _ts_pct(x, n: int, q: float = 0.5) -> pd.DataFrame:
+    """时序分位数：滚动窗口内的分位数（q∈[0,1]，如 0.9 对应 90 分位）。"""
+    return x.rolling(int(n), min_periods=1).apply(
+        lambda a: float(np.percentile(a, float(q) * 100.0)) if len(a) else float("nan"),
+        raw=True,
+    )
+
+
+def _ts_skew(x, n: int) -> pd.DataFrame:
+    """时序偏度：滚动窗口样本偏度（min_periods 保证样本足）。"""
+    return x.rolling(int(n), min_periods=max(3, int(n) // 2)).apply(
+        lambda a: _skewness(a), raw=True
+    )
+
+
+def _ts_kurt(x, n: int) -> pd.DataFrame:
+    """时序峰度（超额/非超额均可，用 pandas 兼容的样本峰度）。"""
+    return x.rolling(int(n), min_periods=max(4, int(n) // 2)).apply(
+        lambda a: _kurtosis(a), raw=True
+    )
+
+
+def _win(x, a: float, b: float = None) -> pd.DataFrame:
+    """winsorize：把 (a,b) 之外的值裁剪到边界；只给一个 a 时用 ±a 对称裁剪。
+    按截面（每行）分位数裁剪时，b 可传字符串 "p99"/90 等——此处支持数值边界，
+    高频用分位数裁剪可另配 neutralize/winsorize_q。
+    """
+    lo, hi = (-float(a), float(a)) if b is None else (float(a), float(b))
+    return x.clip(lower=lo, upper=hi)
+
+
+def _winsorize_q(x, q_lo: float = 0.01, q_hi: float = 0.99) -> pd.DataFrame:
+    """截面分位数 winsorize：每行按跨标的 (q_lo, q_hi) 裁剪极值（去极端离群）。"""
+    lo = x.quantile(q_lo, axis=1)
+    hi = x.quantile(q_hi, axis=1)
+    return x.clip(lower=lo, upper=hi, axis=0)
+
+
+def _skewness(a) -> float:
+    """样本偏度（无 scipy 依赖）。"""
+    a = np.asarray(a, dtype=float)
+    a = a[np.isfinite(a)]
+    n = len(a)
+    if n < 3:
+        return float("nan")
+    mean = a.mean()
+    if mean != mean:
+        return float("nan")
+    m2 = ((a - mean) ** 2).sum()
+    if m2 == 0:
+        return float("nan")
+    m3 = ((a - mean) ** 3).sum()
+    return float((n * m3) / ((n - 1) * (n - 2) * (m2 / n) ** 1.5)) if m2 > 0 else float("nan")
+
+
+def _kurtosis(a) -> float:
+    """样本超额峰度（无 scipy 依赖），接近高斯 → 0。"""
+    a = np.asarray(a, dtype=float)
+    a = a[np.isfinite(a)]
+    n = len(a)
+    if n < 4:
+        return float("nan")
+    mean = a.mean()
+    if mean != mean:
+        return float("nan")
+    m2 = ((a - mean) ** 2).sum()
+    if m2 == 0:
+        return float("nan")
+    m4 = ((a - mean) ** 4).sum()
+    var = m2 / n
+    k = (m4 / n) / (var ** 2) - 3.0
+    return float(k)
+
+
 def _cs_zscore(d: pd.DataFrame) -> pd.DataFrame:
     """截面 z-score：每个时间截面（每行）跨标的减均值除标准差。"""
     m = d.mean(axis=1)
@@ -199,6 +274,9 @@ _TS_OPS: Dict[str, object] = {
     "decay_linear": _decay_linear,
     "corr": _corry,
     "cov": _covy,
+    "ts_percentile": _ts_pct,
+    "ts_skew": _ts_skew,
+    "ts_kurt": _ts_kurt,
 }
 
 _CS_OPS: Dict[str, object] = {
@@ -214,6 +292,8 @@ _SCALAR_OPS: Dict[str, object] = {
     "power": _pwr,
     "signed_power": _sig,
     "scale": _scal,
+    "winsorize": _win,
+    "winsorize_q": _winsorize_q,
 }
 
 # 参数个数约束（用于快速校验）
@@ -241,6 +321,14 @@ _QLIB_ALIAS: Dict[str, str] = {
     "DecayLinear": "decay_linear",
     "Corr": "corr",
     "Cov": "cov",
+    "TsPercentile": "ts_percentile",
+    "Percentile": "ts_percentile",
+    "TsSkew": "ts_skew",
+    "Skew": "ts_skew",
+    "TsKurt": "ts_kurt",
+    "Kurt": "ts_kurt",
+    "Winsorize": "winsorize",
+    "WinsorizeQ": "winsorize_q",
     "Rank": "rank",
     "CsRank": "cs_rank",
     "CsZscore": "cs_zscore",
@@ -436,6 +524,26 @@ def _apply_op(fname: str, args: List[object]) -> object:
             if len(args) != 2:
                 raise ExpressionError("power 需要 2 个参数 (x, a)")
             return func(args[0], args[1])
+        if func is _ts_pct:
+            if len(args) == 2:
+                return func(args[0], int(args[1]))
+            if len(args) == 3:
+                return func(args[0], int(args[1]), float(args[2]))
+            raise ExpressionError("ts_percentile 需要 2~3 个参数 (x, window, q=0.5)")
+        if func is _win:
+            if len(args) == 2:
+                return func(args[0], float(args[1]))
+            if len(args) == 3:
+                return func(args[0], float(args[1]), float(args[2]))
+            raise ExpressionError("winsorize 需要 2~3 个参数 (x, a, b=None)")
+        if func is _winsorize_q:
+            if len(args) == 1:
+                return func(args[0])
+            if len(args) == 2:
+                return func(args[0], float(args[1]))
+            if len(args) == 3:
+                return func(args[0], float(args[1]), float(args[2]))
+            raise ExpressionError("winsorize_q 需要 1~3 个参数 (x, q_lo=0.01, q_hi=0.99)")
         # 其余时序/截面算子：单序列 + window（rank/cs_zscore 无 window）
         # rank 兼容两义：rank(x) 截面；rank(x,n) 时序滚动排名（AlphaBench/QLib 常用）
         if func in (_rank_cs, _cs_zscore):

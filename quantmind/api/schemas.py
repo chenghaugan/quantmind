@@ -281,3 +281,34 @@ class FactorSearchRequest(BaseModel):
     val_start: Optional[str] = None
     val_end: Optional[str] = None
 
+
+class FactorDedupRequest(BaseModel):
+    """因子相关性聚类去冗余请求。"""
+
+    expressions: List[str] = ["Mean($close, 5)", "Rank($close, 20)"]
+    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    exchange: str = "SHFE"
+    interval: str = "1d"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    correlation_threshold: float = 0.7     # 并簇相关阈值 [0,1]
+    min_abs_metric: float = 0.0            # |rank_ic| 底线（低于视为噪声丢弃）
+    forward_periods: int = 1
+    market: str = ""
+    compute_ic: bool = True                # True 用真实 rank_ic 排序；False 用复杂度
+
+
+class ExpressionBacktestRequest(BaseModel):
+    """对挖掘出的 DSL 因子表达式直接做截面多空组合回测。"""
+
+    expression: str = "delta(close, 20)"
+    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    exchange: str = "SHFE"
+    interval: str = "1d"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    forward_periods: int = 1
+    n_groups: int = 5
+    long_short: bool = True
+    cost_rate: float = 0.0
+

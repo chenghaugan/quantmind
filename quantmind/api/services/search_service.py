@@ -24,6 +24,8 @@ from ...research import (
     SearchResult,
     create_algo,
     list_algos,
+    dedup_expressions as _dedup_exprs,
+    factor_expression_backtest as _expr_backtest,
 )
 from ...research.factors.alpha_cs import Panel
 
@@ -43,6 +45,15 @@ def _sanitize(o: Any) -> Any:
     if isinstance(o, datetime):
         return o.isoformat()
     return o
+
+
+def _flt(x) -> Optional[float]:
+    """把可能是 NaN 的 float 规整为 float 或 None（用于 metric 展示）。"""
+    try:
+        f = float(x)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
 
 
 class SearchService:
@@ -221,3 +232,68 @@ class SearchService:
             end=end, algo=algo, rounds=rounds, forward_periods=forward_periods,
             market=market, val_symbols=val_symbols, val_start=val_start, val_end=val_end,
         )
+
+    # -- 因子去冗余（相关性聚类） --------------------------------------------
+    async def dedup(
+        self,
+        expressions: List[str],
+        symbols: List[str],
+        exchange: str = "SHFE",
+        interval: str = "1d",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        correlation_threshold: float = 0.7,
+        min_abs_metric: float = 0.0,
+        forward_periods: int = 1,
+        market: str = "",
+        compute_ic: bool = True,
+    ) -> dict:
+        """对一批表达式做相关性聚类去冗余，返回每簇代表性因子。"""
+        panel = await self._build_panel(symbols, exchange, interval, start, end)
+        loop = asyncio.get_running_loop()
+        kept = await loop.run_in_executor(
+            None,
+            lambda: _dedup_exprs(
+                expressions, panel, correlation_threshold=correlation_threshold,
+                min_abs_metric=min_abs_metric, forward_periods=forward_periods,
+                market=market, compute_ic=compute_ic,
+            ),
+        )
+        return {
+            "n_input": len([e for e in expressions if e and e.strip()]),
+            "n_input_unique": len(expressions),
+            "n_kept": len(kept),
+            "representatives": [
+                {"expression": c["name"], "metric": _flt(c["metric"]),
+                 "n_removed": len(c["cluster"]) - 1,
+                 "cluster": list(c["cluster"])}
+                for c in kept
+            ],
+            "correlation_threshold": correlation_threshold,
+        }
+
+    # -- 表达式 → 截面多空组合回测（研究闭环） ------------------------------
+    async def backtest_expression(
+        self,
+        expression: str,
+        symbols: List[str],
+        exchange: str = "SHFE",
+        interval: str = "1d",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        forward_periods: int = 1,
+        n_groups: int = 5,
+        long_short: bool = True,
+        cost_rate: float = 0.0,
+    ) -> dict:
+        """对挖掘出的 DSL 因子表达式直接做截面多空组合回测。"""
+        panel = await self._build_panel(symbols, exchange, interval, start, end)
+        loop = asyncio.get_running_loop()
+        out = await loop.run_in_executor(
+            None,
+            lambda: _expr_backtest(
+                expression, panel, forward_periods=forward_periods,
+                n_groups=n_groups, long_short=long_short, cost_rate=cost_rate,
+            ),
+        )
+        return _sanitize(out)
