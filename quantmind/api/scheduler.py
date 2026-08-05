@@ -174,7 +174,7 @@ def _job_risk_day_rotation(sys_state: Dict[str, Any]) -> Dict[str, Any]:
     """
     try:
         from datetime import datetime, timezone
-        from ...risk.calendar import TradingCalendar
+        from ..risk.calendar import TradingCalendar
         cal = TradingCalendar()
         today = datetime.now(timezone.utc).date()
         return {
