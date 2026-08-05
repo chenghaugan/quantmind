@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     local_hk_root: str = ""  # 本地港股数据根目录（东方财富/第三方导出的港股日频 Parquet/CSV）；非空时注册 ChinaHKAStockParquetFeed（优先于 em_hk）
     local_option_root: str = ""  # 本地期权数据根目录（股指/ETF/商品期权日频 Parquet/CSV）；非空时注册 ChinaOptionParquetFeed（优先于 akshare_option）
     seat_data_root: str = ""  # 期货席位持仓排名数据根目录（如 TradingAgents_for_Futures 的 qihuo/database/positioning）；非空时启用 F1-F8 真实席位因子
+    local_cache_root: str = ""  # 本地行情仓库（Parquet 写缓存）根目录；非空时 DataManager 自动把真实源拉取结果落盘，后续请求秒级返回（默认随项目根 .data_cache/ 若为空则从项目根生成）
 
 
 @lru_cache

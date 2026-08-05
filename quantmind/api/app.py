@@ -18,6 +18,7 @@ import math
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
@@ -29,6 +30,7 @@ import uuid
 
 from ..config import get_settings
 from ..data import build_default_registry, DataManager, TimescaleStore, InMemoryStore
+from ..data.store.disk_cache import DiskBarCache
 from ..core.engine import EventEngine
 from ..core.event import Event, EventType
 from ..ai import build_provider
@@ -109,6 +111,15 @@ async def lifespan(app: FastAPI):
 
     dm = DataManager(registry, store)
     await dm.connect()
+
+    # 本地行情仓库（Parquet 写缓存）：真实源结果落盘，后续请求秒级返回。
+    # 未显式配置 local_cache_root 时，默认用项目根 data_cache/（避免每次联网拉 akshare）。
+    _cache_root = (settings.local_cache_root or "").strip()
+    if not _cache_root:
+        _cache_root = str(Path(__file__).resolve().parent.parent.parent / "data_cache")
+    disk_cache = DiskBarCache(_cache_root)
+    dm.disk_cache = disk_cache
+    _logger.info("本地行情仓库挂载: %s", _cache_root)
 
     _ee = EventEngine()
     await _ee.start()
@@ -260,6 +271,36 @@ async def get_data(
 ):
     service: DataService = app.state.data_service
     return await service.query_bars(symbol, exchange, interval, start, end, page, page_size)
+
+
+@app.get("/data/cache")
+async def get_data_cache_stats():
+    """本地行情仓库（Parquet 写缓存）概览：文件数 / 行数 / 最新交易日 / 根目录。"""
+    dm: DataManager = app.state.dm
+    if dm is None or dm.disk_cache is None:
+        return {"enabled": False}
+    try:
+        stats = dm.disk_cache.stats()
+        return {"enabled": True, **stats}
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("读取行情仓库统计失败: %s", exc)
+        return {"enabled": True, "error": str(exc)}
+
+
+@app.delete("/data/cache")
+async def purge_data_cache():
+    """清空本地行情仓库（删除全部 .parquet）。下次请求将重新从真实源拉取并重建。"""
+    dm: DataManager = app.state.dm
+    if dm is None or dm.disk_cache is None:
+        return {"ok": False, "error": "本地行情仓库未启用"}
+    removed = 0
+    for p in dm.disk_cache.root.glob("*.parquet"):
+        try:
+            p.unlink()
+            removed += 1
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("删除 %s 失败: %s", p, exc)
+    return {"ok": True, "removed": removed}
 
 
 @app.post("/research", response_model=ResearchResult)

@@ -119,7 +119,7 @@ summary = result.get("summary") or {}
 steps = result.get("steps") or []
 composite = result.get("composite") or {}
 
-# ------------------------------------------------------------- 数据源标识
+# ------------------------------------------------------------- 数据源标识 + 缓存状态
 _data_src = result.get("data_sources") or {}
 _src_label = {k: v for k, v in _data_src.items()}
 if result.get("is_real"):
@@ -131,6 +131,16 @@ if result.get("is_real"):
 else:
     st.markdown(badge("🧪 Mock 合成数据（离线）", "warning"), unsafe_allow_html=True)
     st.caption("未取到真实行情，已回退 Mock 合成数据。配置真实数据源后可跑真实标的。")
+
+_cache = result.get("cache") or {}
+if _cache.get("enabled"):
+    _last = _cache.get("last_datetime")
+    _cache_note = f"本地行情仓库已启用 · {_cache.get('files', 0)} 文件 / {_cache.get('rows', 0)} 根 K 线"
+    if isinstance(_cache.get("last_datetime"), str):
+        _cache_note += f" · 最新数据 {_cache['last_datetime'][:10]}"
+    else:
+        _cache_note += f" · 最新数据 {_last}"
+    st.caption(f"⚡ {_cache_note}（真实源结果落盘，二次运行秒级返回，无需重复联网拉取）")
 
 # ------------------------------------------------------------- 结论
 mean_oos = summary.get("mean_test_sharpe")

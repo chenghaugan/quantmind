@@ -100,7 +100,42 @@ test 才是 OOS 回测），并逐代表因子做多空组合回测；`run_compo
 
 ---
 
-## 六、相关代码路径
+## 六、真实行情秒级复用：本地行情仓库（Parquet 写缓存）
+
+`/factor/pipeline` 若每次都用真实标的（如 `rb0/hc0/bu0/i0`），首次会走 AKShare
+实时拉取（限频+回退，动辄数分钟）。为避免每次联网，`DataManager` 内置了
+**本地行情仓库**（`data/store/disk_cache.py`，`DiskBarCache`）：
+
+- **透明读缓存**：请求先查本地 `.parquet`（按 `symbol.exchange.interval` 分文件、
+  存全量历史），命中即秒级返回（实测 `rb0.SHFE.1d` 4215 根 ≈ **0.17s**）。
+- **自动回写**：只有**真实源**（非 mock）返回的结果才落盘；mock 合成数据**不入库**，
+  避免污染仓库。
+- **源判定**：`DataManager` 记录每个标的有实际由哪个源提供——
+  命中磁盘缓存标 `disk_cache`，命中持久库标 `persistent_store`，否则标真实 feed / mock。
+- **窗口切分**：仓库存全量历史，任意 `start/end` 窗口都直接从磁盘切片。
+
+### 启用 / 配置
+- 未显式配置时默认使用项目根 `data_cache/`（`app.py` lifespan 自动挂载），开箱即用。
+- 也可在 `.env` 设 `QM_LOCAL_CACHE_ROOT=<目录>` 指定自定义位置。
+- 强制忽略缓存重拉：构造 `DiskBarCache(root, refresh=True)`。
+
+### 运营 / 清空
+- 查看仓库概览：`GET /data/cache` → `{enabled, files, rows, last_datetime, root}`。
+- 清空重建：`DELETE /data/cache`（下次请求自动从真实源重拉并重建）。
+- 流水线响应里带 `cache` 字段（`files/rows/last_datetime`），前端 18 号页已展示。
+
+### 典型耗时对比
+| 场景 | 数据获取耗时 |
+|---|---|
+| 首次（真实源联网拉取，含限频回退） | 数分钟 |
+| 二次及以后（命中本地仓库） | < 0.2 秒 |
+
+> 注：流水线其余耗时（LLM 搜索 / 逐因子 OOS 回测）为**研究计算**，与数据取数无关；
+> 数据取数已是秒级，缓存解决的是「每次重复联网拉行情」这一瓶颈。
+
+---
+
+## 七、相关代码路径
 
 ```
 quantmind/
@@ -111,10 +146,14 @@ quantmind/
     cross_sectional_backtest.py  # 因子→多空组合回测
     eval.py / evaluator.py   # 因子评测（IC/IR/分组）
     factors/panel_expr.py    # 面板 DSL 求值
+  data/
+    manager.py               # DataManager（查询链：本地仓库→持久库→数据源回退→回写）
+    store/disk_cache.py      # 本地行情仓库（DiskBarCache，Parquet 写缓存）
   ai/provider.py            # LLM Provider（真实 / Mock）
 examples/
   end_to_end_factor_pipeline.py   # 本示例
 tests/
   test_combine.py            # 组合模块测试
+  test_disk_cache.py         # 本地行情仓库测试
   test_pipeline_dedup.py     # 流水线测试
 ```

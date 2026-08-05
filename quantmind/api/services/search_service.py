@@ -369,6 +369,14 @@ class SearchService:
         # 数据源透明度：到底用了真实行情还是 mock
         src_names = {k: v for k, v in sources.items() if v}
 
+        # 本地行情仓库（Parquet 写缓存）状态：用于提示「是否已用秒级缓存而非联网拉取」
+        cache_info: Dict[str, Any] = {"enabled": bool(self.dm.disk_cache)}
+        if self.dm.disk_cache is not None:
+            try:
+                cache_info.update(self.dm.disk_cache.stats())
+            except Exception:  # noqa: BLE001
+                pass
+
         out = {
             "algo": report["config"]["algo"],
             "n_symbols": len(panel.symbols),
@@ -377,6 +385,7 @@ class SearchService:
                            panel.dates[-1].isoformat() if len(panel.dates) else None],
             "data_sources": src_names,
             "is_real": bool(src_names) and any(v and v != "mock" for v in src_names.values()),
+            "cache": cache_info,
             "summary": _sanitize(report["summary"]),
             "steps": _sanitize(report["steps"]),
             "composite": _sanitize(composite),

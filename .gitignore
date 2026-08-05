@@ -19,6 +19,7 @@ quantmind/config/
 *.db
 *.duckdb
 data/cache/
+data_cache/
 
 # Logs
 logs/
