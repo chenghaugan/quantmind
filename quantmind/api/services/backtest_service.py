@@ -17,6 +17,7 @@ from ...strategy import (
     VolTargetStrategy,
     PairTradingStrategy,
 )
+from ...strategy.components import ComposableStrategy
 from ...backtest.walkforward import walk_forward
 from ..schemas import BacktestRequest, WalkForwardRequest, StrategyInfo
 
@@ -29,6 +30,7 @@ _STRATEGY_MAP = {
     "multifactor": MultiFactorStrategy,
     "vol_target": VolTargetStrategy,
     "pair": PairTradingStrategy,
+    "composable": ComposableStrategy,
 }
 
 
@@ -70,6 +72,11 @@ class BacktestService:
                 name="pair",
                 description="配对交易：价差合成标的 z-score 均值回复",
                 parameters={"window": 30, "entry_z": 1.5, "exit_z": 0.3, "size": 1, "max_pos": 1.0},
+            ),
+            StrategyInfo(
+                name="composable",
+                description="5 组件可组合策略（Alpha/Portfolio/Risk/Execution 可插拔）",
+                parameters={"alpha": "MultiFactorAlpha/MomentumAlpha", "risk": "NullRisk/RiskGateModel"},
             ),
         ]
 

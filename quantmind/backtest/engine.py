@@ -101,6 +101,17 @@ class BacktestEngine(StrategyContext):
         self.strategy.vt_symbols = [vt_symbol]
         self._primary = vt_symbol
 
+    def set_universe(self, vt_symbols: List[str]) -> None:
+        """为已装配的策略指定完整标的池（多标的 M5）。
+
+        引擎的回测循环本就会逐标的驱动 ``on_bar``（遍历 ``self.data``），
+        这里把候选标的写入 ``strategy.vt_symbols``，供 Universe/Alpha 组件感知全部标的。
+        """
+        if self.strategy is None:
+            raise RuntimeError("先调用 add_strategy 再设置标的池")
+        kept = [vt for vt in vt_symbols if vt in self.data]
+        self.strategy.vt_symbols = kept or list(self.data.keys())
+
     # ---- StrategyContext 接口 ----
     def get_history(self, vt_symbol: str, count: int) -> List[BarData]:
         bars = self.data.get(vt_symbol, [])

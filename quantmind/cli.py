@@ -29,12 +29,21 @@ from .core.contracts import default_size
 from .research import MomentumFactor, FactorEvaluator, FactorSpec, build_model_from_specs, build_factor_registry, eval_factor_expression
 from .research.factors.alpha_cs import Panel, list_alpha_cs
 from .strategy import run_strategy, MultiFactorStrategy, DualMaStrategy, VolTargetStrategy, PairTradingStrategy, build_spread_bars
+from .strategy.components import ComposableStrategy, MultiFactorAlpha, MomentumAlpha
 from .ai import ResearchAgent
 from .monitoring import Notifier
 
 app = typer.Typer(help="QuantMind 量化投研框架 CLI")
 console = Console()
 _logger = logging.getLogger("quantmind.cli")
+
+_STRATEGY_MAP = {
+    "multifactor": MultiFactorStrategy,
+    "dual_ma": DualMaStrategy,
+    "vol_target": VolTargetStrategy,
+    "pair": PairTradingStrategy,
+    "composable": ComposableStrategy,
+}
 
 SMOKE_CASES = [
     ("rb0", Exchange.SHFE, Interval.DAILY, "商品期货主连(螺纹)"),
@@ -122,7 +131,7 @@ def cs(
 def backtest(
     symbol: str = typer.Option("rb0"),
     exchange: str = typer.Option("SHFE"),
-    strategy: str = typer.Option("multifactor", help="dual_ma | multifactor | vol_target | pair"),
+    strategy: str = typer.Option("multifactor", help="dual_ma | multifactor | vol_target | pair | composable"),
     mode: str = typer.Option("backtest", help="backtest | paper | live"),
     gateway: str = typer.Option("ctp"),
     years: int = typer.Option(1),
@@ -166,7 +175,7 @@ def e2e() -> None:
 def wf(
     symbol: str = typer.Option("rb0"),
     exchange: str = typer.Option("SHFE"),
-    strategy: str = typer.Option("multifactor", help="dual_ma | multifactor | vol_target | pair"),
+    strategy: str = typer.Option("multifactor", help="dual_ma | multifactor | vol_target | pair | composable"),
     years: int = typer.Option(3),
     train_window: int = typer.Option(250, help="训练/预热窗口（根）"),
     test_window: int = typer.Option(60, help="每折测试窗口（根）"),
@@ -296,8 +305,7 @@ async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_li
         console.print("[red]无数据[/red]"); return
     vt = f"{symbol}.{exchange.upper()}"
     sizes = {vt: default_size(vt)}
-    strat_class = {"multifactor": MultiFactorStrategy, "dual_ma": DualMaStrategy,
-                   "vol_target": VolTargetStrategy, "pair": PairTradingStrategy}.get(strategy, MultiFactorStrategy)
+    strat_class = _STRATEGY_MAP.get(strategy, MultiFactorStrategy)
     setting = {"size": sizes[vt], "max_pos": 1.0}
     if exclude_limit:
         setting["exclude_limit"] = True
@@ -334,8 +342,7 @@ async def _wf(symbol, exchange, strategy, years, train_window, test_window, step
         console.print(f"[red]样本不足：需 ≥ {train_window + test_window} 根，仅 {len(bars)}[/red]"); return
     vt = f"{symbol}.{exchange.upper()}"
     sizes = {vt: default_size(vt)}
-    strat_class = {"multifactor": MultiFactorStrategy, "dual_ma": DualMaStrategy,
-                   "vol_target": VolTargetStrategy, "pair": PairTradingStrategy}.get(strategy, MultiFactorStrategy)
+    strat_class = _STRATEGY_MAP.get(strategy, MultiFactorStrategy)
     setting = {"size": sizes[vt], "max_pos": 1.0}
     res = walk_forward(bars, strat_class, setting, vt,
                        train_window=train_window, test_window=test_window, step=step,
