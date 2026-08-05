@@ -1,13 +1,15 @@
-"""实时监控与手动下单（真实 WebSocket 事件流）。
+"""实时监控与手动下单（WebSocket 事件流 + 结构化仪表）。
 
-线程安全模型（已验证稳定）：后台 daemon 线程只把消息 **put 进 Queue**，
-主线程在 ``@st.fragment(run_every=2)`` 里 **仅读 Queue、仅写 session_state**，
-避免跨线程操作 Streamlit 内部状态导致崩溃。
+方案 C（WS 前端消费）：改用可复用的 ``utils/ws_client.WSClient``（基于已安装的
+``websockets`` asyncio 客户端 + 后台线程 + 自动重连），从后端 ``/ws`` 接收实时
+行情 / 信号 / 持仓 / 成交 / 风控事件，并在**结构化仪表**中即时刷新。
+
+线程安全模型（已验证稳定）：后台 daemon 线程只把消息 **put 进 Queue**，主线程在
+``@st.fragment(run_every=2)`` 里 **仅读 Queue、仅写 session_state**，避免跨线程
+操作 Streamlit 内部状态导致崩溃。
 """
 import sys
 import json
-import threading
-import queue
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -15,22 +17,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import streamlit as st  # noqa: E402
 
 from utils.theme import (  # noqa: E402
-    setup_page, page_header, section, note, badge, guard_error,
+    setup_page, page_header, section, note, badge, guard_error, kpi_row,
 )
 from utils.api_client import APIClient  # noqa: E402
-
-WS_URL = "ws://127.0.0.1:8000/ws"
+from utils.ws_client import WSClient, WS_URL  # noqa: E402
 
 setup_page("实时监控", "📡")
 page_header(
     "实时监控",
-    "通过 WebSocket 真实连接后端事件总线，接收实时行情 / 信号 / 成交事件；并支持手动下单试算。",
+    "通过 WebSocket 订阅后端事件总线：行情 / 信号 / 持仓 / 成交 / 风控事件即时刷新仪表；并支持手动下单试算。",
     "📡",
 )
 
 note(
-    "**事件流说明**：连接后服务端会先回 `hello` 握手；运行回测 / 模拟交易时策略事件经事件引擎广播到所有客户端。"
-    "支持 `eTick / eBar / eSignal / eOrder / eTrade / ePosition / eAccount / eLog`。",
+    "**事件流说明**：连接后服务端先回 `hello` 握手；连接断开会自动按退避秒数重连。"
+    "支持 `eTick / eBar / eSignal / eOrder / eTrade / ePosition / eAccount / eRisk / eLog`。",
     "info",
 )
 
@@ -38,62 +39,58 @@ with st.expander("🔌 WebSocket 连接说明", expanded=False):
     st.markdown(
         f"**端点**：`{WS_URL}`\n\n"
         "**握手**：`{\"type\": \"hello\", \"msg\": \"QuantMind WebSocket 已连接\"}`\n\n"
-        "**回显测试**：发送任意 JSON 会被服务端原样回显。\n\n"
-        "```python\nimport websocket\nws = websocket.WebSocketApp(\"" + WS_URL + "\")\nws.run_forever()\n```"
+        "**自动重连**：连接失败会按 1s→2s→…→30s 退避重连，直至手动断开。\n\n"
+        "```python\nfrom utils.ws_client import WSClient, connect_ws\n"
+        "client = connect_ws()\n# client.messages 读取事件流（Queue）\n```"
     )
 
-# ===== Session State：后台线程只写 Queue，主线程只写 messages =====
+# ===== Session State：后台线程只写 Queue，主线程只写 state =====
 for key, default in [
-    ("ws", None),
+    ("ws_client", None),
     ("ws_connected", False),
-    ("ws_queue", None),
-    ("ws_messages", []),
+    ("ws_messages", []),          # 滚动原始事件日志
+    ("ws_latest", {}),            # 结构化最新状态：{数据类型: {symbol: data}}
+    ("ws_trades", []),            # 最近成交（eTrade）
+    ("ws_risk_events", []),       # 最近风控事件（eRisk）
     ("ws_error", None),
 ]:
     if key not in st.session_state:
-        st.session_state[key] = default if key != "ws_queue" else queue.Queue()
-
-
-def _reader():
-    ws = st.session_state.ws
-    if ws is None:
-        return
-    ws.settimeout(1.0)
-    while st.session_state.ws_connected:
-        try:
-            raw = ws.recv()
-        except Exception:
-            if st.session_state.ws_connected:
-                continue
-            break
-        try:
-            msg = json.loads(raw) if isinstance(raw, str) else raw
-        except Exception:
-            msg = {"type": "raw", "data": raw}
-        st.session_state.ws_queue.put(msg)
+        st.session_state[key] = default
 
 
 def connect():
-    import websocket  # 延迟导入，无依赖时页面不崩
-
-    ws = websocket.create_connection(WS_URL, timeout=10)
-    st.session_state.ws = ws
+    """创建并启动 WSClient（后台线程自动重连）。"""
+    client = WSClient(WS_URL)
+    client.start()
+    st.session_state.ws_client = client
     st.session_state.ws_connected = True
     st.session_state.ws_error = None
     st.session_state.ws_messages = []
-    st.session_state.ws_queue = queue.Queue()
-    threading.Thread(target=_reader, daemon=True).start()
+    st.session_state.ws_latest = {}
+    st.session_state.ws_trades = []
+    st.session_state.ws_risk_events = []
 
 
 def disconnect():
     st.session_state.ws_connected = False
-    ws = st.session_state.ws
-    if ws is not None:
-        try:
-            ws.close()
-        except Exception:
-            pass
-    st.session_state.ws = None
+    client = st.session_state.ws_client
+    if client is not None:
+        client.stop()
+    st.session_state.ws_client = None
+
+
+def _symbol_of(data) -> str:
+    """从事件 data 里尽量取出完整标的标识（symbol.exchange，优先 vt_symbol）。"""
+    if isinstance(data, dict):
+        vt = data.get("vt_symbol")
+        if vt:
+            return str(vt)
+        sym = data.get("symbol")
+        exch = data.get("exchange")
+        if sym and exch:
+            return f"{sym}.{exch}"
+        return str(sym or "")
+    return ""
 
 
 # ===== 连接控制 =====
@@ -112,57 +109,165 @@ with c2:
         disconnect()
         st.rerun()
 
-if st.session_state.ws_connected:
-    st.markdown(badge("已连接", "success"), unsafe_allow_html=True)
-    st.caption(WS_URL)
+client = st.session_state.ws_client
+if st.session_state.ws_connected and client is not None:
+    # 同步后台线程的连接状态（断线重连期间会回到 False）
+    st.session_state.ws_connected = client.connected
+    if client.error:
+        st.session_state.ws_error = client.error
+    if client.connected:
+        st.markdown(badge("已连接", "success"), unsafe_allow_html=True)
+        st.caption(WS_URL)
+    else:
+        st.markdown(badge("重连中…", "warning"), unsafe_allow_html=True)
+        st.caption("连接中断，正在自动重连")
 elif st.session_state.ws_error:
     st.markdown(badge("连接错误", "danger"), unsafe_allow_html=True)
     st.caption(st.session_state.ws_error)
 
-# ===== 发送测试消息 =====
-if st.session_state.ws_connected:
-    with st.form("ws_send_form", border=True):
-        ca, cb = st.columns([4, 1])
-        with ca:
-            payload = st.text_input("发送测试消息 (JSON)", '{"action": "ping"}')
-        with cb:
-            st.write("")
-            submitted = st.form_submit_button("发送", width="stretch")
-    if submitted:
+st.markdown("---")
+
+# ===== 结构化实时仪表（M2：即时刷新） =====
+if st.session_state.ws_connected and client is not None:
+    section("实时仪表", "从事件流即时刷新：行情 / 信号 / 持仓 / 成交 / 风控")
+
+
+    @st.fragment(run_every=2)
+    def dashboard():
+        q = client.messages
         try:
-            st.session_state.ws.send(payload)
-            st.toast("已发送，等待 echo 回包…")
-        except Exception as e:
-            st.error(f"发送失败：{e}")
+            while True:
+                m = q.get_nowait()
+                t = m.get("type", "")
+                d = m.get("data", m)
+                # 原始日志（滚动，最多 200 条）
+                st.session_state.ws_messages.append(m)
+                # 结构化最新状态：eSignal 用 dict 全文，其余按 symbol 记最新
+                if t == "eSignal":
+                    st.session_state.ws_latest["eSignal"] = d
+                elif t in ("eBar", "eTick", "ePosition"):
+                    sym = _symbol_of(d)
+                    if sym:
+                        st.session_state.ws_latest.setdefault(t, {})[sym] = d
+                elif t == "eTrade":
+                    st.session_state.ws_trades.append(d)
+                elif t == "eRisk":
+                    st.session_state.ws_risk_events.append(d)
+                elif t == "eAccount":
+                    st.session_state.ws_latest["eAccount"] = d
+        except Exception:
+            pass
+
+        # 裁剪
+        if len(st.session_state.ws_messages) > 200:
+            st.session_state.ws_messages = st.session_state.ws_messages[-200:]
+        if len(st.session_state.ws_trades) > 50:
+            st.session_state.ws_trades = st.session_state.ws_trades[-50:]
+        if len(st.session_state.ws_risk_events) > 20:
+            st.session_state.ws_risk_events = st.session_state.ws_risk_events[-20:]
+
+        latest = st.session_state.ws_latest
+
+        # ---- 账户卡（eAccount）----
+        acct = latest.get("eAccount")
+        if isinstance(acct, dict) and (acct.get("balance") is not None
+                                       or acct.get("available") is not None):
+            kpi_row([
+                {"label": "账户余额", "value": acct.get("balance", 0.0), "tone": "accent"},
+                {"label": "可用资金", "value": acct.get("available", 0.0)},
+                {"label": "冻结", "value": acct.get("frozen", 0.0)},
+            ])
+            st.write("")
+
+        # ---- 行情卡（eBar / eTick）----
+        bars = latest.get("eBar") or {}
+        ticks = latest.get("eTick") or {}
+        if bars or ticks:
+            rows = []
+            for sym, b in bars.items():
+                rows.append({
+                    "合约": sym,
+                    "开": b.get("open", ""),
+                    "高": b.get("high", ""),
+                    "低": b.get("low", ""),
+                    "收": b.get("close", ""),
+                    "量": b.get("volume", ""),
+                })
+            for sym, tk in ticks.items():
+                rows.append({"合约": sym, "开": "", "高": "", "低": "",
+                             "收": tk.get("last_price", ""), "量": tk.get("volume", "")})
+            import pandas as pd
+            st.markdown(badge(f"最新行情 {len(rows)}", "info"), unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        # ---- 信号（eSignal）----
+        sig = latest.get("eSignal")
+        if isinstance(sig, dict):
+            target = sig.get("target")
+            vt = sig.get("vt_symbol", "")
+            tone = "up" if (target or 0) > 0 else "down" if (target or 0) < 0 else "neutral"
+            kpi_row([{"label": f"信号 · {vt}", "value": target, "tone": tone}])
+            st.write("")
+
+        # ---- 持仓（ePosition）----
+        positions = latest.get("ePosition") or {}
+        if positions:
+            import pandas as pd
+            pos_rows = [{
+                "合约": sym,
+                "净持仓": p.get("volume", 0),
+                "均价": p.get("price", ""),
+                "浮动盈亏": p.get("pnl", ""),
+            } for sym, p in positions.items() if p.get("volume") != 0]
+            if pos_rows:
+                st.markdown(badge(f"持仓 {len(pos_rows)}", "violet"), unsafe_allow_html=True)
+                st.dataframe(pd.DataFrame(pos_rows), width="stretch", hide_index=True)
+
+        # ---- 最近成交（eTrade）----
+        if st.session_state.ws_trades:
+            import pandas as pd
+            t_rows = [{
+                "合约": (tr.get("symbol", "") if isinstance(tr, dict) else ""),
+                "方向": (tr.get("direction", "") if isinstance(tr, dict) else ""),
+                "价格": (tr.get("price", "") if isinstance(tr, dict) else ""),
+                "手数": (tr.get("volume", "") if isinstance(tr, dict) else ""),
+            } for tr in st.session_state.ws_trades[-10:]]
+            st.markdown(badge("最近成交", "success"), unsafe_allow_html=True)
+            st.dataframe(pd.DataFrame(t_rows), width="stretch", height=220, hide_index=True)
+
+        # ---- 最近风控（eRisk）----
+        if st.session_state.ws_risk_events:
+            st.markdown(badge(f"风控事件 {len(st.session_state.ws_risk_events)}", "danger"),
+                        unsafe_allow_html=True)
+            for ev in st.session_state.ws_risk_events[-5:]:
+                st.caption(json.dumps(ev, ensure_ascii=False)[:160])
+
+
+    dashboard()
 
 st.markdown("---")
 
-# ===== 实时事件流（自动刷新）=====
+# ===== 实时事件流（原始日志） =====
 section("实时事件流")
 
 
 @st.fragment(run_every=2)
 def live_feed():
-    q = st.session_state.ws_queue
-    while not q.empty():
-        st.session_state.ws_messages.append(q.get())
+    if not st.session_state.ws_connected:
+        st.caption("未连接。点击上方「连接 WebSocket」开始接收事件。")
+        return
     msgs = st.session_state.ws_messages
-    if len(msgs) > 200:
-        st.session_state.ws_messages = msgs[-200:]
-        msgs = st.session_state.ws_messages
-
     if msgs:
         types = {}
         for m in msgs:
             t = m.get("type", "unknown")
             types[t] = types.get(t, 0) + 1
-        n = len(types)
-        cols = st.columns(min(n, 6) if n else 1)
+        cols = st.columns(min(len(types), 6) if types else 1)
         for i, (t, cnt) in enumerate(types.items()):
             with cols[i % len(cols)]:
                 st.metric(t, cnt)
     else:
-        st.caption("尚无事件。连接后将自动收到 hello 握手；发送测试消息可触发 echo 回显。")
+        st.caption("已连接，等待事件…")
 
     if msgs and st.button("🧹 清空事件", key="clear_ws"):
         st.session_state.ws_messages = []
