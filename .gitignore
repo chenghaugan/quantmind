@@ -39,3 +39,5 @@ dist/
 # Runtime logs
 backend.log
 backend.log.err
+streamlit.log
+streamlit.log.err
