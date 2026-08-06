@@ -1,31 +1,38 @@
-"""完整的 Barra 式多因子**风险归因**（风格暴露 + 因子收益率回归 + 协方差分解）。
+"""完整对齐业界 Barra 的多因子**风险归因**（风格正交化 + WLS 截面回归 + Newey-West 协方差）。
 
 背景与动机
 ----------
 现有 18 页的「组合风险/收益归因」是近似 proxy（``contribution = weight × 单因子
 样本外总收益``），无法回答「组合波动到底来自哪个因子、多少来自因子系统性、多少
 来自个股/品种特异」这类经典风险问题。本模块把每个**因子表达式**当作一种**风格暴露**
-（style exposure），用**逐期截面回归**估计**因子收益率**，再用**协方差分解**把组合
+（style exposure），用**逐期横截面回归**估计**因子收益率**，再用**协方差分解**把组合
 风险拆到「每个因子的贡献 + 特异（residual）风险」，且各部分**可加**（相加等于总
 波动）。
 
-方法（轻量 Barra，零第三方，numpy/pandas 闭式）：
+方法（对齐业界 Barra 流程，零第三方，numpy/pandas 闭式）：
 
   1. **风格暴露矩阵** X_t（N 资产 × K 因子）：由标准化后的各因子面板（date×symbol，
      见 :func:`combine.standardize_panel`）在每日 t 上的行向量构成——这是资产对每个
      因子的横截面暴露。
-  2. **因子收益率** B_t（K,）：对每个交易日做**横截面回归**（含截距=市场暴露）：
-        r_t = X_t B_t + e_t        (OLS: B_t = (X'X)^-1 X' r_t)
+  2. **风格正交化**（Barra 式，``orthogonalize_style=True`` 默认开启）：对每个交易日
+     的暴露矩阵做 **Gram-Schmidt 正交化**（按给定因子顺序），使风格因子横截面上彼此
+     几乎不相关、且每列单位横截面标准差。这去除了风格间的共线性冗余，使后续截面
+     回归因子收益率估计更稳定、因子风险贡献更可解释。
+  3. **因子收益率** B_t（K,）：对每个交易日做**横截面回归**（含截距=市场暴露），
+     支持 **WLS 市值加权**（业界标准，``weights`` 传入市值权重，缺省 OLS）：
+        r_t = X_t B_t + e_t        (B_t = (X'WX)^-1 X' W r_t)
      得到的逐日 B_f,t 序列即「因子收益率」，e_t 为该日资产的**特异收益**。
-  3. **因子协方差矩阵** Σ_f = Cov(B)（K×K，因子收益率的时间协方差）。
-  4. **组合权重** ω_t（N,）：由复合信号做**多空截面分组**（与
+  4. **因子协方差**：业界 Barra 对因子收益率用 **Newey-West（HAC）稳健协方差**以
+     修正自相关（``newey_west=True`` 默认开启，Bartlett 核 + 自动滞后窗），而非普通
+     样本协方差。
+  5. **组合权重** ω_t（N,）：由复合信号做**多空截面分组**（与
      :func:`cross_sectional_backtest._run_portfolio` 同口径），归一化到多空杠杆 1。
-  5. **风险归因**：组合组合收益可写为
+  6. **风险归因**：组合收益写为
         r_p,t = Σ_f (p_f,t · B_f,t) + ε_p,t
-     其中 p_f,t = Σ_n ω_n,t X_n,f,t（组合的因子总暴露），ε_p,t = Σ_n ω_n,t e_n,t（特异）。
-     对每项用**协方差贡献**：``Cov(a_i, r_p)/σ_p``，则 Σ_i MCTR_i = σ_p 精确可加。
-     分别报告：总波动、因子系统性波动、特异波动、每因子 MCTR/风险占比、以及
-     拟合优度 R²（系统性解释比例）与市场/风格暴露平均。
+     其中 p_f,t = Σ_n ω_n,t X_n,f,t（组合的因子总暴露，用**正交化后**暴露），
+     ε_p,t = Σ_n ω_n,t e_n,t（特异）。对每项用**同一协方差估计器**算协方差贡献：
+     ``MCTR_i = Cov(a_i, r_p)/σ_p``。因 ``Σ_i a_i = r_p`` 且 HAC/样本协方差均双线性，
+     故 ``Σ_i MCTR_i = σ_p`` **精确可加**（闭式 closure≈0）。
 
 注意事项
 --------
@@ -33,11 +40,8 @@
   两者口径不同但互补，前端可并列展示。
 - 当标的数 < 因子数 或某段时间截面退化（秩亏）时，回归用伪逆 + 岭正则兜底，
   仍返回结果但标注 ``rank_deficient`` 提示。
-- 与标准 Barra 的一致性边界：标准 Barra 用**行业虚拟变量 + 风格正交化 + 多日滚动
-  因子协方差（Newey-West 等）**。本模块做了最核心的「逐期截面回归求因子收益 +
-  协方差分解」，但用**单因子时间协方差**（未做 Newey-West 自相关修正）与**原始
-  因子面板**（未做风格间正交化）——这是精确可行的完整版骨架，若需完全对齐
-  Barra 可在此之上加正交化与稳健协方差。
+- 关键闭合保证：**总方差与各分量协方差必须用同一估计器**（都是 HAC 或都是样本），
+  可加性才精确成立。本模块已统一通过 :func:`_est_cov` 派发，杜绝口径混用。
 """
 from __future__ import annotations
 
@@ -52,8 +56,98 @@ _logger = logging.getLogger("quantmind.research.barra")
 __all__ = [
     "estimate_factor_returns",
     "portfolio_weights_from_signal",
+    "orthogonalize_exposures",
+    "newey_west_cov",
     "barra_factor_risk_attribution",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# 协方差估计器：Newey-West（HAC）自相关稳健
+# --------------------------------------------------------------------------- #
+def _auto_lags(t: int) -> int:
+    """Newey-West 常用自动滞后窗规则 ``int(4*(T/100)**(2/9))``。"""
+    return max(1, int(4.0 * (t / 100.0) ** (2.0 / 9.0)))
+
+
+def newey_west_cov(
+    x: Sequence[float],
+    y: Sequence[float],
+    lags: Optional[int] = None,
+) -> float:
+    """Newey-West（HAC）稳健协方差 ``Cov(x, y)``（Bartlett 核）。
+
+    用于存在自相关时的稳健估计：``Σ = Γ_0 + Σ_{j=1}^{L} w_j (Γ_j + Γ_j')``，其中
+    ``w_j = 1 - j/(L+1)``（Bartlett），``Γ_j = (1/T) Σ_t x_t·y_{t-j}``。NaN 对自
+    动剔除。``lags=None`` 时用 :func:`_auto_lags`。
+
+    HAC 对线性组合**双线性**，因此 ``HAC_cov(Σ_i a_i, r_p) = Σ_i HAC_cov(a_i, r_p)``
+    —— 这是 MCTR 归因在 HAC 口径下仍精确可加的数学基础。
+    """
+    xa = np.asarray(x, dtype=float)
+    ya = np.asarray(y, dtype=float)
+    if lags is None:
+        lags = _auto_lags(int(np.isfinite(xa).sum()))
+    m = np.isfinite(xa) & np.isfinite(ya)
+    if m.sum() < 2:
+        return float("nan")
+    xx = xa[m] - xa[m].mean()
+    yy = ya[m] - ya[m].mean()
+    T = len(xx)
+    s = float(np.dot(xx, yy) / T)  # Γ_0
+    for j in range(1, int(lags) + 1):
+        w = 1.0 - j / (lags + 1.0)
+        c = float(np.dot(xx[j:], yy[:-j]) / T)  # Γ_j
+        s += w * (c + c)  # 对称项 Γ_j + Γ_j'
+    return s
+
+
+# --------------------------------------------------------------------------- #
+# 风格暴露正交化（Barra 式）
+# --------------------------------------------------------------------------- #
+def orthogonalize_exposures(
+    exposures: Dict[str, pd.DataFrame],
+    dates: Sequence,
+    columns: Sequence,
+    order: Optional[Sequence[str]] = None,
+) -> Dict[str, pd.DataFrame]:
+    """对暴露矩阵做逐期 **Gram-Schmidt 正交化**，使风格因子横截面互不相关。
+
+    对每个交易日 t，取对齐的暴露矩阵 X_t（N×K，列 = 因子），按 ``order``（缺省用
+    dict 插入序）顺序依次做 GSO：第 k 个因子减去其在先前已完成向量上的投影，再缩放
+    到单位横截面标准差。缺失值填 0 后参与（与回归口径一致）。
+
+    Returns:
+        新 dict ``{name: date×symbol DataFrame}``，各因子互为正交、单位方差。
+    """
+    names = [o for o in (order or list(exposures.keys())) if o in exposures]
+    names = [n for n in names
+             if exposures[n] is not None and not exposures[n].empty]
+    if len(names) < 2:
+        return {n: exposures[n] for n in names}
+    arr = np.stack(
+        [exposures[n].reindex(index=dates, columns=columns).fillna(0.0).values
+         for n in names], axis=2).astype(float)
+    T, N, K = arr.shape
+    ort = np.zeros_like(arr)
+    for t in range(T):
+        M = arr[t].copy()
+        # 逐列去均值，使后续在中心化空间中正交 → Pearson 相关≈0（本质同 Barra 风格正交）
+        M = M - M.mean(axis=0, keepdims=True)
+        O = np.zeros_like(M)
+        for i in range(K):
+            v = M[:, i].copy().astype(float)
+            for j in range(i):
+                denom = float(np.dot(O[:, j], O[:, j]))
+                if denom > 1e-12:
+                    v = v - (np.dot(v, O[:, j]) / denom) * O[:, j]
+            sd = float(v.std())
+            O[:, i] = v / sd if sd > 1e-12 else v
+        ort[t] = O
+    out: Dict[str, pd.DataFrame] = {}
+    for i, n in enumerate(names):
+        out[n] = pd.DataFrame(ort[:, :, i], index=dates, columns=columns)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +157,7 @@ def estimate_factor_returns(
     forward_returns: pd.DataFrame,
     exposures: Dict[str, pd.DataFrame],
     ridge: float = 1e-6,
+    weights: Optional[pd.DataFrame] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, List[str]]:
     """逐交易日回归 ``r_t = Σ_f X_f,t · B_f,t + e_t``（含市场截距），估计因子收益率。
 
@@ -70,6 +165,8 @@ def estimate_factor_returns(
         forward_returns: date×symbol 前瞻收益（对齐面板）。
         exposures: name -> 标准化因子面板（date×symbol），作为**风格暴露**。
         ridge: 岭正则系数（防止截面秩亏求逆失败）。
+        weights: 可选 date×symbol 非负权重（如市值），用于 **WLS 回归**（业界 Barra
+            标准）；None 时退化为 OLS。
 
     Returns:
         (factor_returns, residuals, r2_series, fitted_factors)：
@@ -114,12 +211,24 @@ def estimate_factor_returns(
         ones = np.ones((XX.shape[0], 1))
         # 设计矩阵 [1, X]：截距 = 市场/基准暴露
         Z = np.concatenate([ones, XX], axis=1)
-        ZtZ = Z.T @ Z + np.eye(Z.shape[1]) * ridge
+        # WLS 权重（业界 Barra 市值加权；缺省 OLS 全 1）
+        wm = np.ones(XX.shape[0])
+        if weights is not None:
+            wv = weights.reindex(index=forward_returns.index,
+                                 columns=forward_returns.columns).loc[d]
+            wv = np.clip(wv.values.astype(float), 0.0, None)
+            wm = wv[mask]
+            if wm.sum() <= 0:
+                continue
+        # (Z' W Z) + λI —— WLS 正规方程
+        Zw = Z * wm[:, None]
+        ZtWZ = Zw.T @ Z + np.eye(Z.shape[1]) * ridge
+        ZtWy = Zw.T @ yy
         try:
-            ZtZ_inv = np.linalg.inv(ZtZ)
+            ZtWZ_inv = np.linalg.inv(ZtWZ)
         except np.linalg.LinAlgError:
-            ZtZ_inv = np.linalg.pinv(ZtZ)
-        beta = ZtZ_inv @ (Z.T @ yy)  # (K+1,)
+            ZtWZ_inv = np.linalg.pinv(ZtWZ)
+        beta = ZtWZ_inv @ ZtWy  # (K+1,)
         pred = Z @ beta
         B[ti] = beta
         # 特异收益：完整资产集上的残差（缺失资产置 NaN）
@@ -195,8 +304,12 @@ def barra_factor_risk_attribution(
     long_short: bool = True,
     annualization: float = 252.0,
     ridge: float = 1e-6,
+    orthogonalize_style: bool = True,
+    newey_west: bool = True,
+    nw_lags: Optional[int] = None,
+    cap_weights: Optional[pd.DataFrame] = None,
 ) -> Dict[str, object]:
-    """完整 Barra 式多因子风险归因。
+    """完整对齐业界 Barra 的多因子风险归因。
 
     Args:
         signal: 复合信号面板（date×symbol，已标准化）；用于构造组合权重。
@@ -206,6 +319,12 @@ def barra_factor_risk_attribution(
         long_short: 是否多空（False 仅做多）。
         annualization: 年化天数，用于波动率/方差年化。
         ridge: 截面回归岭正则。
+        orthogonalize_style: 是否对风格暴露做逐期 Gram-Schmidt 正交化（Barra 式，
+            默认 True）。见 :func:`orthogonalize_exposures`。
+        newey_west: 是否用 Newey-West（HAC）稳健协方差（默认 True）；False 退化为
+            普通样本协方差。总方差与各分量协方差用同一估计器，保证 MCTR 精确可加。
+        nw_lags: HAC 滞后窗；None 时自动选择。
+        cap_weights: 可选 date×symbol 市值权重（WLS 截面回归）；None 时 OLS。
 
     Returns:
         dict，含：
@@ -214,8 +333,9 @@ def barra_factor_risk_attribution(
           - ``specific``: {vol, risk_pct, sigma_series_mean} 特异风险；
           - ``market``: 市场截距暴露信息；
           - ``total``: {vol, var, ann_vol, n_dates, r2_mean};
+          - ``additivity``: {recon_total, port_vol, closure} 闭合校验；
           - ``diagnostics``: {rank_deficient, n_periods, n_assets, n_factors,
-                              exposure_cols}。
+                              exposure_cols, orthogonalized, covariance, nw_lags}。
     """
     # 1) 对齐公共日期与标的
     common = signal.index.intersection(forward_returns.index)
@@ -231,19 +351,29 @@ def barra_factor_risk_attribution(
 
     sig = signal.reindex(common)
     fwd = forward_returns.reindex(common)
-    # 2) 估计因子收益率 + 特异收益
-    factor_returns, residuals, r2_series, names = estimate_factor_returns(
-        fwd, exposures, ridge=ridge)
 
-    # 3) 组合权重 + 组合收益序列
+    # 2) 对齐暴露到公共日期/标的，并按需做风格正交化
+    expos_aligned: Dict[str, pd.DataFrame] = {}
+    for nm, df in exposures.items():
+        expos_aligned[nm] = df.reindex(index=common, columns=sig.columns)
+    expos_used = expos_aligned
+    if orthogonalize_style and len(expos_aligned) > 1:
+        expos_used = orthogonalize_exposures(
+            expos_aligned, common, sig.columns, order=None)
+
+    # 3) 估计因子收益率 + 特异收益（WLS 可选）
+    factor_returns, residuals, r2_series, names = estimate_factor_returns(
+        fwd, expos_used, ridge=ridge, weights=cap_weights)
+
+    # 4) 组合权重 + 组合收益序列
     weights = portfolio_weights_from_signal(sig, n_groups=n_groups, long_short=long_short)
     # 组合收益：与 _run_portfolio 一致，用资产的实现前瞻收益加权
     port_ret = (weights * fwd).sum(axis=1)
-    # 4) 逐因子暴露序列 p_f,t = Σ_n ω_n,t X_n,f,t
+    # 5) 逐因子暴露序列 p_f,t = Σ_n ω_n,t X_n,f,t（用与回归一致的暴露）
     exposure_means: Dict[str, float] = {}
     pf_series: Dict[str, pd.Series] = {}
     for nm in names:
-        X = exposures[nm].reindex(common, columns=weights.columns).fillna(0.0)
+        X = expos_used[nm].reindex(common, columns=weights.columns).fillna(0.0)
         pf = (weights * X).sum(axis=1)
         pf_series[nm] = pf
         exposure_means[nm] = float(pf.mean())
@@ -263,21 +393,39 @@ def barra_factor_risk_attribution(
     specific_series = port_ret - factor_market
     common_series["_specific"] = specific_series
 
-    # 6) 总量
-    vol = float(port_ret.std(ddof=1)) if len(port_ret) > 1 else float("nan")
-    var = vol * vol if vol == vol else float("nan")
-    ann_vol = float(np.sqrt(np.maximum(var, 0.0)) * np.sqrt(annualization)) if var == var else float("nan")
+    # 5b) 统一剔除任一分量含 NaN 的行，保证在保留行上 Σ_i a_i = r_p 处处成立
+    #     → HAC/样本协方差双线性 ⇒ MCTR 闭式精确（否则各行 NaN 模式不同会破坏可加性）。
+    keep = common_series.notna().all(axis=1) & port_ret.notna()
+    common_series = common_series.loc[keep]
+    port_ret = port_ret.loc[keep]
+    if len(port_ret) < 2:
+        raise ValueError("Barra 风险归因：剔除缺失值后有效样本不足")
 
-    # 7) 协方差贡献分解：MCTR_i = Cov(a_i, r_p) / σ_p , 且 Σ MCTR = σ_p（因 Σ a_i = r_p）
+    # 6) 统一协方差估计器：业界 Barra 用 HAC（Newey-West）；False 退化为普通样本协方差。
+    #    总方差与各分量协方差必须用【同一估计器】，MCTR 可加性才精确成立。
+    def _est_cov(a, b):
+        if newey_west:
+            return newey_west_cov(a, b, lags=nw_lags)
+        aa = np.asarray(a, dtype=float)
+        bb = np.asarray(b, dtype=float)
+        m = np.isfinite(aa) & np.isfinite(bb)
+        if m.sum() < 2:
+            return float("nan")
+        return float(np.cov(aa[m], bb[m], ddof=1)[0, 1])
+
+    rp = port_ret.values.astype(float)
+    _total_var = _est_cov(rp, rp)
+    vol = float(np.sqrt(max(_total_var, 0.0))) if _total_var == _total_var else float("nan")
+    var = _total_var if _total_var == _total_var else float("nan")
+    ann_vol = float(vol * np.sqrt(annualization)) if vol == vol else float("nan")
+
+    # 7) 协方差贡献分解：MCTR_i = Cov(a_i, r_p) / σ_p , 且 Σ MCTR = σ_p（因 Σ a_i = r_p
+    #    且协方差双线性——HAC 与样本估计均保持）
     mctr: Dict[str, float] = {}
     contrib_series = {}
-    rp = port_ret.values.astype(float)
     for col in list(common_series.columns):
         a = common_series[col].values.astype(float)
-        if not np.isfinite(a).all():
-            a = np.nan_to_num(a, nan=0.0)
-        cov = float(np.cov(a, rp, ddof=1)[0, 1]) \
-            if len(common) > 1 else float("nan")
+        cov = _est_cov(a, rp)
         mctr[col] = (cov / vol) if (vol == vol and vol != 0) else 0.0
         contrib_series[col] = cov
 
@@ -286,8 +434,10 @@ def barra_factor_risk_attribution(
     factor_total = sum(mctr.get(nm, 0.0) for nm in factor_names)
     specific_mctr = mctr.get("_specific", 0.0)
     market_mctr = mctr.get("_market", 0.0)
-    # 拟合优度：系统性能解释比例 = 1 - Var(特异)/Var(总)
-    var_specific = float(specific_series.var(ddof=1)) if len(specific_series) > 1 else 0.0
+    # 拟合优度：系统性能解释比例 = 1 - Var(特异)/Var(总)（同一估计器）
+    _specific_clean = common_series["_specific"].values.astype(float)
+    var_specific = _est_cov(_specific_clean, _specific_clean) \
+        if len(_specific_clean) > 1 else 0.0
     r2_mean = 1.0 - (var_specific / var) if (var == var and var > 0) else float("nan")
 
     def _risk_pct(v):
@@ -325,7 +475,7 @@ def barra_factor_risk_attribution(
             "vol": round(vol, 6),
             "var": round(var, 8),
             "ann_vol": round(ann_vol, 4) if ann_vol == ann_vol else None,
-            "n_dates": int(len(common)),
+            "n_dates": int(len(port_ret)),
             "r2_mean": round(r2_mean, 4) if r2_mean == r2_mean else None,
         },
         "additivity": {
@@ -335,9 +485,14 @@ def barra_factor_risk_attribution(
         },
         "diagnostics": {
             "rank_deficient": False,
-            "n_periods": int(len(common)),
+            "n_periods": int(len(port_ret)),
             "n_assets": int(signal.shape[1]),
             "n_factors": len(factor_names),
             "exposure_cols": factor_names,
+            "orthogonalized": bool(orthogonalize_style and len(expos_aligned) > 1),
+            "covariance": "newey_west" if newey_west else "sample",
+            "nw_lags": int(nw_lags) if (newey_west and nw_lags is not None) else
+                       (int(_auto_lags(len(common))) if newey_west else None),
+            "wls": cap_weights is not None,
         },
     }

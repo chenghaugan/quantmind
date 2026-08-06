@@ -374,9 +374,10 @@ if composite:
         st.caption(f"⚠️ Barra 风险归因不可用: {_ra.get('error', '')[:120]}")
     elif isinstance(_ra, dict) and _ra.get("factors"):
         st.subheader("多因子风险归因（Barra 式）")
-        st.caption("**方法**：把每个因子看作一种风格暴露，逐交易日做横截面回归估计因子收益率，"
-                   "再用**协方差分解**（MCTR=Cov(成分,组合收益)/σ）把组合波动拆到各因子+特异风险，"
-                   "分解**可加**（各项之和=总波动）。")
+        st.caption("**方法**：把每个因子看作一种风格暴露，做**风格正交化**（因子横截面互不相关）+ "
+                   "逐交易日**横截面回归**（含市场截距）估计因子收益率，再用**协方差分解**"
+                   "（MCTR=Cov(成分,组合收益)/σ）把组合波动拆到各因子+特异风险，分解**可加**"
+                   "（各项之和=总波动）。")
         # 总量 KPI
         _tot = _ra.get("total") or {}
         _spec = _ra.get("specific") or {}
@@ -419,9 +420,14 @@ if composite:
         _figr.add_vline(x=0, line=dict(color="rgba(148,163,184,.5)", dash="dash"))
         st.plotly_chart(_figr, use_container_width=True, config={"displayModeBar": False})
         _add = _ra.get("additivity") or {}
+        _diag = _ra.get("diagnostics") or {}
+        _cov = _diag.get("covariance", "n/a")
+        _orth = "·正交化" if _diag.get("orthogonalized") else ""
+        _nwl = f"·NW滞后{_diag.get('nw_lags')}" if _cov == "newey_west" else ""
         st.caption(f"闭合校验：Σ 因子+特异+市场 = {fmt_num(_add.get('recon_total'), 4)} "
                    f"≈ 组合 σ = {fmt_num(_tot.get('vol'), 4)}"
-                   f"（残差 {fmt_num(_add.get('closure'), 6)}）")
+                   f"（残差 {fmt_num(_add.get('closure'), 6)}）　·　"
+                   f"协方差={_cov}{_orth}{_nwl}")
 
     # 因子相关矩阵热力图（去冗余后代表间的残差相关性）
     corr = composite.get("correlation")

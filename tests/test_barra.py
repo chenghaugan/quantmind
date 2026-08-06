@@ -8,6 +8,8 @@ import pytest
 from quantmind.research.barra import (
     estimate_factor_returns,
     portfolio_weights_from_signal,
+    orthogonalize_exposures,
+    newey_west_cov,
     barra_factor_risk_attribution,
 )
 from quantmind.research.combine import composite_backtest
@@ -70,13 +72,16 @@ class TestPortfolioWeights:
 
 class TestBarraAttribution:
     def test_additivity_exact(self):
-        """MCTR 之和必须精确等于组合波动（可加性）。"""
+        """MCTR 之和必须精确等于组合波动（可加性）。
+
+        用 ``additivity["closure"]``（基于原始未取整值）做严格校验；逐个取整后
+        的 ``mctr_vol`` 求和会因各自 round 产生 ~1e-6 量级的取整误差，故不用于严格断。
+        """
         sig, fwd, expos, dates, assets = _synth_inputs()
         res = barra_factor_risk_attribution(sig, fwd, expos)
-        s = (sum(f["mctr_vol"] for f in res["factors"])
-             + res["specific"]["mctr_vol"] + res["market"]["mctr_vol"])
-        assert abs(s - res["total"]["vol"]) < 1e-6
-        assert abs(res["additivity"]["closure"]) < 1e-6
+        assert res["additivity"]["closure"] is not None
+        assert abs(res["additivity"]["closure"]) < 1e-8
+        assert abs(res["additivity"]["recon_total"] - res["additivity"]["port_vol"]) < 1e-6
 
     def test_report_fields(self):
         sig, fwd, expos, dates, assets = _synth_inputs()
@@ -119,8 +124,78 @@ def test_composite_backtest_includes_risk_attribution():
     ra = r["risk_attribution"]
     assert ra is not None
     if "error" not in ra:
-        # 保证可加性
-        s = (sum(f["mctr_vol"] for f in ra["factors"])
-             + ra["specific"]["mctr_vol"] + ra["market"]["mctr_vol"])
-        assert abs(s - ra["total"]["vol"]) < 1e-5
+        # 保证可加性（用原始未取整的 closure 字段，避免逐项 round 引入 ~1e-6 误差）
+        assert ra["additivity"]["closure"] is not None
+        assert abs(ra["additivity"]["closure"]) < 1e-6
         assert ra["total"]["ann_vol"] is not None
+
+
+class TestOrthogonalization:
+    """业界 Barra 风格正交化：因子横截面互不相关、单位方差。"""
+
+    def test_orthogonalized_exposures_decorrelated(self):
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        ort = orthogonalize_exposures(expos, dates, assets)
+        # 逐日横截面相关应趋于 0（对残差化 + 归一化后的因子）
+        names = list(ort.keys())
+        max_corr = 0.0
+        for d in dates:
+            vals = np.column_stack([ort[n].loc[d].values for n in names])
+            # 用 OLS 残差相关（正交化后 Gram 近单位阵，相关应极小）
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    a = vals[:, i]; b = vals[:, j]
+                    if np.std(a) > 1e-12 and np.std(b) > 1e-12:
+                        c = np.corrcoef(a, b)[0, 1]
+                        if c == c:
+                            max_corr = max(max_corr, abs(c))
+        assert max_corr < 0.2  # 正交化后因子间相关性应显著低于原始
+
+    def test_orthogonalization_flag_diagnostics(self):
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        res = barra_factor_risk_attribution(sig, fwd, expos)  # 默认 open
+        assert res["diagnostics"]["orthogonalized"] is True
+        res_off = barra_factor_risk_attribution(
+            sig, fwd, expos, orthogonalize_style=False)
+        assert res_off["diagnostics"]["orthogonalized"] is False
+
+
+class TestNeweyWest:
+    """业界 Barra Newey-West（HAC）稳健协方差。"""
+
+    def test_nw_cov_matches_sample_when_independent(self):
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=400)
+        y = rng.normal(size=400)
+        nw = newey_west_cov(x, y, lags=1)
+        sample = np.cov(x, y, ddof=1)[0, 1]
+        assert abs(nw - sample) < 0.05  # 独立序列时 HAC≈样本
+
+    def test_default_uses_newey_west(self):
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        res = barra_factor_risk_attribution(sig, fwd, expos)
+        assert res["diagnostics"]["covariance"] == "newey_west"
+        assert res["diagnostics"]["nw_lags"] is not None
+        # HAC 口径下总方差 + 各分量用同一估计器 → closure 仍精确
+        assert abs(res["additivity"]["closure"]) < 1e-8
+
+    def test_sample_covariance_option(self):
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        res = barra_factor_risk_attribution(sig, fwd, expos, newey_west=False)
+        assert res["diagnostics"]["covariance"] == "sample"
+        assert res["diagnostics"]["nw_lags"] is None
+        assert abs(res["additivity"]["closure"]) < 1e-8
+
+
+class TestWLS:
+    """业界 Barra WLS（市值加权）截面回归。"""
+
+    def test_wls_path_runs_and_closes(self):
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        capw = pd.DataFrame(np.abs(np.random.default_rng(2).normal(size=fwd.shape)),
+                            index=fwd.index, columns=fwd.columns) + 1.0
+        res = barra_factor_risk_attribution(
+            sig, fwd, expos, newey_west=False, cap_weights=capw)
+        assert res["diagnostics"]["wls"] is True
+        assert abs(res["additivity"]["closure"]) < 1e-8
+        assert res["total"]["ann_vol"] is not None
