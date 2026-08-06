@@ -167,3 +167,18 @@ class TestPipeline:
                              min_abs_ic=10.0, max_candidates=3, persist_pairs=False)
         rep = run_pipeline(panel, config=cfg)
         assert rep["summary"]["backtested_count"] == 0
+
+    def test_step_reports_have_visual_series(self, panel):
+        """每个代表因子 step 应带 daily_returns（逐因子净值/回撤）与 ic_series（IC 时序）。"""
+        cfg = PipelineConfig(seeds=["delta(close,5)", "ts_zscore(close,30)"],
+                             algo="co", rounds=2, max_candidates=4,
+                             run_composite=True, persist_pairs=False)
+        rep = run_pipeline(panel, config=cfg)
+        assert rep["summary"]["backtested_count"] >= 1
+        for s in rep["steps"]:
+            assert "daily_returns" in s
+            assert "ic_series" in s
+            # 至少有一个代表有可画序列
+            if s.get("test_sharpe") is not None or s.get("test_ic") is not None:
+                assert len(s.get("daily_returns") or []) > 0
+                assert len(s.get("ic_series") or []) > 0

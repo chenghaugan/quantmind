@@ -207,6 +207,63 @@ def _job_data_sync(sys_state: Dict[str, Any]) -> Dict[str, Any]:
     return {"action": "data_sync", "symbols": results, "skipped": len(results) == 0}
 
 
+async def _job_cache_refresh(sys_state: Dict[str, Any]) -> Dict[str, Any]:
+    """本地行情仓库刷新：把已缓存标的从真实源重新拉取并回写，自动追新。
+
+    识别仓库里现有的 symbol.exchange.interval 键，逐个用 refresh 模式重拉
+    （绕过磁盘缓存 → 真实源 → 回写）。无缓存或未启用时跳过。
+    """
+    dm = sys_state.get("dm")
+    dc = getattr(dm, "disk_cache", None) if dm else None
+    if dm is None or dc is None:
+        return {"action": "cache_refresh", "skipped": True, "reason": "本地行情仓库未启用"}
+    try:
+        from ..data.feed.base import HistoryRequest
+        from ..core.constant import Exchange, Interval
+    except Exception as exc:  # noqa: BLE001
+        _logger.exception("cache_refresh 导入失败: %s", exc)
+        return {"action": "cache_refresh", "error": str(exc)}
+
+    keys = dc.list_keys()
+    if not keys:
+        return {"action": "cache_refresh", "skipped": True, "reason": "仓库为空"}
+
+    # 临时开启 refresh，使 dm.get_bar_data 跳过磁盘缓存、强制走真实源并回写
+    was_refresh = bool(getattr(dc, "refresh", False))
+    dc.refresh = True
+    try:
+        results: List[Dict[str, Any]] = []
+        refreshed, failed = 0, 0
+        for k in keys:
+            try:
+                exch = Exchange(k["exchange"].upper())
+                interv = Interval(k["interval"])
+            except Exception:  # noqa: BLE001
+                failed += 1
+                results.append({"key": k, "status": "bad_key"})
+                continue
+            req = HistoryRequest(symbol=k["symbol"], exchange=exch, interval=interv)
+            try:
+                sink: Dict[str, Any] = {}
+                bars = await dm.get_bar_data(req, source_sink=sink)
+                results.append({
+                    "key": k, "status": "ok" if bars else "empty",
+                    "source": sink.get(k["symbol"], ""),
+                    "n": len(bars),
+                })
+                refreshed += 1 if bars else 0
+                failed += 0 if bars else 1
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                results.append({"key": k, "status": "error", "error": str(exc)[:120]})
+        return {
+            "action": "cache_refresh", "refreshed": refreshed, "failed": failed,
+            "results": results,
+        }
+    finally:
+        dc.refresh = was_refresh
+
+
 def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """构造内置任务注册表（懒解析，依赖从 sys_state 注入，可缺省）。"""
     return [
@@ -228,6 +285,13 @@ def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": "data_sync",
             "fn": _job_data_sync,
             "cron": "30 15 * * 1-5",  # 交易日 15:30（后端仅登记，见函数内跳过逻辑）
+            "kwargs": {"sys_state": sys_state},
+            "required": False,
+        },
+        {
+            "name": "cache_refresh",
+            "fn": _job_cache_refresh,
+            "cron": "0 17 * * 1-5",   # 交易日 17:00 收盘后刷新本地行情仓库
             "kwargs": {"sys_state": sys_state},
             "required": False,
         },

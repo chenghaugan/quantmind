@@ -78,11 +78,11 @@ def test_duplicate_name_overrides():
 
 
 @pytest.mark.skipif(not _aps_available(), reason="apscheduler 未安装")
-def test_build_default_jobs_three():
-    """内置任务表应含三条：health_check / risk_day_rotation / data_sync。"""
+def test_build_default_jobs_four():
+    """内置任务表应含：health_check / risk_day_rotation / data_sync / cache_refresh。"""
     specs = build_default_jobs({"dm": None, "ee": None})
     names = {s["name"] for s in specs}
-    assert {"health_check", "risk_day_rotation", "data_sync"} <= names
+    assert {"health_check", "risk_day_rotation", "data_sync", "cache_refresh"} <= names
 
 
 @pytest.mark.skipif(not _aps_available(), reason="apscheduler 未安装")
@@ -118,3 +118,65 @@ def test_api_scheduler_endpoint():
         body = r.json()
         assert "available" in body
         assert "jobs" in body
+
+
+@pytest.mark.parametrize("skipped_reason", ["no_dm", "empty_cache"])
+def test_cache_refresh_skips_gracefully(tmp_path, skipped_reason):
+    """无仓库 / 空仓库时 cache_refresh 应优雅跳过，不抛错。"""
+    import pytest as _pt
+    from quantmind.api.scheduler import _job_cache_refresh
+
+    if skipped_reason == "no_dm":
+        res = asyncio.run(_job_cache_refresh({"dm": None}))
+        assert res["skipped"] is True
+        assert "本地行情仓库未启用" in res["reason"]
+    else:
+        from quantmind.data import DataManager, InMemoryStore, DiskBarCache
+        from quantmind.data.feed.registry import DataFeedRegistry
+        dc = DiskBarCache(str(tmp_path))
+        dm = DataManager(DataFeedRegistry(), InMemoryStore(), disk_cache=dc)
+        res = asyncio.run(_job_cache_refresh({"dm": dm}))
+        assert res["skipped"] is True
+        assert "仓库为空" in res["reason"]
+
+
+def test_cache_refresh_walks_and_refreshes(tmp_path):
+    """cache_refresh 应在 refresh 模式下把每个缓存标的走真实源重拉并回写。"""
+    from datetime import datetime, timezone
+    from quantmind.api.scheduler import _job_cache_refresh
+    from quantmind.core.constant import Exchange, Interval
+    from quantmind.core.object import BarData
+    from quantmind.data import DataManager, InMemoryStore, DiskBarCache
+    from quantmind.data.feed.base import BaseDataFeed, HistoryRequest
+    from quantmind.data.feed.registry import DataFeedRegistry
+
+    class _FakeRealFeed(BaseDataFeed):
+        name = "fake_real"
+
+        async def fetch_bar_data(self, req: HistoryRequest):
+            return [BarData(
+                symbol=req.symbol, exchange=req.exchange, interval=req.interval,
+                datetime=datetime(2023, 1, 1, tzinfo=timezone.utc),
+                open_price=100.0, high_price=101.0, low_price=99.0,
+                close_price=100.5, volume=1000.0,
+            )]
+
+    reg = DataFeedRegistry()
+    feed = _FakeRealFeed()
+    reg.register(feed, priority=10)
+    dc = DiskBarCache(str(tmp_path))
+    dm = DataManager(reg, InMemoryStore(), disk_cache=dc)
+
+    # 先灌一个缓存键（rb0）
+    req = HistoryRequest(symbol="rb0", exchange=Exchange.SHFE, interval=Interval.DAILY)
+    asyncio.run(dm.get_bar_data(req))
+    assert dc.list_keys() == [{"symbol": "rb0", "exchange": "SHFE", "interval": "1d"}]
+
+    # 第二次调用默认命中磁盘缓存，不再走真实源
+    asyncio.run(dm.get_bar_data(req))
+
+    # cache_refresh 应强制 refresh 重走真实源
+    res = asyncio.run(_job_cache_refresh({"dm": dm}))
+    assert res["refreshed"] >= 1
+    assert res["failed"] == 0
+    assert res["results"][0]["key"]["symbol"] == "rb0"

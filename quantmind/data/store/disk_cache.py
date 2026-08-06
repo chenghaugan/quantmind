@@ -158,6 +158,21 @@ class DiskBarCache:
         return len(merged)
 
     # ----------------------------------------------------------------- 元信息
+    def list_keys(self) -> List[dict]:
+        """返回仓库内所有标的键：{symbol, exchange, interval}（由文件名解析）。"""
+        out: List[dict] = []
+        for p in self.root.glob("*.parquet"):
+            # 文件名形如 {symbol}.{exchange}.{interval}.parquet
+            stem = p.stem
+            parts = stem.split(".")
+            if len(parts) == 3:
+                out.append({
+                    "symbol": parts[0],
+                    "exchange": parts[1],
+                    "interval": parts[2],
+                })
+        return out
+
     def stats(self) -> dict:
         """仓库概览：文件数、总行数、最大最后交易日。"""
         n_files = 0

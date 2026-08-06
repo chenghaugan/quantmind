@@ -99,6 +99,8 @@ class StepReport:
     test_return: Optional[float] = None
     test_mdd: Optional[float] = None
     removed_redundant: List[str] = field(default_factory=list)
+    daily_returns: List[Optional[float]] = field(default_factory=list)   # test 期多空日收益
+    ic_series: List[Optional[float]] = field(default_factory=list)       # test 期逐日截面 IC
 
     def to_dict(self) -> dict:
         r4 = lambda x: round(float(x), 4) if x == x else None  # noqa: E731,T202
@@ -114,6 +116,8 @@ class StepReport:
             "test_return": r4(self.test_return) if self.test_return is not None else None,
             "test_mdd": r4(self.test_mdd) if self.test_mdd is not None else None,
             "removed_redundant": self.removed_redundant,
+            "daily_returns": self.daily_returns,
+            "ic_series": self.ic_series,
         }
 
 
@@ -137,6 +141,42 @@ def _eval_ic(expr: str, panel: Panel, forward_periods: int, market: str, val_pan
         except Exception:  # noqa: BLE001
             val = {"ic": None}
     return train, val
+
+
+def _daily_ic_series(expr: str, panel: Panel, forward_periods: int) -> List[Optional[float]]:
+    """计算因子表达式在面板上**逐日截面 rank IC**（供前端画 IC 时序）。
+
+    对每个日期截面：因子值 vs 未来收益做 Spearman（用 pandas，不引入 scipy）；
+    标的不足 2 个的截面记为 None。返回与 ``panel.dates`` 等长的列表（缺失为 None）。
+    """
+    from .factors.panel_expr import panel_eval_expression
+
+    try:
+        factor_df = panel_eval_expression(expr, panel)
+    except Exception:  # noqa: BLE001
+        return []
+    if factor_df is None or factor_df.empty:
+        return []
+
+    close = panel.close
+    fwd = close.pct_change(forward_periods).shift(-forward_periods)
+    series: List[Optional[float]] = []
+    for d in panel.dates:
+        if d not in factor_df.index or d not in fwd.index:
+            series.append(None)
+            continue
+        f = factor_df.loc[d].dropna()
+        r = fwd.loc[d].dropna()
+        common = f.index.intersection(r.index)
+        if len(common) < 2:
+            series.append(None)
+            continue
+        try:
+            corr = f[common].astype(float).corr(r[common].astype(float), method="spearman")
+            series.append(float(corr))
+        except Exception:  # noqa: BLE001
+            series.append(None)
+    return series
 
 
 def _run_judge(pool: List[str], provider: LLMProvider) -> Dict[str, float]:
@@ -255,6 +295,13 @@ def run_pipeline(
                 step.test_sharpe = pf.get("sharpe_annual")
                 step.test_return = pf.get("total_return")
                 step.test_mdd = pf.get("max_drawdown")
+                step.daily_returns = [float(x) for x in pf.get("daily_returns") or []]
+                # 逐日截面 IC（供前端画 IC 时序，观察稳定性）
+                try:
+                    step.ic_series = _daily_ic_series(expr, test_p, config.forward_periods)
+                except Exception as exc:  # noqa: BLE001
+                    _logger.debug("IC 时序计算失败 %s: %s", expr, exc)
+                    step.ic_series = []
             except Exception as exc:  # noqa: BLE001
                 _logger.debug("test OOS 回测失败 %s: %s", expr, exc)
         elif test_p is not None:

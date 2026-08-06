@@ -14,14 +14,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-
+from pathlib import Path
 import pandas as pd
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from .config import get_settings
-from .data import build_default_registry, DataManager, InMemoryStore
+from .data import build_default_registry, DataManager, InMemoryStore, DiskBarCache
 from .data.feed.base import HistoryRequest
 from .core.constant import Exchange, Interval
 from .core.engine import EventEngine
@@ -66,6 +66,49 @@ def _make_dm():
     return DataManager(registry, store)
 
 
+async def _cache_warm(symbols, exchange, start, end) -> None:
+    """把指定标的的真实行情拉进本地行情仓库（Parquet 写缓存），预热后续秒级查询。"""
+    s = get_settings()
+    root = (s.local_cache_root or "").strip() or str(
+        Path(__file__).resolve().parent.parent / "data_cache")
+    registry = build_default_registry(
+        local_data_root=s.local_data_root or None,
+        local_stock_root=s.local_stock_root or None,
+        local_hk_root=s.local_hk_root or None,
+        local_option_root=s.local_option_root or None,
+    )
+    exch = Exchange(exchange.upper())
+    dc = DiskBarCache(root)
+    dm = DataManager(registry, InMemoryStore(), disk_cache=dc)
+    await dm.connect()
+    t0 = datetime.now()
+    ok, fail = 0, 0
+    for sym in symbols:
+        req = HistoryRequest(
+            symbol=sym, exchange=exch, interval=Interval.DAILY,
+            start=start, end=end,
+        )
+        sink: dict = {}
+        try:
+            bars = await dm.get_bar_data(req, source_sink=sink)
+            if bars:
+                ok += 1
+                src = sink.get(sym, "?")
+                console.print(f"[green]✓[/green] {sym}.{exchange}  {len(bars)} 根  "
+                              f"[dim](源: {src})[/dim]")
+            else:
+                fail += 1
+                console.print(f"[yellow]✗[/yellow] {sym}.{exchange}  空数据")
+        except Exception as exc:  # noqa: BLE001
+            fail += 1
+            console.print(f"[red]✗[/red] {sym}.{exchange}  失败: {exc}")
+    stat = dc.stats()
+    console.print(f"[bold]{ok} 成功 / {fail} 失败[/bold]  ·  耗时 "
+                  f"{(datetime.now() - t0).total_seconds():.1f}s  ·  仓库: "
+                  f"{stat['files']} 文件 / {stat['rows']} 根"
+                  f"  →  {stat['root']}")
+
+
 @app.command()
 def info() -> None:
     """打印配置与已注册数据源。"""
@@ -95,6 +138,23 @@ def info() -> None:
 def smoke() -> None:
     """端到端冒烟：拉取多资产数据并入库读出。"""
     asyncio.run(_smoke())
+
+
+@app.command()
+def cache_warm(
+    symbols: str = typer.Option("rb0,hc0,bu0,i0", help="多标的，逗号分隔，如 rb0,hc0,bu0,i0"),
+    exchange: str = typer.Option("SHFE", help="所有标的共用交易所"),
+    start: str = typer.Option(None, help="起始日期 ISO（如 2023-01-01）；省缺表示全量历史"),
+    end: str = typer.Option(None, help="结束日期 ISO（如 2024-12-31）；省缺表示截至最新"),
+) -> None:
+    """预热本地行情仓库：把真实行情拉进 Parquet 写缓存，后续 /factor/pipeline 秒级复用。
+
+    冷启动（首次拉取）会联网走 AKShare 等真实源（较慢），落盘后二次即本地秒级。
+    """
+    _start = datetime.fromisoformat(start) if start else None
+    _end = datetime.fromisoformat(end) if end else None
+    syms = [s.strip() for s in symbols.split(",") if s and s.strip()]
+    asyncio.run(_cache_warm(syms, exchange, _start, _end))
 
 
 @app.command()

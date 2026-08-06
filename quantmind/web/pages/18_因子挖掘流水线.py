@@ -222,6 +222,63 @@ if steps:
                                 margin=dict(t=44, b=30))
             figic.add_hline(y=0, line=dict(color="rgba(148,163,184,.4)", dash="dash"))
             st.plotly_chart(figic, use_container_width=True, config={"displayModeBar": False})
+
+    # ---- 逐因子样本外可视化：净值叠加 + 回撤水下 + IC 时序 ----
+    import math
+
+    _nav_fig = go.Figure()
+    _dd_fig = go.Figure()
+    _ic_fig = go.Figure()
+    _palette = ["#60a5fa", "#f472b6", "#34d399", "#fbbf24", "#a78bfa",
+                "#fb7185", "#22d3ee", "#a3e635", "#f97316", "#38bdf8"]
+    for _i, s in enumerate(steps):
+        _dret = s.get("daily_returns") or []
+        _expr_label = s.get("expression", "")[:20] + ("…" if len(s.get("expression", "")) > 20 else "")
+        if _dret:
+            _nav = []
+            _cur = 1.0
+            _peak = 1.0
+            _dd = []
+            for _r in _dret:
+                _cur *= (1.0 + float(_r))
+                _peak = max(_peak, _cur)
+                _dd.append((_cur - _peak) / _peak)
+                _nav.append({"t": f"T+{len(_nav)}", "nav": _cur})
+            _ndf = pd.DataFrame(_nav)
+            _nav_fig.add_trace(go.Scatter(
+                x=_ndf["t"], y=_ndf["nav"], name=_expr_label,
+                line=dict(width=1.6, color=_palette[_i % len(_palette)])))
+            _dd_fig.add_trace(go.Scatter(
+                x=_ndf["t"], y=_dd, name=_expr_label,
+                fill="tozeroy", mode="lines", line=dict(width=1.2, color=_palette[_i % len(_palette)]),
+                fillcolor=f"rgba(99,102,241,0.08)"))
+        _ics = s.get("ic_series") or []
+        if _ics:
+            # 滚动 10 期均值平滑，更直观
+            _ic = [_ics[0]] if _ics else []
+            for _j in range(1, len(_ics)):
+                _win = [x for x in _ics[max(0, _j - 9): _j + 1] if x is not None]
+                _ic.append(sum(_win) / len(_win) if _win else None)
+            _ic_fig.add_trace(go.Scatter(
+                x=[f"T+{k}" for k in range(len(_ics))], y=_ic,
+                name=_expr_label, line=dict(width=1.4, color=_palette[_i % len(_palette)])))
+    if len(_nav_fig.data):
+        _nav_fig.update_layout(height=360, title="各代表因子 OOS 净值叠加（多空，由日收益重建）",
+                               margin=dict(t=44, b=30), legend=dict(font=dict(size=10)),
+                               hovermode="x unified")
+        _nav_fig.add_hline(y=1.0, line=dict(color="rgba(148,163,184,.4)", dash="dash"))
+        st.plotly_chart(_nav_fig, use_container_width=True, config={"displayModeBar": False})
+    if len(_dd_fig.data):
+        _dd_fig.update_layout(height=300, title="回撤水下曲线（各代表因子）",
+                              margin=dict(t=44, b=30),
+                              legend=dict(font=dict(size=10)), hovermode="x unified")
+        st.plotly_chart(_dd_fig, use_container_width=True, config={"displayModeBar": False})
+    if len(_ic_fig.data):
+        _ic_fig.update_layout(height=320, title="样本外截面 IC 时序（10 期滚动均值）",
+                              margin=dict(t=44, b=30),
+                              legend=dict(font=dict(size=10)), hovermode="x unified")
+        _ic_fig.add_hline(y=0, line=dict(color="rgba(148,163,184,.4)", dash="dash"))
+        st.plotly_chart(_ic_fig, use_container_width=True, config={"displayModeBar": False})
 else:
     st.caption("无代表因子产出（可能全部被 min_abs_ic / 去冗余过滤，或搜索失败）。")
 
