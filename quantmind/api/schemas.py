@@ -116,6 +116,18 @@ class StrategyInfo(BaseModel):
     parameters: Dict[str, Any] = {}
 
 
+class PaperRunRequest(BaseModel):
+    """模拟盘实跑请求：把已注册策略部署到 PaperEngine 做历史回放，晋升到 PAPER。"""
+
+    strategy: str                       # 已注册策略名（或内置策略名）
+    symbol: str = "rb0"
+    exchange: str = "SHFE"
+    setting: Dict[str, Any] = {}
+    capital: float = 1_000_000.0
+    commission: float = 0.0002
+    days: int = 400                     # 回放窗口（自然日回溯取数）
+
+
 # ---- Walk-Forward 滚动验证 ----
 class WalkForwardRequest(BaseModel):
     strategy: str = "dual_ma"

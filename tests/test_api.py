@@ -70,3 +70,19 @@ def test_strategies_list(client):
     r = client.get("/strategies")
     assert r.status_code == 200
     assert len(r.json()) >= 2
+
+
+def test_strategies_paper_route_registered(client):
+    """模拟盘实跑路由应已注册（OpenAPI 可发现）。"""
+    spec = client.get("/openapi.json").json()
+    assert "/strategies/paper" in spec["paths"]
+    assert "post" in spec["paths"]["/strategies/paper"]
+
+
+def test_strategies_paper_unknown_strategy(client):
+    """不存在的策略应被友好拒绝（返回 400 + error），而非 500。"""
+    r = client.post("/strategies/paper", json={
+        "strategy": "does_not_exist_zzz", "symbol": "rb0", "exchange": "SHFE", "days": 60,
+    })
+    assert r.status_code == 400
+    assert "未注册" in r.json()["error"]

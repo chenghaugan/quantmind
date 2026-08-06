@@ -35,3 +35,7 @@ dist/
 
 # WorkBuddy local memory (if present inside repo)
 .workbuddy/
+
+# Runtime logs
+backend.log
+backend.log.err

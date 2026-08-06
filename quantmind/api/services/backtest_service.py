@@ -206,3 +206,68 @@ class BacktestService:
             return {"error": str(e)}
         except Exception as e:
             return {"error": f"运行失败: {str(e)}"}
+
+    async def run_paper(self, req: "PaperRunRequest") -> Dict[str, Any]:
+        """模拟盘实跑：把策略（含 AI 注册策略）部署到 PaperEngine 做历史回放。
+
+        复用 ``run_strategy(mode="paper")`` 的同一套策略代码与撮合模型，
+        产出与实盘同源的 PaperEngine 回放结果（现金/持仓/成交/权益），
+        供生命周期晋升到 PAPER 及前端「模拟盘实跑」闭环使用。
+        """
+        strat_class = _STRATEGY_MAP.get(req.strategy) or self._extra_strategies.get(req.strategy)
+        if strat_class is None:
+            return {"error": f"策略不存在或未注册: {req.strategy}"}
+        vt = f"{req.symbol}.{req.exchange.upper()}"
+
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=req.days or 400)
+        try:
+            bars = await self.dm.get_bar_data(
+                HistoryRequest(
+                    symbol=req.symbol,
+                    exchange=Exchange(req.exchange.upper()),
+                    interval=Interval("1d"),
+                    start=start_date,
+                    end=end_date,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"error": f"取数失败: {exc}"}
+        if not bars:
+            return {"error": "无数据"}
+
+        sizes = {vt: default_size(vt)}
+        try:
+            result = await asyncio.to_thread(
+                run_strategy,
+                "paper",
+                strat_class,
+                vt,
+                dict(req.setting),
+                bars,
+                self.ee,
+                sizes,
+                "ctp",
+                None,
+                None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.error(f"模拟盘实跑失败: {req.strategy} on {vt} - {exc}", exc_info=True)
+            return {"error": f"模拟盘实跑失败: {exc}"}
+
+        summary = result.get("summary", {})
+        out = {
+            "ok": True,
+            "strategy": req.strategy,
+            "vt_symbol": vt,
+            "bars": len(bars),
+            "trade_count": result.get("trades", 0),
+            "cash": summary.get("cash"),
+            "positions": summary.get("positions", {}),
+            "metrics": {
+                "trade_count": result.get("trades", 0),
+                "final_cash": summary.get("cash"),
+                "open_positions": len(summary.get("positions", {})),
+            },
+        }
+        return _sanitize(out)

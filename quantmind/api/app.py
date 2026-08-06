@@ -46,7 +46,7 @@ from .schemas import (
     ExprEvalRequest, ExprEvalBatchRequest, FactorSearchRequest,
     FactorDedupRequest, ExpressionBacktestRequest, FactorPipelineRequest,
     FactorE2ERequest, KnowledgeIngestRequest, KnowledgeSearchRequest,
-    StrategyRegisterRequest,
+    StrategyRegisterRequest, PaperRunRequest,
 )
 from .ws import manager
 from .services import (
@@ -699,6 +699,30 @@ async def strategy_register(req: StrategyRegisterRequest):
         pass
     info["lifecycle"] = rec.state.value
     return {"ok": True, "strategy_id": req.name, "info": info, "lifecycle": info.get("lifecycle")}
+
+
+@app.post("/strategies/paper")
+async def strategy_paper(req: PaperRunRequest):
+    """模拟盘实跑：把已注册/内置策略跑 PaperEngine 历史回放，晋升生命周期到 PAPER。"""
+    bs: BacktestService = app.state.backtest_service
+    result = await bs.run_paper(req)
+    if "error" in result:
+        return JSONResponse(status_code=400, content=result)
+
+    lc: LifecycleManager = app.state.lifecycle
+    metrics = result.get("metrics", {})
+    try:
+        lc.promote(
+            req.strategy,
+            LifecycleState.PAPER,
+            metrics=metrics,
+            note=f"模拟盘实跑: {result['vt_symbol']} {result['bars']}bars {result['trade_count']}笔",  # noqa: E501
+        )
+    except Exception:  # noqa: BLE001 晋升失败不阻断实跑返回
+        pass
+    rec = lc.get_or_create(req.strategy)
+    result["lifecycle"] = rec.state.value
+    return result
 
 
 @app.post("/order")
