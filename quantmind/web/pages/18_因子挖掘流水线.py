@@ -429,6 +429,190 @@ if composite:
                    f"（残差 {fmt_num(_add.get('closure'), 6)}）　·　"
                    f"协方差={_cov}{_orth}{_nwl}")
 
+        # ============ 前端展示增量（A1/A2/A3 + B1/B2 + C1/C2） ============
+        st.markdown("---")
+
+        # A1) 因子收益率累计净值曲线（风格因子收益路径）
+        _fr = _ra.get("factor_returns_ts") or {}
+        if _fr.get("series"):
+            _fdr = _fr.get("dates") or []
+            _fdf = pd.DataFrame(_fr["series"], index=_fdr).fillna(0.0)
+            _fdf_cum = (1 + _fdf).cumprod()
+            st.subheader("因子收益率累计净值（风格因子收益路径）")
+            _fig_a1 = px.line(
+                _fdf_cum, x=_fdf_cum.index, y=_fdf_cum.columns,
+                title="因子累计净值（cumprod(1+r_f)）",
+                color_discrete_sequence=px.colors.qualitative.Set2)
+            _fig_a1.update_layout(height=320, margin=dict(t=44, l=8, b=8),
+                                  xaxis_title="交易日", yaxis_title="累计净值",
+                                  legend=dict(orientation="h", yanchor="bottom",
+                                              y=1.02, xanchor="right", x=1))
+            _fig_a1.add_hline(y=1.0, line=dict(color="rgba(148,163,184,.5)",
+                                               dash="dash"))
+            st.plotly_chart(_fig_a1, use_container_width=True,
+                            config={"displayModeBar": False})
+
+        # A2) 逐日截面 R² 时序（系统性解释的时变）
+        _r2 = _ra.get("r2_ts") or {}
+        if _r2.get("r2"):
+            _r2df = pd.DataFrame({"r2": _r2.get("r2")}, index=_r2.get("dates"))
+            _r2df["r2_roll"] = _r2df["r2"].rolling(20, min_periods=1).mean()
+            st.subheader("逐日截面回归 R²（系统性解释比例）")
+            _fig_a2 = go.Figure()
+            _fig_a2.add_trace(go.Scatter(
+                x=_r2df.index, y=_r2df["r2"], name="逐日 R²", mode="lines",
+                line=dict(color="rgba(56,189,248,.35)", width=1)))
+            _fig_a2.add_trace(go.Scatter(
+                x=_r2df.index, y=_r2df["r2_roll"], name="滚动均值(20)",
+                line=dict(color="#38bdf8", width=2.2)))
+            _fig_a2.update_layout(height=300, margin=dict(t=44, l=8, b=8),
+                                  xaxis_title="交易日", yaxis_title="R²",
+                                  yaxis=dict(range=[0, 1]),
+                                  legend=dict(orientation="h", yanchor="bottom",
+                                              y=1.02, xanchor="left", x=0))
+            _fig_a2.add_hline(y=float(_tot.get("r2_mean") or 0),
+                              line=dict(color="rgba(148,163,184,.5)", dash="dash"))
+            st.plotly_chart(_fig_a2, use_container_width=True,
+                            config={"displayModeBar": False})
+
+        # A3) 组合逐因子风格暴露时变（组合风格漂移）
+        _ex = _ra.get("exposure_ts") or {}
+        if _ex.get("series"):
+            _exdf = pd.DataFrame(_ex["series"], index=_ex.get("dates")).fillna(0.0)
+            st.subheader("组合风格暴露时变（因子暴露漂移）")
+            _fig_a3 = px.line(
+                _exdf, x=_exdf.index, y=_exdf.columns,
+                title="组合因子总暴露 p_f,t = Σ ω·X_f",
+                color_discrete_sequence=px.colors.qualitative.Set2)
+            _fig_a3.update_layout(height=300, margin=dict(t=44, l=8, b=8),
+                                  xaxis_title="交易日", yaxis_title="暴露",
+                                  legend=dict(orientation="h", yanchor="bottom",
+                                              y=1.02, xanchor="right", x=1))
+            _fig_a3.add_hline(y=0.0, line=dict(color="rgba(148,163,184,.5)",
+                                               dash="dash"))
+            st.plotly_chart(_fig_a3, use_container_width=True,
+                            config={"displayModeBar": False})
+
+        # B1) 正交化前后因子收益率相关对比热力图
+        _frr = _ra.get("factor_returns_raw_ts") or {}
+        if _frr.get("series") and _fr.get("series"):
+            import numpy as _np  # noqa: PLC0415
+
+            def _corr_heat_matrix(df_vals, cols):
+                _z = df_vals[cols].values.astype(float)
+                _m = _np.corrcoef(_z.T)
+                _m = [[(None if v != v else round(float(v), 3)) for v in row]
+                      for row in _m]
+                _f = go.Figure(go.Heatmap(
+                    z=_m, x=cols, y=cols, zmin=-1, zmax=1,
+                    colorscale=[[0, "#22d3ee"], [0.5, "#1e293b"], [1, "#f43f5e"]],
+                    zmid=0, texttemplate="%{z:.2f}", textfont=dict(size=9),
+                    colorbar=dict(title="r", thickness=10)))
+                return _f
+
+            _cols_b1 = [c for c in _fr["series"].keys()]
+            _raw_b1 = pd.DataFrame(_frr["series"], index=_frr["dates"]).fillna(0.0)
+            _oth_b1 = pd.DataFrame(_fr["series"], index=_fr["dates"]).fillna(0.0)
+            st.subheader("因子收益率相关：正交化前 vs 后（风格去相关验证）")
+            c_a, c_b = st.columns(2)
+            with c_a:
+                _fig_b1a = _corr_heat_matrix(_raw_b1, _cols_b1)
+                _fig_b1a.update_layout(height=340, title="正交化前（原始暴露因子收益）",
+                                       margin=dict(t=44, b=30, l=8, r=8),
+                                       xaxis=dict(side="bottom", tickangle=-30),
+                                       yaxis=dict(autorange="reversed"))
+                st.plotly_chart(_fig_b1a, use_container_width=True,
+                                config={"displayModeBar": False})
+            with c_b:
+                _fig_b1b = _corr_heat_matrix(_oth_b1, _cols_b1)
+                _fig_b1b.update_layout(height=340, title="正交化后（因子收益率）",
+                                       margin=dict(t=44, b=30, l=8, r=8),
+                                       xaxis=dict(side="bottom", tickangle=-30),
+                                       yaxis=dict(autorange="reversed"))
+                st.plotly_chart(_fig_b1b, use_container_width=True,
+                                config={"displayModeBar": False})
+
+        # B2) 滚动风险分解（特异 vs 系统性 vs 各因子 MCTR 时间切片）
+        _rr = _ra.get("rolling_risk") or {}
+        if _rr.get("dates"):
+            _rrdf = pd.DataFrame(index=_rr.get("dates"))
+            for _c, _vals in (_rr.get("factors") or {}).items():
+                _rrdf[_c] = _vals
+            if _rr.get("portfolio_vol"):
+                _rrdf["_组合σ"] = _rr.get("portfolio_vol")
+            st.subheader(f"滚动风险分解（窗口 {_rr.get('window', '—')} 交易日）")
+            _fig_b2 = go.Figure()
+            for _c, _vals in (_rr.get("factors") or {}).items():
+                _fig_b2.add_trace(go.Scatter(
+                    x=_rrdf.index, y=_rrdf[_c], name=_c[:20], mode="lines",
+                    stackgroup="risk", line=dict(width=1)))
+            _fig_b2.update_layout(height=340, margin=dict(t=44, l=8, b=8),
+                                  xaxis_title="交易日", yaxis_title="MCTR（波动贡献）",
+                                  legend=dict(orientation="h", yanchor="bottom",
+                                              y=1.02, xanchor="right", x=1))
+            if _rr.get("portfolio_vol"):
+                _fig_b2.add_trace(go.Scatter(
+                    x=_rrdf.index, y=_rrdf["_组合σ"], name="组合σ",
+                    mode="lines", line=dict(color="#fbbf24", width=2)))
+            st.plotly_chart(_fig_b2, use_container_width=True,
+                            config={"displayModeBar": False})
+
+        # C1) 收益归因：因子/特异/市场对组合累计收益的贡献
+        _rattr = _ra.get("return_attribution") or {}
+        if _rattr.get("ts"):
+            _ra_ts = _rattr["ts"]
+            _ra_cols = [c for c in _ra_ts.keys()]
+            _ra_df = pd.DataFrame({c: _ra_ts[c] for c in _ra_cols})
+            st.subheader("收益归因：累计贡献（因子/特异/市场）")
+            _fig_c1 = px.line(
+                _ra_df, y=_ra_df.columns,
+                title="组合累计收益贡献（Σ p_f·B_f 累计）",
+                color_discrete_map=dict(
+                    **{f.get("name", ""): "#38bdf8" for f in _ra.get("factors") or []},
+                    **{"_specific": "#a78bfa", "_market": "#fbbf24"}))
+            _fig_c1.update_layout(height=320, margin=dict(t=44, l=8, b=8),
+                                  xaxis_title="交易日", yaxis_title="累计收益",
+                                  legend=dict(orientation="h", yanchor="bottom",
+                                              y=1.02, xanchor="right", x=1))
+            st.plotly_chart(_fig_c1, use_container_width=True,
+                            config={"displayModeBar": False})
+            # 收益归因汇总表
+            _ra_rows = ([{"项": f.get("name", "")[:24],
+                          "累计收益贡献": fmt_num(_rattr["factors"].get(f.get("name"), 0), 4),
+                          "类别": "因子"}
+                         for f in _ra.get("factors") or []]
+                        + [{"项": "_特异", "累计收益贡献": fmt_num(_rattr.get("specific"), 4),
+                            "类别": "特异"},
+                           {"项": "_市场", "累计收益贡献": fmt_num(_rattr.get("market"), 4),
+                            "类别": "市场"}])
+            st.dataframe(pd.DataFrame(_ra_rows), width="stretch", hide_index=True)
+
+        # C2) 因子/复合信号的逐日截面 IC 时序
+        _icts = composite.get("ic_ts") or {}
+        if _icts.get("dates") and (_icts.get("factors") or _icts.get("composite")):
+            _icdf = pd.DataFrame(index=_icts.get("dates"))
+            for _nm, _seq in (_icts.get("factors") or {}).items():
+                _icdf[_nm] = _seq
+            if _icts.get("composite"):
+                _icdf["_复合α"] = _icts.get("composite")
+            st.subheader("逐日截面 IC 时序（因子 & 复合 α）")
+            _fig_c2 = px.line(
+                _icdf, x=_icdf.index, y=_icdf.columns,
+                title="每日 IC（横截面秩相关）",
+                color_discrete_map=dict(
+                    **{n: "#38bdf8" for n in (_icts.get("factors") or {})},
+                    **{"_复合α": "#fbbf24"}))
+            _fig_c2.update_layout(height=320, margin=dict(t=44, l=8, b=8),
+                                  xaxis_title="交易日", yaxis_title="IC",
+                                  legend=dict(orientation="h", yanchor="bottom",
+                                              y=1.02, xanchor="right", x=1))
+            _fig_c2.add_hline(y=0.0, line=dict(color="rgba(148,163,184,.5)",
+                                               dash="dash"))
+            st.plotly_chart(_fig_c2, use_container_width=True,
+                            config={"displayModeBar": False})
+
+        st.markdown("---")
+
     # 因子相关矩阵热力图（去冗余后代表间的残差相关性）
     corr = composite.get("correlation")
     if corr and corr.get("columns") and corr.get("values"):

@@ -325,6 +325,64 @@ def optimize_weights(
     return {k: float(wi) for k, wi in zip(names, w)}
 
 
+def _daily_ic_ts(
+    factor_dfs: Dict[str, pd.DataFrame],
+    composite: pd.DataFrame,
+    panel: "Panel",
+    forward_periods: int,
+    min_cross_section: int = 3,
+) -> Dict[str, object]:
+    """计算各因子 + 复合信号的**逐日截面 IC 时序**（JSON-safe）。
+
+    对每个交易日取因子横截面值与前瞻收益的 **Spearman 秩相关**，得到逐日 IC 序列；
+    返回 ``{"dates": [...], "factors": {name: [ic...]}, "composite": [ic...]}``，
+    NaN → None 以利前端绘图。
+    """
+    fwd = panel.close.pct_change(forward_periods).shift(-forward_periods)
+    dates = list(composite.index)
+    factor_series: Dict[str, List[Optional[float]]] = {}
+    comp_series: List[Optional[float]] = []
+    dstr = [d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+            for d in dates]
+    for nm, fdf in factor_dfs.items():
+        seq: List[Optional[float]] = []
+        for d in dates:
+            if d not in fdf.index or d not in fwd.index:
+                seq.append(None)
+                continue
+            f = fdf.loc[d].dropna()
+            r = fwd.loc[d].dropna()
+            common = f.index.intersection(r.index)
+            if len(common) < min_cross_section:
+                seq.append(None)
+                continue
+            s = f[common].astype(float).rank()
+            t = r[common].astype(float).rank()
+            c = s.corr(t)
+            seq.append(None if c != c else round(float(c), 4))
+        factor_series[nm] = seq
+    # 复合信号 IC
+    for d in dates:
+        if d not in composite.index or d not in fwd.index:
+            comp_series.append(None)
+            continue
+        f = composite.loc[d].dropna()
+        r = fwd.loc[d].dropna()
+        common = f.index.intersection(r.index)
+        if len(common) < min_cross_section:
+            comp_series.append(None)
+            continue
+        s = f[common].astype(float).rank()
+        t = r[common].astype(float).rank()
+        c = s.corr(t)
+        comp_series.append(None if c != c else round(float(c), 4))
+    return {
+        "dates": dstr,
+        "factors": factor_series,
+        "composite": comp_series,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # 高层：复合信号回测
 # --------------------------------------------------------------------------- #
@@ -447,6 +505,10 @@ def composite_backtest(
         _logger.warning("Barra 风险归因计算失败: %s", exc)
         risk_attribution = {"error": str(exc)[:200]}
 
+    # 8) 因子/复合信号的逐日截面 IC 时序（供前端 C2 曲线）
+    ic_ts = _daily_ic_ts(back_factor_dfs, composite, panel, forward_periods,
+                         min_cross_section=min(6, max(3, len(panel.symbols) // 2)))
+
     return {
         "scheme": scheme,
         "weights": {k: round(float(v), 4) for k, v in weights.items()},
@@ -454,6 +516,7 @@ def composite_backtest(
         "n_dates": len(curve),
         "ic_report": comp_ic.to_dict(),
         "factor_ics": {k: round(float(v["ic_mean"]), 4) for k, v in ic_rep_map.items()},
+        "ic_ts": ic_ts,
         "correlation": {
             "columns": list(corr_df.columns),
             "values": [[None if v != v else round(float(v), 4) for v in corr_df.loc[c]]

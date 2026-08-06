@@ -70,8 +70,35 @@ def _auto_lags(t: int) -> int:
     return max(1, int(4.0 * (t / 100.0) ** (2.0 / 9.0)))
 
 
-def newey_west_cov(
-    x: Sequence[float],
+def _to_json_scalar(v: float):
+    """把标量转成 JSON 安全值：NaN/inf → None，否则原样。"""
+    if v is None:
+        return None
+    try:
+        if v != v or v in (float("inf"), float("-inf")):
+            return None
+    except (TypeError, ValueError):
+        return None
+    return v
+
+
+def _ts_payload(index, series_dict):
+    """把 {列名: 序列} 转成 JSON 安全的 ``{"dates": [...], "series": {col: [...]}}``。"""
+    dates = [d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
+             for d in index]
+    series = {}
+    for col, s in series_dict.items():
+        vals = []
+        for v in s:
+            if isinstance(v, (int, float)):
+                vals.append(_to_json_scalar(float(v)))
+            else:
+                vals.append(v if v is not None else None)
+        series[col] = vals
+    return {"dates": dates, "series": series}
+
+
+def newey_west_cov(    x: Sequence[float],
     y: Sequence[float],
     lags: Optional[int] = None,
 ) -> float:
@@ -459,8 +486,89 @@ def barra_factor_risk_attribution(
 
     total_alloc = sum(mctr.get(nm, 0.0) for nm in factor_names) + specific_mctr + market_mctr
 
+    # ===================================================================== #
+    # 前端展示时序 payload（JSON-safe + NaN→None）
+    # ===================================================================== #
+    # A1: 因子收益率时序（正交化后口径）—— 累计净值曲线
+    factor_returns_ts = _ts_payload(
+        factor_returns.index,
+        {nm: factor_returns[nm] for nm in factor_names})
+    # B1: 原始（未正交化）因子收益率时序 —— 用于「正交化前后」对比
+    factor_returns_raw_ts = None
+    if orthogonalize_style and len(expos_aligned) > 1:
+        try:
+            fr_raw, _, _, _ = estimate_factor_returns(
+                fwd, expos_aligned, ridge=ridge, weights=cap_weights)
+            factor_returns_raw_ts = _ts_payload(
+                fr_raw.index, {nm: fr_raw[nm] for nm in fr_raw.columns
+                               if nm != "_market"})
+        except Exception:  # noqa: BLE001 —— 原始口径可选，失败不影响主结果
+            factor_returns_raw_ts = None
+
+    # A2: 逐日截面 R² 时序
+    r2_ts = {"dates": _ts_payload(r2_series.index, {"r2": r2_series})["dates"],
+             "r2": _ts_payload(r2_series.index, {"r2": r2_series})["series"]["r2"]}
+
+    # A3: 组合逐因子暴露时序（pf_series）
+    exposure_ts = _ts_payload(common, pf_series)
+
+    # C1: 收益归因（累计）：因子/特异/市场对组合累计收益的贡献 = cumsum(p_f·B_f)
+    return_attrs_ts: Dict[str, List[float]] = {}
+    cum_contrib: Dict[str, float] = {}
+    for col in common_series.columns:
+        arr = common_series[col].fillna(0.0).astype(float).values
+        cs = np.cumsum(arr)
+        return_attrs_ts[col] = [_to_json_scalar(float(x)) for x in cs]
+        cum_contrib[col] = float(np.nansum(arr))
+    return_attribution = {
+        "total": round(cum_contrib.get("_specific", 0.0)
+                       + sum(cum_contrib.get(f, 0.0) for f in factor_names)
+                       + cum_contrib.get("_market", 0.0), 6),
+        "factors": {nm: round(cum_contrib.get(nm, 0.0), 6) for nm in factor_names},
+        "specific": round(cum_contrib.get("_specific", 0.0), 6),
+        "market": round(cum_contrib.get("_market", 0.0), 6),
+        "ts": return_attrs_ts,
+    }
+
+    # B2: 滚动风险分解（滚动 MCTR 时间切片）
+    rolling_risk = None
+    _rw = int(np.clip(20, 10, max(10, len(port_ret) // 3)))
+    if len(port_ret) >= _rw + 2 and len(common_series) == len(port_ret):
+        _cols = list(common_series.columns)
+        _rvol = port_ret.values.astype(float)
+        _rmat = common_series.values.astype(float)  # (T, C)
+        roll_dates = []
+        roll_factors: Dict[str, List[float]] = {c: [] for c in _cols}
+        roll_tot: List[float] = []
+        for t in range(_rw, len(port_ret)):
+            w = slice(t - _rw, t)
+            rv = _rvol[w]
+            rm = _rmat[w]
+            # 同一估计器：样本协方差（滚动小窗下 NW 不稳定，用样本）
+            vv = np.cov(rv, rv, ddof=1)[0, 1]
+            if not (vv == vv) or vv <= 0:
+                continue
+            sv = float(np.sqrt(vv))
+            for ci, c in enumerate(_cols):
+                cv = np.cov(rm[:, ci], rv, ddof=1)[0, 1]
+                roll_factors[c].append(_to_json_scalar(cv / sv))
+            roll_tot.append(_to_json_scalar(sv))
+            roll_dates.append(port_ret.index[t].strftime("%Y-%m-%d"))
+        rolling_risk = {
+            "dates": roll_dates,
+            "window": _rw,
+            "factors": {c: roll_factors[c] for c in _cols},
+            "portfolio_vol": [_to_json_scalar(x) for x in roll_tot],
+        }
+
     return {
         "factors": factors,
+        "factor_returns_ts": factor_returns_ts,
+        "factor_returns_raw_ts": factor_returns_raw_ts,
+        "r2_ts": r2_ts,
+        "exposure_ts": exposure_ts,
+        "return_attribution": return_attribution,
+        "rolling_risk": rolling_risk,
         "market": {
             "mctr_vol": round(market_mctr, 6),
             "risk_pct": round(_risk_pct(market_mctr), 4) if _risk_pct(market_mctr) is not None else None,

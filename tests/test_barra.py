@@ -199,3 +199,73 @@ class TestWLS:
         assert res["diagnostics"]["wls"] is True
         assert abs(res["additivity"]["closure"]) < 1e-8
         assert res["total"]["ann_vol"] is not None
+
+
+class TestTimeSeriesPayload:
+    """前端展示所需的时序 payload：JSON 安全 + 形状正确。"""
+
+    def test_all_ts_fields_present(self):
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        res = barra_factor_risk_attribution(sig, fwd, expos)
+        assert set(res["factor_returns_ts"]["series"].keys()) == {"f1", "f2", "f3"}
+        assert len(res["factor_returns_ts"]["dates"]) == len(res["factor_returns_ts"]["series"]["f1"])
+        assert "r2" in res["r2_ts"]
+        assert len(res["r2_ts"]["dates"]) == len(res["r2_ts"]["r2"])
+        assert set(res["exposure_ts"]["series"].keys()) == {"f1", "f2", "f3"}
+        assert res["return_attribution"]["factors"]  # 每因子有累计收益贡献
+        assert res["rolling_risk"] is not None
+        assert res["rolling_risk"]["dates"]
+        assert len(res["rolling_risk"]["dates"]) == len(res["rolling_risk"]["portfolio_vol"])
+
+    def test_raw_factor_returns_ts_when_orthogonalized(self):
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        res = barra_factor_risk_attribution(sig, fwd, expos)  # 默认正交化
+        # 正交化开启时，应返回原始（未正交化）因子收益时序供对比
+        assert "factor_returns_raw_ts" in res
+        assert res["factor_returns_raw_ts"] is not None
+        assert set(res["factor_returns_raw_ts"]["series"].keys()) == {"f1", "f2", "f3"}
+
+    def test_ts_payload_json_safe(self):
+        """时序 payload 中不得含 NaN/inf（前端经 API JSON 序列化）。"""
+        import math
+        import json
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        res = barra_factor_risk_attribution(sig, fwd, expos)
+        blob = {
+            "fr": res["factor_returns_ts"],
+            "raw": res["factor_returns_raw_ts"],
+            "r2": res["r2_ts"],
+            "expo": res["exposure_ts"],
+            "ra": res["return_attribution"]["ts"],
+            "rr": res["rolling_risk"],
+        }
+        json.dumps(blob)  # 必须可 JSON 序列化
+        def _walk(o):
+            if isinstance(o, float):
+                assert not math.isnan(o) and not math.isinf(o), f"NaN/inf in {o}"
+            elif isinstance(o, dict):
+                for v in o.values():
+                    _walk(v)
+            elif isinstance(o, (list, tuple)):
+                for v in o:
+                    _walk(v)
+        _walk(blob)
+
+    def test_rolling_risk_closes_per_slice(self):
+        """每个滚动窗口切片：Σ(因子+特异+市场)MCTR ≈ 组合σ。"""
+        sig, fwd, expos, dates, assets = _synth_inputs()
+        res = barra_factor_risk_attribution(sig, fwd, expos, newey_west=False)
+        rr = res["rolling_risk"]
+        fr = rr["factors"]
+        keys = [c for c in fr.keys()]
+        spec_key = "_specific" if "_specific" in keys else "_specific"
+        mkt_key = "_market" if "_market" in keys else "_market"
+        for i in range(len(rr["dates"])):
+            s = sum(fr.get(c, [None] * len(rr["dates"]))[i]
+                    for c in keys if c not in ("_specific", "_market"))
+            s += fr.get(spec_key, [None] * len(rr["dates"]))[i]
+            s += fr.get(mkt_key, [None] * len(rr["dates"]))[i]
+            pv = rr["portfolio_vol"][i]
+            if s is not None and pv is not None:
+                assert abs(s - pv) < 1e-6  # 可加性（样本协方差滚动）
+
