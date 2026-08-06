@@ -34,7 +34,7 @@ from ..data.store.disk_cache import DiskBarCache
 from ..core.engine import EventEngine
 from ..core.event import Event, EventType
 from ..ai import build_provider
-from ..paper.promotion import LifecycleManager
+from ..paper.promotion import LifecycleManager, LifecycleState
 from ..monitoring import Notifier
 from ..research import FactorRegistry
 
@@ -45,12 +45,15 @@ from .schemas import (
     SeatFactorRequest, SeatFactorResult, DataDownloadRequest,
     ExprEvalRequest, ExprEvalBatchRequest, FactorSearchRequest,
     FactorDedupRequest, ExpressionBacktestRequest, FactorPipelineRequest,
+    FactorE2ERequest, KnowledgeIngestRequest, KnowledgeSearchRequest,
+    StrategyRegisterRequest,
 )
 from .ws import manager
 from .services import (
     DataService, FactorService, BacktestService, LifecycleService, ResearchService,
     RiskService, OptimizeService, CrossSectionService, SettingsService, SeatService,
     DataSettingsService, DataAdminService, AlertSettingsService, SearchService,
+    KnowledgeService,
 )
 from .logging_config import setup_api_logger
 from .routes_auth import router as auth_router
@@ -141,6 +144,7 @@ async def lifespan(app: FastAPI):
     app.state.cross_section_service = CrossSectionService(dm)
     app.state.settings_service = settings_service
     app.state.search_service = SearchService(dm, provider)
+    app.state.knowledge_service = KnowledgeService()
     app.state.seat_service = SeatService(dm)
     data_settings = DataSettingsService()
     app.state.data_settings_service = data_settings
@@ -621,6 +625,48 @@ async def factor_pipeline(req: FactorPipelineRequest):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/factor/e2e")
+async def factor_e2e(req: FactorE2ERequest):
+    """端到端因子研究：AI 证据 → 挖掘 → OOS 复合 alpha → 策略代码（可选沉淀知识库）。"""
+    service: SearchService = app.state.search_service
+    try:
+        return await service.e2e(req, ingest=req.ingest_knowledge)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("端到端因子研究失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+# --------------------------------------------------------------------------
+# 知识库（knowledge）：因子 / 策略 / 研究日志 沉淀 + 检索 + 列表
+# --------------------------------------------------------------------------
+@app.post("/knowledge/ingest")
+async def knowledge_ingest(req: KnowledgeIngestRequest):
+    """手动写入一条知识库记录（factor | strategy | research_log）。"""
+    service: KnowledgeService = app.state.knowledge_service
+    try:
+        return service.ingest(req)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+@app.post("/knowledge/search")
+async def knowledge_search(req: KnowledgeSearchRequest):
+    """知识库轻量关键词检索。"""
+    service: KnowledgeService = app.state.knowledge_service
+    return service.search(req)
+
+
+@app.get("/knowledge")
+async def knowledge_list(
+    kind: Optional[str] = Query(None), limit: int = Query(50, ge=1, le=500),
+):
+    """知识库列表（最新在前），可按 kind 过滤。"""
+    service: KnowledgeService = app.state.knowledge_service
+    return service.list(kind=kind, limit=limit)
+
+
 @app.post("/backtest")
 async def backtest(req: BacktestRequest):
     service: BacktestService = app.state.backtest_service
@@ -635,7 +681,24 @@ async def walkforward(req: WalkForwardRequest):
 
 @app.get("/strategies", response_model=List[StrategyInfo])
 async def strategies():
-    return BacktestService.list_strategies()
+    return app.state.backtest_service.list_strategies()
+
+
+@app.post("/strategies/register")
+async def strategy_register(req: StrategyRegisterRequest):
+    """注册 AI 生成策略入模拟盘：沙箱校验 + 实例池 + 生命周期(IDEA->RESEARCH)。"""
+    bs: BacktestService = app.state.backtest_service
+    ok, err, info = bs.register_generated_strategy(req.name, req.code)
+    if not ok:
+        return {"ok": False, "error": err or "注册失败"}
+    lc: LifecycleManager = app.state.lifecycle
+    rec = lc.get_or_create(req.name)
+    try:
+        lc.promote(req.name, LifecycleState.RESEARCH, metrics={}, note=f"AI生成:{req.idea[:40]}")
+    except Exception:  # noqa: BLE001 晋升失败不阻断注册
+        pass
+    info["lifecycle"] = rec.state.value
+    return {"ok": True, "strategy_id": req.name, "info": info, "lifecycle": info.get("lifecycle")}
 
 
 @app.post("/order")

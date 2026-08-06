@@ -74,7 +74,18 @@ section[data-testid="stSidebar"] {
     background: linear-gradient(180deg, #0e1729 0%, #0b1220 100%);
     border-right: 1px solid #1a2740;
 }
-section[data-testid="stSidebar"] .block-container { padding-top: 1.2rem; }
+/* Streamlit 1.59.1 sidebar padding - 针对 stSidebarUserContent */
+[data-testid="stSidebarUserContent"] { padding: .5rem 0 !important; }
+/* 让品牌区上移到与折叠按钮同一水平线，减少顶部空白 */
+/* pointer-events:none 让品牌区不拦截点击，保证折叠按钮可点（品牌区无交互元素） */
+[data-testid="stSidebarUserContent"] [data-testid="stVerticalBlock"] > div:first-child {
+    margin-top: -5.0rem;
+    pointer-events: none;
+}
+[data-testid="stSidebarUserContent"] [data-testid="stVerticalBlock"] > div:first-child * { pointer-events: none; }
+/* 品牌区上移后可能遮挡折叠按钮，提升其层级保证可点击 */
+[data-testid="stBaseButton-headerNoPadding"] { z-index: 1000 !important; }
+section[data-testid="stSidebar"] .block-container { padding: .5rem 0 !important; }
 
 .qm-brand {
     display:flex; align-items:center; gap:.7rem;
@@ -304,6 +315,7 @@ NAV_GROUPS: List[tuple] = [
         ("行情数据", "pages/2_行情数据.py", "📈"),
         ("数据质量", "pages/13_数据质量.py", "🧪"),
         ("数据管理", "pages/16_数据管理.py", "🗂️"),
+        ("行情仓库总览", "pages/19_行情仓库总览.py", "🗄️"),
     ]),
     ("研究", [
         ("因子研究", "pages/3_因子研究.py", "🔬"),
@@ -311,6 +323,9 @@ NAV_GROUPS: List[tuple] = [
         ("因子库", "pages/9_FactorLibrary.py", "📚"),
         ("席位因子", "pages/15_席位因子.py", "🪑"),
         ("AI 研究", "pages/5_AI_研究.py", "🤖"),
+        ("因子搜索", "pages/17_因子搜索.py", "🔎"),
+        ("因子挖掘流水线", "pages/18_因子挖掘流水线.py", "🧬"),
+        ("端到端流水线", "pages/20_端到端流水线.py", "🚀"),
     ]),
     ("回测", [
         ("策略回测", "pages/4_策略回测.py", "⚙️"),

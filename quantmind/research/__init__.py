@@ -55,6 +55,8 @@ from .cross_sectional_backtest import (
     factor_expression_backtest,
 )
 from .pipeline import PipelineConfig, StepReport, run_pipeline
+# NOTE: E2EConfig / run_e2e 用惰性导入（PEP 562 __getattr__），
+# 避免 ai.factor_gen ↔ research ↔ ai.agent 的加载期循环导入。
 from .combine import (
     cs_rank_panel,
     cs_zscore_panel,
@@ -136,6 +138,8 @@ __all__ = [
     "PipelineConfig",
     "StepReport",
     "run_pipeline",
+    "E2EConfig",
+    "run_e2e",
     "cs_rank_panel",
     "cs_zscore_panel",
     "standardize_panel",
@@ -154,3 +158,17 @@ __all__ = [
     "cross_sectional_neutralize",
     "orthogonalize_factors",
 ]
+
+
+def __getattr__(name: str):
+    """惰性导出 orchestrator 的 E2EConfig / run_e2e（打破加载期循环导入）。
+
+    保持 ``from quantmind.research import E2EConfig, run_e2e`` 兼容，
+    仅在首次访问时才真正导入 orchestrator（及其 ai.agent 依赖）。
+    """
+    if name in ("E2EConfig", "run_e2e"):
+        from .orchestrator import E2EConfig as _E2EConfig
+        from .orchestrator import run_e2e as _run_e2e
+
+        return {"E2EConfig": _E2EConfig, "run_e2e": _run_e2e}[name]
+    raise AttributeError(f"module 'quantmind.research' has no attribute {name!r}")

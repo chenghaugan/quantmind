@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -28,10 +29,17 @@ from ...research import (
     factor_expression_backtest as _expr_backtest,
     run_pipeline as _run_pipeline,
     PipelineConfig,
+    E2EConfig,
+    run_e2e as _run_e2e,
 )
+from ...knowledge import KnowledgeStore
 from ...research.factors.alpha_cs import Panel
+from ..schemas import FactorE2ERequest
 
 _logger = logging.getLogger("quantmind.api")
+
+#: e2e 短期结果缓存 TTL（秒）。避免前端重复发起 85s+ 长跑。
+_E2E_CACHE_TTL = 20 * 60
 
 
 def _sanitize(o: Any) -> Any:
@@ -77,6 +85,8 @@ class SearchService:
     def __init__(self, dm: DataManager, provider=None) -> None:
         self.dm = dm
         self.provider = provider  # 可选 LLMProvider；None → CoT 回落 mock 变异器
+        # e2e 短期结果缓存：key -> (写入时刻, 结果 dict)
+        self._e2e_cache: Dict[str, tuple] = {}
 
     # -- 面板构造（复用 CrossSectionService 逻辑） ---------------------------
     async def _build_panel(
@@ -404,3 +414,154 @@ class SearchService:
             "composite": _sanitize(composite),
         }
         return out
+
+    # -- 端到端编排（AI 证据 → 挖掘 → 复合 → 策略代码）+ 可选沉淀知识库 ----------
+    async def e2e(self, req: FactorE2ERequest, ingest: bool = True) -> dict:
+        """端到端因子研究。
+
+        在标的面板上跑 :func:`quantmind.research.run_e2e`（AI 证据研究 →
+        因子挖掘 → OOS 复合 alpha → 策略代码），返回统一契约 dict。
+
+        当 ``ingest`` 为真时，把 report 产出的每条因子 + 策略 + 研究过程日志
+        沉淀进 :class:`KnowledgeStore`，返回值附加 ``knowledge`` 字段
+        （``{"ingested": True, "kb_records": n}``）。
+        strategy code 保留完整不截断。
+        """
+        # 短期结果缓存：同一 (idea, 标的集, 交易所, 算法, 轮数, 前向期, ingest) 在 TTL 内
+        # 复用上次结果，避免前端重复点击触发 85s+ 长跑；参数/标的/idea 变化即换新 key。
+        cache_key = (str(req.idea),
+                     tuple(sorted(s for s in (req.symbols or []) if s)),
+                     str(req.exchange), str(req.algo), int(req.rounds),
+                     int(req.forward_periods), bool(ingest))
+        cached = self._e2e_cache.get(cache_key)
+        if cached is not None and (time.time() - cached[0]) < _E2E_CACHE_TTL:
+            out = dict(cached[1])
+            out["cached"] = True
+            return out
+
+        panel = await self._build_panel(req.symbols, req.exchange, req.interval,
+                                        req.start, req.end)
+        symbols = [s for s in (req.symbols or []) if s and s.strip()]
+
+        # 知识库反哺（持续学习·消费端）：用 idea 检索历史已验证因子，
+        # 把命中表达式作为额外种子注入挖掘，让相似想法复用已验证的 alpha 起点。
+        seeds = self._kb_context_seeds(req.idea, user_seeds=req.seeds or [])
+
+        cfg = E2EConfig(
+            idea=req.idea,
+            asset_class=req.asset_class,
+            seeds=seeds,
+            algo=req.algo if req.algo in ("co", "ea", "tot") else "co",
+            rounds=req.rounds,
+            forward_periods=req.forward_periods,
+            market=req.market,
+            train_frac=req.train_frac,
+            val_frac=req.val_frac,
+            dedup_threshold=req.dedup_threshold,
+            min_abs_ic=req.min_abs_ic,
+            run_composite=req.run_composite,
+            composite_scheme=req.composite_scheme,
+            composite_standardize=req.composite_standardize,
+            n_groups=req.n_groups,
+            long_short=req.long_short,
+            cost_rate=req.cost_rate,
+            max_candidates=req.max_candidates,
+            verify_threshold=req.verify_threshold,
+            run_search=req.run_search,
+            max_rounds=req.max_rounds,
+        )
+
+        loop = asyncio.get_running_loop()
+        report = await loop.run_in_executor(
+            None, lambda: _run_e2e(panel, config=cfg, provider=self.provider),
+        )
+
+        out = _sanitize(report)
+        out["n_symbols"] = len(panel.symbols)
+        out["date_range"] = [panel.dates[0].isoformat() if len(panel.dates) else None,
+                             panel.dates[-1].isoformat() if len(panel.dates) else None]
+
+        if ingest:
+            n = self._ingest_report(report, idea=req.idea, symbols=symbols,
+                                    asset_class=req.asset_class, market=req.market)
+            out["knowledge"] = {"ingested": True, "kb_records": n}
+
+        return out
+
+    def _ingest_report(self, report: dict, idea: str, symbols: List[str],
+                       asset_class: str = "", market: str = "") -> int:
+        """把 e2e report 沉淀进知识库，返回写入的记录条数。
+
+        - 每个 evidence 因子 → ``ingest_factor``
+        - strategy → ``ingest_strategy``
+        - 研究过程假设 → ``ingest_research_log``
+        """
+        store = KnowledgeStore()
+        n = 0
+        try:
+            evidence = report.get("evidence") or {}
+            hypotheses = evidence.get("hypotheses") or []
+            factors = evidence.get("factors") or []
+            verified = set(evidence.get("verified_exprs") or [])
+
+            for f in factors:
+                name = (f or {}).get("name") or ""
+                expr = (f or {}).get("expression") or ""
+                if not name and not expr:
+                    continue
+                status = "verified" if (expr and expr in verified) else "active"
+                store.ingest_factor(
+                    name=name, expression=expr, idea=idea,
+                    ic=None, ir=None, status=status,
+                    symbols=symbols, asset_class=asset_class, market=market,
+                )
+                n += 1
+
+            strategy = report.get("strategy") or {}
+            if strategy.get("code"):
+                composite = report.get("pipeline", {}).get("composite") or {}
+                scheme = composite.get("scheme") or (report.get("pipeline", {}).get("config", {})
+                                                     .get("composite_scheme") or "")
+                sharpe = _flt(composite.get("sharpe"))
+                store.ingest_strategy(
+                    code=str(strategy.get("code", "")),
+                    code_safe=bool(strategy.get("code_safe")),
+                    idea=idea,
+                    composite_scheme=str(scheme or ""),
+                    composite_sharpe=sharpe,
+                    symbols=symbols,
+                )
+                n += 1
+
+            store.ingest_research_log(
+                idea=idea,
+                hypotheses=hypotheses,
+                evidence=dict(evidence),
+            )
+            n += 1
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("知识库沉淀失败（不影响主流程返回）: %s", exc)
+        return n
+
+    @staticmethod
+    def _kb_context_seeds(idea: str, user_seeds: List[str], top_k: int = 6) -> List[str]:
+        """知识库检索反哺：用 idea 检索历史已验证因子表达式，作挖掘种子补充。
+
+        持续学习闭环的「消费」端——之前 e2e 沉淀进知识库的 VERIFIED 因子表达式，
+        在相似的新想法下被检索出来，与用户显式种子合并去重，作为因子挖掘起点。
+
+        知识库为空 / 检索失败时静默返回用户种子（不阻断主流程）。
+        """
+        user = [s for s in (user_seeds or []) if s and s.strip()]
+        added: List[str] = []
+        try:
+            hits = KnowledgeStore().search(idea, top_k=top_k, kind="factor")
+            for h in hits or []:
+                expr = (h.get("metadata") or {}).get("expression") or ""
+                if expr and expr.strip() and expr not in user and expr not in added:
+                    added.append(expr.strip())
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("知识库反哺检索失败（沿用用户种子）: %s", exc)
+        if not added:
+            return user
+        return list(dict.fromkeys([*added, *user]))

@@ -197,6 +197,13 @@ class APIClient:
     def strategies(timeout: int = 10) -> Dict:
         return APIClient.get("/strategies", timeout=timeout)
 
+    @staticmethod
+    def strategy_register(name: str, code: str, idea: str = "", timeout: int = 30) -> Dict:
+        """注册 AI 生成策略（POST /strategies/register）。"""
+        return APIClient.post("/strategies/register",
+                              json={"name": name, "code": code, "idea": idea},
+                              timeout=timeout)
+
     # ------------------------------------------------------------------
     # AI 模型设置
     @staticmethod
@@ -287,6 +294,28 @@ class APIClient:
     def factor_pipeline(payload: Dict[str, Any], timeout: int = 900) -> Dict:
         """端到端因子挖掘流水线（POST /factor/pipeline）：挖掘→去冗余→OOS回测→复合组合。"""
         return APIClient.post("/factor/pipeline", json=payload, timeout=timeout)
+
+    @staticmethod
+    def factor_e2e(payload: Dict[str, Any], timeout: int = 900) -> Dict:
+        """端到端流水线（POST /factor/e2e）：Idea→AI证据→因子挖掘→OOS复合alpha→策略代码→知识库。"""
+        return APIClient.post("/factor/e2e", json=payload, timeout=timeout)
+
+    @staticmethod
+    def knowledge_search(query: str, top_k: int = 10,
+                         kind: Optional[str] = None, timeout: int = 30) -> Dict:
+        """知识库语义检索（POST /knowledge/search）。"""
+        json: Dict[str, Any] = {"query": query, "top_k": int(top_k)}
+        if kind:
+            json["kind"] = kind
+        return APIClient.post("/knowledge/search", json=json, timeout=timeout)
+
+    @staticmethod
+    def knowledge_list(kind: Optional[str] = None, timeout: int = 30) -> Dict:
+        """知识库条目列表（GET /knowledge）。"""
+        params: Dict[str, Any] = {}
+        if kind:
+            params["kind"] = kind
+        return APIClient.get("/knowledge", params=params, timeout=timeout)
 
     # ------------------------------------------------------------------
     # 席位因子（商品期货）

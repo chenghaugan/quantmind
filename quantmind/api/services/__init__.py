@@ -1,4 +1,4 @@
-"""API Service 层 - 业务逻辑封装
+﻿"""API Service 层 - 业务逻辑封装
 
 将原本混在路由 handler 里的业务逻辑抽到这里，保持 handler 薄而清晰。
 """
@@ -17,6 +17,7 @@ from .data_settings_service import DataSettingsService
 from .data_admin_service import DataAdminService
 from .alert_settings_service import AlertSettingsService
 from .search_service import SearchService
+from .knowledge_service import KnowledgeService
 
 __all__ = [
     "DataService",
@@ -33,4 +34,5 @@ __all__ = [
     "DataAdminService",
     "AlertSettingsService",
     "SearchService",
+    "KnowledgeService",
 ]

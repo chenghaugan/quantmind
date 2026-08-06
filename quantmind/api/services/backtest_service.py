@@ -1,9 +1,10 @@
 """BacktestService: 回测 / WalkForward / 策略清单"""
 import asyncio
-import math
+import inspect
 import logging
+import math
 from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 
 from ...core.constant import Exchange, Interval
 from ...core.contracts import default_size
@@ -16,6 +17,7 @@ from ...strategy import (
     DualMaStrategy,
     VolTargetStrategy,
     PairTradingStrategy,
+    CtaTemplate,
 )
 from ...strategy.components import ComposableStrategy
 from ...backtest.walkforward import walk_forward
@@ -49,10 +51,45 @@ class BacktestService:
     def __init__(self, dm: DataManager, ee: EventEngine):
         self.dm = dm
         self.ee = ee
+        # 动态注册的 AI 生成策略（仅实例级，避免全局污染）
+        self._extra_strategies: Dict[str, type] = {}
 
-    @staticmethod
-    def list_strategies() -> List[StrategyInfo]:
-        return [
+    def register_generated_strategy(self, name: str, source: str) -> Tuple[bool, str, dict]:
+        """注册 AI 生成策略源码 -> 实例级策略池。
+
+        先经沙箱二次校验（compile_strategy），通过后才在隔离命名空间 exec，
+        从其中找 CtaTemplate 子类存入 ``self._extra_strategies``。
+
+        :return: (ok, err, info)；info = {"name", "parameters"}
+        """
+        from ...ai.sandbox import compile_strategy
+
+        ok, err, _ = compile_strategy(source)
+        if not ok:
+            return False, err or "代码未通过沙箱校验", {}
+        try:
+            ns: Dict = {}
+            exec(compile(source, "<generated>", "exec"), ns, ns)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"执行策略源码失败: {exc}", {}
+        cls = None
+        for v in ns.values():
+            if inspect.isclass(v) and issubclass(v, CtaTemplate) and v is not CtaTemplate:
+                cls = v
+                break
+        if cls is None:
+            # 兜底：放宽到名字以 Strategy 结尾的类
+            for v in ns.values():
+                if inspect.isclass(v) and (v.__name__.endswith("Strategy") or "Strategy" in v.__name__):
+                    cls = v
+                    break
+        if cls is None:
+            return False, "未找到策略类", {}
+        self._extra_strategies[name] = cls
+        return True, "", {"name": name, "parameters": list(getattr(cls, "parameters", []))}
+
+    def list_strategies(self) -> List[StrategyInfo]:
+        result = [
             StrategyInfo(
                 name="dual_ma",
                 description="双均线趋势/动量策略",
@@ -79,9 +116,12 @@ class BacktestService:
                 parameters={"alpha": "MultiFactorAlpha/MomentumAlpha", "risk": "NullRisk/RiskGateModel"},
             ),
         ]
+        for k in self._extra_strategies:
+            result.append(StrategyInfo(name=k, description="AI 生成策略", parameters={"size": 1}))
+        return result
 
     async def run_backtest(self, req: BacktestRequest) -> Dict[str, Any]:
-        strat_class = _STRATEGY_MAP.get(req.strategy, MultiFactorStrategy)
+        strat_class = _STRATEGY_MAP.get(req.strategy) or self._extra_strategies.get(req.strategy) or MultiFactorStrategy
         vt = f"{req.symbol}.{req.exchange.upper()}"
         
         try:
@@ -117,7 +157,7 @@ class BacktestService:
 
     async def run_walkforward(self, req: WalkForwardRequest) -> Dict[str, Any]:
         """Walk-Forward 滚动样本外验证"""
-        strat_class = _STRATEGY_MAP.get(req.strategy, MultiFactorStrategy)
+        strat_class = _STRATEGY_MAP.get(req.strategy) or self._extra_strategies.get(req.strategy) or MultiFactorStrategy
         vt = f"{req.symbol}.{req.exchange.upper()}"
 
         # 自动计算需要的历史数据长度

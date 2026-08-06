@@ -102,6 +102,14 @@ class BacktestRequest(BaseModel):
     cost: bool = False            # 启用真实成本模型（按品种差异化费率/平今/印花税/保证金）
 
 
+class StrategyRegisterRequest(BaseModel):
+    """注册 AI 生成策略（端到端流水线产出的策略代码）。"""
+
+    name: str
+    code: str
+    idea: str = ""
+
+
 class StrategyInfo(BaseModel):
     name: str
     description: str
@@ -340,4 +348,64 @@ class FactorPipelineRequest(BaseModel):
     long_short: bool = True
     cost_rate: float = 0.0
     max_candidates: int = 8
+
+
+# ---- 端到端编排（AI 证据 → 挖掘 → 复合 → 策略代码）+ 自动沉淀知识库 ----
+class FactorE2ERequest(BaseModel):
+    """端到端因子研究请求（复用 orchestrator.run_e2e，可选沉淀到知识库）。
+
+    对应 :class:`quantmind.research.orchestrator.E2EConfig` 全字段，
+    附加面板/标的构造参数与知识库沉淀开关（``ingest_knowledge``）。
+    """
+
+    idea: str
+    asset_class: str = "期货"
+    seeds: Optional[List[str]] = None       # 用户额外种子；None → 用 AI 证据阶段产出
+    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    exchange: str = "SHFE"
+    interval: str = "1d"
+    start: Optional[str] = None
+    end: Optional[str] = None
+    # 因子挖掘（透传 E2EConfig）
+    algo: str = "co"
+    rounds: int = 3
+    forward_periods: int = 1
+    market: str = ""
+    train_frac: float = 0.6
+    val_frac: float = 0.2
+    dedup_threshold: float = 0.7
+    min_abs_ic: float = 0.0
+    run_composite: bool = True
+    composite_scheme: str = "icir"
+    composite_standardize: str = "zscore"
+    n_groups: int = 5
+    long_short: bool = True
+    cost_rate: float = 0.0
+    max_candidates: int = 8
+    # AI 证据研究阶段（A 线）
+    verify_threshold: float = 0.02
+    run_search: bool = False
+    max_rounds: int = 2
+    # 是否把结果沉淀进知识库
+    ingest_knowledge: bool = True
+
+
+# ---- 知识库（knowledge） ----
+class KnowledgeIngestRequest(BaseModel):
+    """手动向知识库写入一条记录。
+
+    ``kind``: ``factor`` | ``strategy`` | ``research_log``。
+    ``payload`` 为对应 kind 的字段 dict（见 KnowledgeService.ingest）。
+    """
+
+    kind: str
+    payload: Dict[str, Any]
+
+
+class KnowledgeSearchRequest(BaseModel):
+    """知识库轻量关键词检索请求。"""
+
+    query: str
+    top_k: int = 10
+    kind: Optional[str] = None          # factor | strategy | research_log | None=全部
 
