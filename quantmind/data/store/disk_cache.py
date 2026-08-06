@@ -11,8 +11,9 @@
 """
 from __future__ import annotations
 
+import json
 import logging
-from datetime import datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -28,6 +29,13 @@ _BAR_COLUMNS = [
     "datetime", "open", "high", "low", "close",
     "volume", "open_interest", "turnover",
 ]
+
+_REFRESH_LOG_NAME = "refresh_log.json"
+
+
+def _utcnow_iso() -> str:
+    """当前 UTC 时间的 ISO 字符串（naive，与体系一致）。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
 
 class DiskBarCache:
@@ -158,6 +166,121 @@ class DiskBarCache:
         return len(merged)
 
     # ----------------------------------------------------------------- 元信息
+    # -- 刷新执行日志（refresh_log.json） -------------------------------
+    @property
+    def refresh_log_path(self) -> Path:
+        return self.root / _REFRESH_LOG_NAME
+
+    def _load_refresh_log(self) -> List[dict]:
+        """读取刷新执行历史（倒序，最新在前）。文件缺失/损坏返回空列表。"""
+        path = self.refresh_log_path
+        if not path.exists():
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, list):
+                return data
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("读取刷新日志失败 %s: %s", path, exc)
+        return []
+
+    def _append_refresh_log(self, entry: dict, max_entries: int = 200) -> None:
+        """写入一条刷新记录（追加到最新位置，超出上限裁剪）。"""
+        try:
+            entries = self._load_refresh_log()
+            entries.insert(0, entry)
+            if len(entries) > max_entries:
+                entries = entries[:max_entries]
+            self.refresh_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.refresh_log_path, "w", encoding="utf-8") as fh:
+                json.dump(entries, fh, ensure_ascii=False, indent=2)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("写刷新日志失败: %s", exc)
+
+    def record_refresh(
+        self,
+        *,
+        symbol: str,
+        exchange: str,
+        interval: str,
+        rows: int,
+        latest: Optional[str],
+        status: str = "ok",
+        detail: Optional[str] = None,
+    ) -> None:
+        """记录一次刷新（成功/失败/空）到日志，供状态页展示历史。"""
+        self._append_refresh_log({
+            "ts": _utcnow_iso(),
+            "symbol": symbol,
+            "exchange": exchange,
+            "interval": interval,
+            "rows": int(rows),
+            "latest": latest,
+            "status": status,
+            "detail": (detail or "")[:200],
+        })
+
+    def refresh_history(self, limit: int = 50) -> List[dict]:
+        """返回最近 ``limit`` 条刷新记录（最新在前）。"""
+        return self._load_refresh_log()[:limit]
+
+    # -- 新鲜度（staleness） -------------------------------------------
+    @staticmethod
+    def _as_date(v) -> Optional[date]:
+        """把 ISO 字符串/pd.Timestamp 规范化为 date。"""
+        if v is None:
+            return None
+        try:
+            if isinstance(v, pd.Timestamp):
+                return v.date()
+            return pd.Timestamp(v).date()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def staleness(
+        self,
+        latest_date,
+        ref_trading_day: Optional[date] = None,
+    ) -> Tuple[Optional[int], Optional[bool]]:
+        """计算一个标的的最新交易日相对于基准交易日落后几个交易日。
+
+        ``ref_trading_day`` 缺省时取仓库内所有标的的最大最后交易日（作为"最新可用日"）
+        或当前日历最近的交易日。返回 ``(staleness_days, up_to_date)``；
+        无 latest 数据返回 ``(None, None)``。
+        """
+        latest = self._as_date(latest_date)
+        if latest is None:
+            return None, None
+        try:
+            from ...risk.calendar import TradingCalendar
+            cal = TradingCalendar()
+        except Exception:  # noqa: BLE001
+            cal = None
+
+        if ref_trading_day is None:
+            # 缺省基准：取最接近"今天"的交易日（严格意义的最新数据日）
+            ref = date.today()
+            if cal is not None:
+                ref = cal.prev_trading_day(ref, max_search=15) or ref
+        else:
+            ref = self._as_date(ref_trading_day)
+        if ref is None:
+            return None, None
+
+        if cal is not None:
+            # 用交易日历数两个日期之间的交易日数（不含 latest 本身）
+            count = 0
+            cur = latest
+            while cur < ref:
+                cur = cal.next_trading_day(cur, max_search=15)
+                if cur is None or cur > ref:
+                    break
+                count += 1
+        else:
+            count = (ref - latest).days
+        return count, count <= 0
+
     def list_keys(self) -> List[dict]:
         """返回仓库内所有标的键：{symbol, exchange, interval}（由文件名解析）。"""
         out: List[dict] = []
@@ -202,14 +325,35 @@ class DiskBarCache:
                     info["last"] = dt.max().isoformat()
                     if last is None or dt.max() > last:
                         last = dt.max()
+                    _sd, _up = self.staleness(dt.max())
+                    info["staleness_days"] = _sd
+                    info["up_to_date"] = _up
             except Exception:  # noqa: BLE001
                 continue
             per.append(info)
+        # 每个标的最末一次刷新记录
+        hist = self._load_refresh_log()
+        last_by_key: dict = {}
+        for h in hist:
+            key = (h.get("symbol"), h.get("exchange", "").upper(), h.get("interval"))
+            if key not in last_by_key:
+                last_by_key[key] = h
+        for info in per:
+            _h = last_by_key.get((info.get("symbol"), info.get("exchange", "").upper(),
+                                  info.get("interval")))
+            if _h:
+                info["last_refresh"] = {
+                    "ts": _h.get("ts"),
+                    "rows": _h.get("rows"),
+                    "latest": _h.get("latest"),
+                    "status": _h.get("status"),
+                }
         out: dict = {
             "root": str(self.root),
             "files": n_files,
             "rows": n_rows,
             "last_datetime": last.isoformat() if last is not None else None,
+            "refresh_log": _REFRESH_LOG_NAME,
         }
         if include_symbols:
             out["symbols"] = per

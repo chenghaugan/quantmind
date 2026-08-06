@@ -31,6 +31,7 @@ from .factors.panel_expr import panel_eval_expression
 from .eval import evaluate_expression
 from .cross_sectional_backtest import _factor_scores, _run_portfolio
 from .evaluator import FactorEvaluator
+from .barra import barra_factor_risk_attribution
 
 _logger = logging.getLogger("quantmind.research.combine")
 
@@ -423,6 +424,29 @@ def composite_backtest(
     # 6) 因子两两相关矩阵（供前端热力图；标准化后跨期 stack 相关）
     corr_df = _panel_corr(back_factor_dfs, standardize)
 
+    # 7) Barra 式多因子风险归因（完整版：风格暴露 + 截面回归因子收益 + 协方差分解）
+    risk_attribution = None
+    try:
+        # 前瞻收益（与 _run_portfolio 同口径：pct_change(f).shift(-f)）
+        fwd = panel.close.pct_change(forward_periods).shift(-forward_periods)
+        # 风格暴露 = 各因子面板的截面标准化（clean 常用片段，剔除全缺失日期）
+        exposures = {}
+        for e in exprs:
+            std = standardize_panel(back_factor_dfs[e], standardize)
+            if std.empty:
+                continue
+            exposures[e] = std
+        risk_attribution = barra_factor_risk_attribution(
+            signal=composite,
+            forward_returns=fwd,
+            exposures=exposures,
+            n_groups=n_groups,
+            long_short=long_short,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 归因失败不阻塞合成/回测
+        _logger.warning("Barra 风险归因计算失败: %s", exc)
+        risk_attribution = {"error": str(exc)[:200]}
+
     return {
         "scheme": scheme,
         "weights": {k: round(float(v), 4) for k, v in weights.items()},
@@ -436,5 +460,6 @@ def composite_backtest(
                        for c in corr_df.index],
         },
         "portfolio": {**perf.to_dict(), "daily_returns": [float(x) for x in port_ret]},
+        "risk_attribution": risk_attribution,
         "composite": composite,
     }

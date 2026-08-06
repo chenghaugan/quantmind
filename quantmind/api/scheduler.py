@@ -246,22 +246,49 @@ async def _job_cache_refresh(sys_state: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 sink: Dict[str, Any] = {}
                 bars = await dm.get_bar_data(req, source_sink=sink)
+                ok = bool(bars)
                 results.append({
-                    "key": k, "status": "ok" if bars else "empty",
+                    "key": k, "status": "ok" if ok else "empty",
                     "source": sink.get(k["symbol"], ""),
                     "n": len(bars),
                 })
-                refreshed += 1 if bars else 0
-                failed += 0 if bars else 1
+                _record_refresh(dc, k, exch, interv, bars, ok,
+                                sink.get(k["symbol"], ""))
+                refreshed += 1 if ok else 0
+                failed += 0 if ok else 1
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 results.append({"key": k, "status": "error", "error": str(exc)[:120]})
+                _record_refresh_error(dc, k, exch, interv, str(exc)[:120])
         return {
             "action": "cache_refresh", "refreshed": refreshed, "failed": failed,
             "results": results,
         }
     finally:
         dc.refresh = was_refresh
+
+
+def _record_refresh(dc, key, exch, interv, bars, ok, source):
+    """把一次成功/空的刷新写入仓库刷新日志（与手动 warm/refresh 一致）。"""
+    try:
+        latest = bars[-1].datetime.isoformat() if bars else None
+        dc.record_refresh(
+            symbol=key["symbol"], exchange=str(exch.value), interval=interv.value,
+            rows=len(bars), latest=latest,
+            status="ok" if ok else "empty", detail=(source or "empty"),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _record_refresh_error(dc, key, exch, interv, detail):
+    try:
+        dc.record_refresh(
+            symbol=key["symbol"], exchange=str(exch.value), interval=interv.value,
+            rows=0, latest=None, status="error", detail=detail,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:

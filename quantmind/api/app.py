@@ -329,12 +329,97 @@ async def warm_data_cache(payload: Dict[str, Any]):
         sink: Dict[str, str] = {}
         try:
             bars = await dm.get_bar_data(req, source_sink=sink)
-            results.append({"symbol": str(sym).strip(), "ok": bool(bars),
+            ok = bool(bars)
+            results.append({"symbol": str(sym).strip(), "ok": ok,
                             "n": len(bars), "source": sink.get(str(sym).strip(), "")})
+            dc = getattr(dm, "disk_cache", None)
+            if dc is not None:
+                _latest = bars[-1].datetime.isoformat() if bars else None
+                dc.record_refresh(
+                    symbol=str(sym).strip(), exchange=str(exch.value), interval=Interval.DAILY.value,
+                    rows=len(bars), latest=_latest,
+                    status="ok" if ok else "empty",
+                    detail=(sink.get(str(sym).strip(), "") or "empty"),
+                )
         except Exception as exc:  # noqa: BLE001
             results.append({"symbol": str(sym).strip(), "ok": False, "error": str(exc)[:120]})
+            dc = getattr(dm, "disk_cache", None)
+            if dc is not None:
+                dc.record_refresh(
+                    symbol=str(sym).strip(), exchange=str(exch.value), interval=Interval.DAILY.value,
+                    rows=0, latest=None, status="error", detail=str(exc)[:120],
+                )
     _ok = sum(1 for r in results if r.get("ok"))
     return {"ok": True, "warmed": _ok, "failed": len(results) - _ok, "results": results}
+
+
+@app.get("/data/cache/history")
+async def get_data_cache_history(limit: int = Query(50, ge=1, le=500)):
+    """本地行情仓库刷新执行历史（最新在前）。"""
+    dm: DataManager = app.state.dm
+    if dm is None or dm.disk_cache is None:
+        return {"enabled": False}
+    return {"enabled": True, "history": dm.disk_cache.refresh_history(limit=limit)}
+
+
+@app.post("/data/cache/refresh")
+async def refresh_data_cache():
+    """手动触发全量刷新：把仓库内所有已缓存标的从真实源重拉回写（追新）。
+
+    等价于 scheduler 的 ``cache_refresh`` 任务，可随时点按执行。
+    """
+    dm: DataManager = app.state.dm
+    if dm is None or dm.disk_cache is None:
+        return {"ok": False, "error": "本地行情仓库未启用"}
+    dc = dm.disk_cache
+    from ..core.constant import Exchange, Interval
+    from ..data.feed.base import HistoryRequest
+
+    keys = dc.list_keys()
+    if not keys:
+        return {"ok": True, "refreshed": 0, "failed": 0, "results": [], "skipped": True}
+
+    was_refresh = bool(getattr(dc, "refresh", False))
+    dc.refresh = True
+    results: List[Dict[str, Any]] = []
+    refreshed, failed = 0, 0
+    try:
+        for k in keys:
+            try:
+                exch = Exchange(str(k["exchange"]).upper())
+                interv = Interval(str(k["interval"]))
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                results.append({"key": k, "status": "bad_key", "error": str(exc)[:80]})
+                continue
+            req = HistoryRequest(symbol=k["symbol"], exchange=exch, interval=interv)
+            try:
+                sink: Dict[str, str] = {}
+                bars = await dm.get_bar_data(req, source_sink=sink)
+                ok = bool(bars)
+                n = len(bars)
+                results.append({
+                    "key": k, "status": "ok" if ok else "empty",
+                    "source": sink.get(k["symbol"], ""), "n": n,
+                })
+                dc.record_refresh(
+                    symbol=k["symbol"], exchange=str(exch.value), interval=interv.value,
+                    rows=n, latest=(bars[-1].datetime.isoformat() if bars else None),
+                    status="ok" if ok else "empty",
+                    detail=(sink.get(k["symbol"], "") or "empty"),
+                )
+                refreshed += 1 if ok else 0
+                failed += 0 if ok else 1
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                results.append({"key": k, "status": "error", "error": str(exc)[:120]})
+                dc.record_refresh(
+                    symbol=k["symbol"], exchange=str(exch.value), interval=interv.value,
+                    rows=0, latest=None, status="error", detail=str(exc)[:120],
+                )
+    finally:
+        dc.refresh = was_refresh
+    return {"ok": True, "refreshed": refreshed, "failed": failed, "results": results}
 
 
 @app.post("/research", response_model=ResearchResult)

@@ -343,6 +343,16 @@ class APIClient:
             payload["end"] = end
         return APIClient.post("/data/cache/warm", json=payload, timeout=timeout)
 
+    @staticmethod
+    def cache_history(limit: int = 50, timeout: int = 15) -> Dict:
+        """本地行情仓库刷新执行历史（最新在前）。GET /data/cache/history。"""
+        return APIClient.get(f"/data/cache/history?limit={int(limit)}", timeout=timeout)
+
+    @staticmethod
+    def cache_refresh(timeout: int = 600) -> Dict:
+        """手动触发全量刷新：把仓库内所有标的从真实源重拉回写。POST /data/cache/refresh。"""
+        return APIClient.post("/data/cache/refresh", json=None, timeout=timeout)
+
 
     # ------------------------------------------------------------------
     # 告警通知配置

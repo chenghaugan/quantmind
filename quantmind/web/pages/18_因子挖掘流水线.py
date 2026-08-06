@@ -368,6 +368,61 @@ if composite:
             _figc.add_vline(x=0, line=dict(color="rgba(148,163,184,.5)", dash="dash"))
             st.plotly_chart(_figc, use_container_width=True, config={"displayModeBar": False})
 
+    # 完整 Barra 式多因子风险归因（风格暴露 + 截面回归因子收益 + 协方差分解）
+    _ra = composite.get("risk_attribution")
+    if isinstance(_ra, dict) and "error" in _ra:
+        st.caption(f"⚠️ Barra 风险归因不可用: {_ra.get('error', '')[:120]}")
+    elif isinstance(_ra, dict) and _ra.get("factors"):
+        st.subheader("多因子风险归因（Barra 式）")
+        st.caption("**方法**：把每个因子看作一种风格暴露，逐交易日做横截面回归估计因子收益率，"
+                   "再用**协方差分解**（MCTR=Cov(成分,组合收益)/σ）把组合波动拆到各因子+特异风险，"
+                   "分解**可加**（各项之和=总波动）。")
+        # 总量 KPI
+        _tot = _ra.get("total") or {}
+        _spec = _ra.get("specific") or {}
+        _mkt = _ra.get("market") or {}
+        kpi_row([
+            {"label": "组合年化波动", "value": fmt_num(_tot.get("ann_vol"), 3),
+             "tone": "accent"},
+            {"label": "日波动 σ", "value": fmt_num(_tot.get("vol"), 4), "tone": "neutral"},
+            {"label": "系统解释 R²", "value": fmt_pct(_tot.get("r2_mean")),
+             "tone": ("success" if (_tot.get("r2_mean") or 0) > 0.5 else "neutral")},
+            {"label": "特异风险占比", "value": fmt_pct(_spec.get("risk_pct")),
+             "tone": "neutral"},
+            {"label": "市场因子", "value": fmt_num(_mkt.get("mctr_vol"), 4), "tone": "neutral"},
+        ])
+        # 因子风险贡献表
+        _frows = [{
+            "因子": f.get("name", "")[:28],
+            "MCTR 波动": fmt_num(f.get("mctr_vol"), 4),
+            "风险占比": fmt_pct(f.get("risk_pct")),
+            "因子收益(均)": fmt_num(f.get("factor_ret_mean"), 5),
+            "因子收益(波动)": fmt_num(f.get("factor_ret_vol"), 4),
+            "平均暴露": fmt_num(f.get("exposure_mean"), 3),
+        } for f in _ra.get("factors") or []]
+        st.dataframe(pd.DataFrame(_frows), width="stretch", hide_index=True)
+        # 风险贡献条形图（因子 + 特异 + 市场）
+        _bar_rows = ([{"项": f.get("name", "")[:20], "MCTR": f.get("mctr_vol"),
+                       "类别": "因子"}
+                      for f in _ra.get("factors") or []]
+                     + [{"项": "_特异", "MCTR": _spec.get("mctr_vol"), "类别": "特异"},
+                        {"项": "_市场", "MCTR": _mkt.get("mctr_vol"), "类别": "市场"}])
+        _bdf = pd.DataFrame(_bar_rows).sort_values("MCTR")
+        _figr = px.bar(_bdf, x="MCTR", y="项", orientation="h", color="类别",
+                       color_discrete_map={"因子": "#38bdf8", "特异": "#a78bfa",
+                                           "市场": "#fbbf24"},
+                       title="组合风险贡献分解（Barra 协方差，各部分可加=总波动 σ）")
+        _figr.update_layout(height=320, margin=dict(t=44, l=8, b=8),
+                            xaxis_title="风险贡献（波动 σ）", yaxis_title="",
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                        xanchor="right", x=1))
+        _figr.add_vline(x=0, line=dict(color="rgba(148,163,184,.5)", dash="dash"))
+        st.plotly_chart(_figr, use_container_width=True, config={"displayModeBar": False})
+        _add = _ra.get("additivity") or {}
+        st.caption(f"闭合校验：Σ 因子+特异+市场 = {fmt_num(_add.get('recon_total'), 4)} "
+                   f"≈ 组合 σ = {fmt_num(_tot.get('vol'), 4)}"
+                   f"（残差 {fmt_num(_add.get('closure'), 6)}）")
+
     # 因子相关矩阵热力图（去冗余后代表间的残差相关性）
     corr = composite.get("correlation")
     if corr and corr.get("columns") and corr.get("values"):
