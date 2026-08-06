@@ -337,6 +337,37 @@ if composite:
         else:
             st.caption("无因子 IC 数据。")
 
+    # 组合风险/收益归因（近似）：weight × 成分 OOS 收益的贡献分解
+    _contrib = composite.get("contribution") or []
+    if _contrib:
+        st.subheader("组合风险归因（近似贡献分解）")
+        st.caption("`contribution = 权重 × 成分样本外收益`（横截面组合非严格可加，此为近似影响）；"
+                   "`abs_pct` 为相对贡献占比。")
+        cdf = pd.DataFrame([{
+            "因子": r.get("expression", "")[:28],
+            "权重": fmt_num(r.get("weight"), 3),
+            "OOS IC": fmt_num(r.get("test_ic"), 3),
+            "OOS Sharpe": fmt_num(r.get("test_sharpe"), 2),
+            "OOS 收益": fmt_pct(r.get("test_return")),
+            "贡献": fmt_num(r.get("contribution"), 4),
+            "贡献占比": fmt_pct(r.get("abs_pct")),
+        } for r in _contrib])
+        st.dataframe(cdf, width="stretch", hide_index=True)
+        # 贡献柱状图（按 |贡献| 排序）
+        _contrib_valid = [r for r in _contrib if r.get("contribution") is not None]
+        if _contrib_valid:
+            _cdf = pd.DataFrame([{
+                "因子": r.get("expression", "")[:24],
+                "贡献": r.get("contribution"),
+            } for r in _contrib_valid]).sort_values("贡献")
+            _figc = px.bar(_cdf, x="贡献", y="因子", orientation="h",
+                           color="贡献", color_continuous_scale="RdBu_r",
+                           title="组合收益贡献分解（weight × OOS 收益）")
+            _figc.update_layout(height=280, margin=dict(t=44, l=8, b=8),
+                                xaxis_title="贡献", yaxis_title="")
+            _figc.add_vline(x=0, line=dict(color="rgba(148,163,184,.5)", dash="dash"))
+            st.plotly_chart(_figc, use_container_width=True, config={"displayModeBar": False})
+
     # 因子相关矩阵热力图（去冗余后代表间的残差相关性）
     corr = composite.get("correlation")
     if corr and corr.get("columns") and corr.get("values"):

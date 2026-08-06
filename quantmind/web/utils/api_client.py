@@ -319,6 +319,32 @@ class APIClient:
         return APIClient.get("/data/files", timeout=timeout)
 
     # ------------------------------------------------------------------
+    # 本地行情仓库（Parquet 写缓存）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def cache_stats(timeout: int = 15) -> Dict:
+        """本地行情仓库概览（含逐标的明细）。GET /data/cache。"""
+        return APIClient.get("/data/cache", timeout=timeout)
+
+    @staticmethod
+    def cache_purge(timeout: int = 30) -> Dict:
+        """清空本地行情仓库（删除全部 .parquet）。DELETE /data/cache。"""
+        return APIClient.delete("/data/cache", timeout=timeout)
+
+    @staticmethod
+    def cache_warm(symbols: list, exchange: str = "SHFE",
+                   start: Optional[str] = None, end: Optional[str] = None,
+                   timeout: int = 600) -> Dict:
+        """预热：把指定标的多真实源拉进本地行情仓库。POST /data/cache/warm。"""
+        payload: Dict[str, Any] = {"symbols": symbols, "exchange": exchange}
+        if start:
+            payload["start"] = start
+        if end:
+            payload["end"] = end
+        return APIClient.post("/data/cache/warm", json=payload, timeout=timeout)
+
+
+    # ------------------------------------------------------------------
     # 告警通知配置
     # ------------------------------------------------------------------
     @staticmethod

@@ -182,3 +182,12 @@ class TestPipeline:
             if s.get("test_sharpe") is not None or s.get("test_ic") is not None:
                 assert len(s.get("daily_returns") or []) > 0
                 assert len(s.get("ic_series") or []) > 0
+        # 复合组合含风险/收益归因
+        comp = rep.get("composite")
+        if comp:
+            assert "contribution" in comp
+            if comp.get("weights"):
+                assert len(comp["contribution"]) == len(comp["weights"])
+                for row in comp["contribution"]:
+                    assert "expression" in row and "weight" in row
+                    assert "abs_pct" in row

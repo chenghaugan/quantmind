@@ -39,13 +39,19 @@ class CrossSectionService:
         return list_alpha_cs()
 
     async def _build_panel(self, symbols, exchange, interval, start, end):
-        exch = Exchange(exchange.upper())
+        default_exch = exchange.upper()
         interv = Interval(interval or "1d")
         tasks = []
         for s in symbols:
+            sym = s.strip()
+            exch_str = default_exch
+            if "." in sym:
+                head, _, ex = sym.rpartition(".")
+                if head and ex:
+                    sym, exch_str = head.strip(), ex.strip().upper()
             req = HistoryRequest(
-                symbol=s,
-                exchange=exch,
+                symbol=sym,
+                exchange=Exchange(exch_str),
                 interval=interv,
                 start=datetime.fromisoformat(start) if start else None,
                 end=datetime.fromisoformat(end) if end else None,

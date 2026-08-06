@@ -173,24 +173,44 @@ class DiskBarCache:
                 })
         return out
 
-    def stats(self) -> dict:
-        """仓库概览：文件数、总行数、最大最后交易日。"""
+    def stats(self, include_symbols: bool = True) -> dict:
+        """仓库概览：文件数、总行数、最大最后交易日，及逐标的明细。
+
+        ``include_symbols`` 为 True 时额外返回 ``symbols`` 列表，每项含
+        ``{file, symbol, exchange, interval, rows, start, end, last}``，
+        供「行情仓库总览」页展示各标的覆盖区间与行数。
+        """
         n_files = 0
         n_rows = 0
         last = None
+        per: List[dict] = []
         for p in self.root.glob("*.parquet"):
             n_files += 1
+            parts = p.stem.split(".")
+            key = {"symbol": parts[0], "exchange": parts[1], "interval": parts[2]} \
+                if len(parts) == 3 else {}
+            info = {"file": p.name, "rows": 0, "start": None, "end": None, "last": None}
+            info.update(key)
             try:
                 df = pd.read_parquet(p, columns=["datetime"])
                 n_rows += len(df)
-                mx = pd.to_datetime(df["datetime"]).max()
-                if last is None or (mx is not None and mx > last):
-                    last = mx
+                dt = pd.to_datetime(df["datetime"], errors="coerce").dropna()
+                if len(dt):
+                    info["rows"] = int(len(dt))
+                    info["start"] = dt.min().isoformat()
+                    info["end"] = dt.max().isoformat()
+                    info["last"] = dt.max().isoformat()
+                    if last is None or dt.max() > last:
+                        last = dt.max()
             except Exception:  # noqa: BLE001
                 continue
-        return {
+            per.append(info)
+        out: dict = {
             "root": str(self.root),
             "files": n_files,
             "rows": n_rows,
             "last_datetime": last.isoformat() if last is not None else None,
         }
+        if include_symbols:
+            out["symbols"] = per
+        return out

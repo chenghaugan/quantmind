@@ -193,6 +193,44 @@ def _run_judge(pool: List[str], provider: LLMProvider) -> Dict[str, float]:
     return scores
 
 
+def _attach_composite_contribution(composite: Dict[str, object], steps: List[Dict[str, object]]) -> None:
+    """为复合组合结果附加「成分风险/收益归因」（proxy）。
+
+    精确的横截面组合无法做严格可加分解，这里给出**近似贡献**：
+    ``contribution = weight × 该因子的样本外总收益(test_return)``，
+    ``abs_pct = |weight| × |test_return| 在所有成分中的占比``（衡量相对影响）。
+    同时带上每个成分的权重 / OOS Sharpe / IC / 收益，供前端「风险归因」表展示。
+    """
+    weights = composite.get("weights") or {}
+    step_map = {s.get("expression"): s for s in steps if s.get("expression")}
+    rows: List[Dict[str, object]] = []
+    for expr, w in weights.items():
+        s = step_map.get(expr) or {}
+        _tr = s.get("test_return")
+        _w = float(w)
+        contrib = (_w * _tr) if (isinstance(_tr, (int, float)) and _tr == _tr) else None
+        rows.append({
+            "expression": expr,
+            "weight": round(_w, 4),
+            "test_ic": s.get("test_ic"),
+            "test_sharpe": s.get("test_sharpe"),
+            "test_return": _tr,
+            "contribution": round(contrib, 4) if contrib is not None else None,
+        })
+    total_abs = sum(abs(r["contribution"]) for r in rows
+                    if r.get("contribution") is not None) or 0.0
+    if total_abs > 0:
+        for r in rows:
+            if r.get("contribution") is not None:
+                r["abs_pct"] = round(abs(r["contribution"]) / total_abs, 4)
+            else:
+                r["abs_pct"] = None
+    else:
+        for r in rows:
+            r["abs_pct"] = None
+    composite["contribution"] = rows
+
+
 def run_pipeline(
     panel: Panel,
     config: Optional[PipelineConfig] = None,
@@ -343,6 +381,7 @@ def run_pipeline(
                 market=config.market,
             )
             composite_res.pop("composite", None)  # 避免返回整个大面板
+            _attach_composite_contribution(composite_res, steps)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("复合组合回测失败: %s", exc)
 

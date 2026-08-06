@@ -303,6 +303,40 @@ async def purge_data_cache():
     return {"ok": True, "removed": removed}
 
 
+@app.post("/data/cache/warm")
+async def warm_data_cache(payload: Dict[str, Any]):
+    """预热本地行情仓库：把给定标的多真实源拉取并落盘（后续 /factor/pipeline 秒级）。
+
+    payload: {symbols: [..], exchange: "SHFE", start?: "YYYY-MM-DD", end?: "YYYY-MM-DD"}
+    """
+    dm: DataManager = app.state.dm
+    if dm is None or dm.disk_cache is None:
+        return {"ok": False, "error": "本地行情仓库未启用"}
+    from ..core.constant import Exchange, Interval
+    from ..data.feed.base import HistoryRequest
+
+    symbols = [s for s in (payload.get("symbols") or []) if s and str(s).strip()]
+    if not symbols:
+        return {"ok": False, "error": "至少提供 1 个标的"}
+    exch = Exchange(str(payload.get("exchange", "SHFE")).upper())
+    _start = datetime.fromisoformat(payload["start"]) if payload.get("start") else None
+    _end = datetime.fromisoformat(payload["end"]) if payload.get("end") else None
+
+    results: List[Dict[str, Any]] = []
+    for sym in symbols:
+        req = HistoryRequest(symbol=str(sym).strip(), exchange=exch,
+                             interval=Interval.DAILY, start=_start, end=_end)
+        sink: Dict[str, str] = {}
+        try:
+            bars = await dm.get_bar_data(req, source_sink=sink)
+            results.append({"symbol": str(sym).strip(), "ok": bool(bars),
+                            "n": len(bars), "source": sink.get(str(sym).strip(), "")})
+        except Exception as exc:  # noqa: BLE001
+            results.append({"symbol": str(sym).strip(), "ok": False, "error": str(exc)[:120]})
+    _ok = sum(1 for r in results if r.get("ok"))
+    return {"ok": True, "warmed": _ok, "failed": len(results) - _ok, "results": results}
+
+
 @app.post("/research", response_model=ResearchResult)
 async def research(req: ResearchRequest):
     service: ResearchService = app.state.research_service

@@ -58,6 +58,19 @@ def _flt(x) -> Optional[float]:
         return None
 
 
+def _split_vt_symbol(symbol: str, default_exchange: str):
+    """把标的拆成 (symbol, exchange)。支持 ``rb0.SHFE`` 形式（跨交易所统一面板）。
+
+    含 ``.`` 时按最后一段解析为该标的自有交易所；否则用全局默认交易所。
+    """
+    sym = symbol.strip()
+    if "." in sym:
+        head, _, exch = sym.rpartition(".")
+        if head and exch:
+            return head.strip(), exch.strip().upper()
+    return sym, default_exchange.upper()
+
+
 class SearchService:
     """因子表达式评估与迭代搜索服务。"""
 
@@ -78,21 +91,21 @@ class SearchService:
         symbols = [s for s in (symbols or []) if s and s.strip()]
         if len(symbols) < 2:
             raise ValueError("表达式截面研究至少需要 2 个标的")
-        exch = Exchange(exchange.upper())
+        default_exch = exchange.upper()
         interv = Interval(interval or "1d")
-        tasks = [
-            self.dm.get_bar_data(
+        tasks = []
+        for s in symbols:
+            sym, exch_str = _split_vt_symbol(s, default_exch)
+            tasks.append(self.dm.get_bar_data(
                 HistoryRequest(
-                    symbol=s,
-                    exchange=exch,
+                    symbol=sym,
+                    exchange=Exchange(exch_str),
                     interval=interv,
                     start=datetime.fromisoformat(start) if start else None,
                     end=datetime.fromisoformat(end) if end else None,
                 ),
                 source_sink=source_sink,
-            )
-            for s in symbols
-        ]
+            ))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         bars_by_symbol: Dict[str, list] = {}
         missing: List[str] = []

@@ -129,3 +129,13 @@ def test_factor_pipeline_lt2_symbols(client):
     assert r.status_code == 400
     assert "error" in r.json() or "detail" in r.json()
 
+
+def test_split_vt_symbol_helper():
+    """`rb0.SHFE` 形式支持跨交易所统一面板（每标的自有交易所）。"""
+    from quantmind.api.services.search_service import _split_vt_symbol as f
+    assert f("rb0.SHFE", "CFFEX") == ("rb0", "SHFE")
+    assert f("IF0", "CFFEX") == ("IF0", "CFFEX")          # 无点 → 全局默认
+    assert f("600519.SSE", "SHFE") == ("600519", "SSE")
+    assert f(" rb0.DCE ", "SHFE") == ("rb0", "DCE")        # 去空格
+    assert f("bu0", "DCE") == ("bu0", "DCE")
+
