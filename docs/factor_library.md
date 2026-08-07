@@ -38,9 +38,10 @@
 补齐 20 个缺失的 WorldQuant Alpha101 代表因子（alpha009/010/023/027/029/031/032/034/035/041/042/043/044/045/050/052/056/066/078/095）。
 
 ## 已知实现说明
-- `wq.py::_reg_beta/_reg_resi` 在本环境 pandas 版本的 `DataFrame.rolling().apply(raw=True)` 下会退化为 1 维窗口而异常（属未启用的缺陷）。academic 因子的回归类实现改用滚动协方差/方差（`_roll_beta`），gtja191 的 REGBETA 用 `_slope` 等价实现。
+- `wq.py::_reg_beta/_reg_resi` 曾受 pandas 3.0 `DataFrame.rolling().apply` 逐列化影响而异常（详见 commit `bf4879f`）。已改用「协方差/方差」等价实现（beta=Cov(y,x)/Var(x)，残差=y−(α+βx)），仅依赖逐列滚动原语，无前视；与 `academic._roll_beta` 数值偏差为 0。academic 的回归类实现与 gtja191 的 REGBETA（`_slope`）仍按各自语义保留。
 - alpha101/gtja191 的 rank 采用单标的滚动时序近似（`_rank`），生产多标的面板场景建议替换为 `_rank_cs` 严格截面实现。
 
 ## 测试
 - `tests/test_factor_families.py`：新族数量/冒烟/分类/registry 注册断言。
+- `tests/test_wq_primitives.py`：`_reg_beta/_reg_resi` 回归保护（5 项断言，覆盖 pandas 3.0 多列 rolling 缺陷）。
 - `tests/test_factors.py`、`tests/test_registry.py`、`tests/test_api.py`：既有回归。
