@@ -14,8 +14,9 @@ import pandas as pd
 from ...core.object import BarData
 from .base import Factor, FactorMeta, bars_to_df
 from .wq import (
-    _rank, _delay, _delta, _corr, _cov, _ts_min, _ts_max, _ts_arg_max, _ts_rank,
-    _signed_power, _scale, _decay_linear, _slope, _sma, _std, _sum, _vwap,
+    _rank, _delay, _delta, _corr, _cov, _ts_min, _ts_max, _ts_arg_max,
+    _ts_arg_min, _ts_rank, _ts_median, _signed_power, _scale, _decay_linear,
+    _slope, _sma, _std, _sum, _vwap, _adv,
 )
 
 
@@ -165,6 +166,175 @@ def a101(df):  # -rank(cov(rank(close), rank(volume), 10))
     return -_rank(_cov(_rank(df["close"]), _rank(df["volume"]), 10))
 
 
+# ----------------------------- 新增经典 Alpha（忠实官方公式） -----------------------------
+def a009(df):
+    # (rank(open - Ts_Min(high,2)) > rank(open - Ts_Min(low,2))) ? (high - close) : (close - low)
+    # 依据开盘价相对近2日高低点的位置，判断当日为阳线取 high-close、阴线取 close-low。
+    cond = _rank(df["open"] - _ts_min(df["high"], 2)) > _rank(df["open"] - _ts_min(df["low"], 2))
+    out = np.where(cond, df["high"] - df["close"], df["close"] - df["low"])
+    return pd.Series(out, index=df.index)
+
+
+def a010(df):
+    # rank(max(((ret < 0) ? std(ret,20) : close)^2, 5))
+    # 过去5日收益率与收盘价平方的最大值做时序分位排名。
+    ret = _ret(df)
+    base = np.where(ret < 0, _std(ret, 20).values, df["close"].values)
+    sp = pd.Series(base, index=df.index) ** 2
+    return _rank(_ts_max(sp, 5))
+
+
+def a023(df):
+    # ((sum(high,20)/20) < close) ? (-1 * ts_rank(abs(delta(close,7)),60)) : -1) * rank(corr(volume, close,10))
+    # 若收盘价高于20日最高均价，则给出更消极的涨幅震荡排名，否则取 -1。
+    cond = (_sum(df["high"], 20) / 20) < df["close"]
+    chosen = np.where(cond, (-1.0 * _ts_rank(_delta(df["close"], 7).abs(), 60)).values, -1.0)
+    chosen = pd.Series(chosen, index=df.index)
+    return chosen * _rank(_corr(df["volume"], df["close"], 10))
+
+
+def a027(df):
+    # (0.5 < rank(sum(corr(rank(volume), rank(vwap),6),2)/2)) ? -1 : 1) * rank(corr(rank(close), rank(median(volume,3)),5))
+    # 量价相关的横截面强弱 → 量价相关性与三日量中位数的相关。
+    vwap = _vwap(df)
+    term = _rank(_sum(_corr(_rank(df["volume"]), _rank(vwap), 6), 2) / 2.0)
+    sign = pd.Series(np.where(0.5 < term, -1.0, 1.0), index=df.index)
+    med = _ts_median(df["volume"], 3)
+    return sign * _rank(_corr(_rank(df["close"]), _rank(med), 5))
+
+
+def a029(df):
+    # min(rank(rank(scale(log(sum(rank(corr(rank(volume), rank(vwap),6)),2))))),5)
+    #     + ts_rank(delay(-1*rank(rank(scale(log(sum(rank(corr(rank(volume), rank(vwap),6)),2))))),6),4)
+    # 量价相关的对数占比复合排名，叠加其滞后6日的反向时序排名。
+    vwap = _vwap(df)
+    inner = _rank(_corr(_rank(df["volume"]), _rank(vwap), 6))
+    x = _sum(_rank(inner), 2)
+    y = _rank(_rank(_scale(np.log(x.clip(lower=1e-12)))))
+    return np.minimum(_rank(y), 5.0) + _ts_rank(_delay(-1.0 * y, 6), 4)
+
+
+def a031(df):
+    # rank(rank(rank(decay_linear(-1*rank(rank(delta(close,10))),10)))) + rank(-1*delta(close,3)) + sign(scale(corr(adv20,low,12)))
+    # 十日动量衰减 + 三日反转变动 + 成交额-低价相关的方向。
+    d1 = _rank(_rank(_delta(df["close"], 10)))
+    term1 = _rank(_rank(_rank(_decay_linear(-1.0 * d1, 10))))
+    term2 = _rank(-1.0 * _delta(df["close"], 3))
+    term3 = np.sign(_scale(_corr(_adv(df, 20), df["low"], 12)))
+    return term1 + term2 + term3
+
+
+def a032(df):
+    # scale((sum(close,7)/7 - close)) + 20*scale(corr(vwap, delay(close,5),230))
+    # 7日收盘均值偏离 + 均价相对5日前收盘的长程相关放大。
+    vwap = _vwap(df)
+    return _scale((_sum(df["close"], 7) / 7) - df["close"]) + 20.0 * _scale(
+        _corr(vwap, df["close"].shift(5), 230)
+    )
+
+
+def a034(df):
+    # rank((1-rank(std(ret,2)/std(ret,5))) + (1-rank(delta(close,1))))
+    # 短期波动率占比反转 + 单日涨跌反转的复合排名。
+    ret = _ret(df)
+    ratio = _std(ret, 2) / _std(ret, 5).replace(0, np.nan)
+    inner = (1 - _rank(ratio.replace([np.inf, -np.inf], np.nan))) + (1 - _rank(_delta(df["close"], 1)))
+    return _rank(inner.replace([np.inf, -np.inf], np.nan).fillna(0.0))
+
+
+def a035(df):
+    # ts_rank(volume/adv20, 60) * (1 - ts_rank(close/high - 1, 20)) * -1
+    # 成交量相对20日均量触顶、同时收盘价相对高点回落时给出反向信号。
+    r1 = _ts_rank(df["volume"] / _adv(df, 20), 60)
+    r2 = _ts_rank((df["close"] / df["high"]) - 1.0, 20)
+    return r1 * (1 - r2) * -1.0
+
+
+def a041(df):  # rank(vwap-close) / rank(vwap+close)  均价偏离强度
+    vwap = _vwap(df)
+    num = _rank(vwap - df["close"])
+    den = _rank(vwap + df["close"]).replace(0, np.nan)
+    return (num / den).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def a042(df):  # -1 * rank(std(high,10)) * corr(high,volume,10)  高价波动与量相关
+    return -1.0 * _rank(_std(df["high"], 10)) * _corr(df["high"], df["volume"], 10)
+
+
+def a043(df):
+    # ((close - high) < 0) ? (-1 * rank(corr(close,volume,10))) : (close - high)
+    # 当日收盘小于最高价时取量价相关排名，否则取收盘对高位的偏离。
+    cond = (df["close"] - df["high"]) < 0
+    chosen = np.where(
+        cond,
+        (-1.0 * _rank(_corr(df["close"], df["volume"], 10))).values,
+        (df["close"] - df["high"]).values,
+    )
+    return pd.Series(chosen, index=df.index)
+
+
+def a044(df):  # -1 * rank(ts_rank(close,30)) * corr(close,volume,10)  价量相关
+    return -1.0 * _rank(_ts_rank(df["close"], 30)) * _corr(df["close"], df["volume"], 10)
+
+
+def a045(df):
+    # -1 * rank(sum(delay(close,5),20)/20) * corr(close,volume,2) * rank(corr(sum(close,5), sum(close,20),2))
+    # 5日滞后均价的排名、短期量价相关与长短周期收盘相关三者复合。
+    c = df["close"]
+    t = -1.0 * _rank(_sum(c.shift(5), 20) / 20) * _corr(c, df["volume"], 2)
+    return t * _rank(_corr(_sum(c, 5), _sum(c, 20), 2))
+
+
+def a050(df):  # -1 * ts_max(rank(corr(rank(volume), rank(vwap),5)),5)  量价相关冲高反转
+    vwap = _vwap(df)
+    return -1.0 * _ts_max(_rank(_corr(_rank(df["volume"]), _rank(vwap), 5)), 5)
+
+
+def a052(df):
+    # ((-tsmin(low,9)+tsmax(high,9)) < 0) ? 1 : (((sum(close,9)/9) - close) / (sum(close,9)/9)) < 0) ? -1 : 1
+    # 近9日高低幅为负时看多；否则按收盘相对9日均价的偏离方向取 ±1。
+    c9 = _sum(df["close"], 9) / 9
+    inner = (c9 - df["close"]) / c9.replace(0, np.nan)
+    cond1 = (-_ts_min(df["low"], 9) + _ts_max(df["high"], 9)) < 0
+    out = np.where(cond1, 1.0, np.where(inner.fillna(0.0) < 0, -1.0, 1.0))
+    return pd.Series(out, index=df.index)
+
+
+def a056(df):
+    # rank(ts_rank(1/close,20)) * (1-rank(volume/adv20)) * (1 - rank(sum(close,5)/5 - close) / rank(vwap))
+    # 倒数收盘时序排名、量能收缩与5日均价偏离三者复合。
+    vwap = _vwap(df)
+    c = df["close"]
+    t1 = _rank(_ts_rank(1.0 / c, 20))
+    t2 = 1.0 - _rank(df["volume"] / _adv(df, 20))
+    den = _rank(vwap).replace(0, np.nan)
+    t3 = (1.0 - (_rank(_sum(c, 5) / 5 - c) / den)).replace([np.inf, -np.inf], np.nan)
+    return (t1 * t2 * t3).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def a066(df):
+    # (rank(decay_linear(delta(vwap,3),7)) + ts_rank(decay_linear((low*0.9+low*0.1)-vwap,5),6)) * -1
+    # 均价三日动量的衰减排名 + 低点相对均价偏离的时序排名，整体反向。
+    vwap = _vwap(df)
+    t1 = _rank(_decay_linear(_delta(vwap, 3), 7))
+    inner = ((df["low"] * 0.9) + (df["low"] * 0.1)) - vwap
+    t2 = _ts_rank(_decay_linear(inner, 5), 6)
+    return (t1 + t2) * -1.0
+
+
+def a078(df):
+    # rank(corr(sum(low*0.35+vwap*0.65,20), sum(mean(volume,40),20),7))
+    # 加权低价均价20日总和与40日均量20日总和的相关。
+    vwap = _vwap(df)
+    a = _sum((df["low"] * 0.35) + (vwap * 0.65), 20)
+    b = _sum(_sma(df["volume"], 40), 20)
+    return _rank(_corr(a, b, 7))
+
+
+def a095(df):  # rank(open - ts_arg_min(close,30))  开盘价相对30日最低价位置
+    return _rank(df["open"] - _ts_arg_min(df["close"], 30))
+
+
 # ----------------------------- 补充高价值经典 Alpha（显式真实公式） -----------------------------
 def a001(df):  # rank(Ts_ArgMax(SignedPower(((ret<0)?std(ret,20):close), 2), 5)) - 0.5
     ret = df["close"].pct_change()
@@ -229,14 +399,19 @@ def a055(df):  # -corr(rank(价格位置), rank(volume), 5)
 _ALPHA_FUNCS: Dict[str, Callable[[pd.DataFrame], pd.Series]] = {
     "alpha001": a001, "alpha002": a002, "alpha003": a003, "alpha004": a004,
     "alpha005": a005, "alpha006": a006, "alpha007": a007, "alpha008": a008,
-    "alpha011": a011, "alpha012": a012, "alpha013": a013, "alpha014": a014,
-    "alpha015": a015, "alpha016": a016, "alpha017": a017, "alpha018": a018,
-    "alpha019": a019, "alpha020": a020, "alpha021": a021, "alpha022": a022,
-    "alpha024": a024, "alpha026": a026, "alpha028": a028, "alpha033": a033,
-    "alpha037": a037, "alpha038": a038, "alpha040": a040, "alpha049": a049,
-    "alpha051": a051, "alpha053": a053, "alpha054": a054, "alpha055": a055,
-    "alpha060": a060, "alpha062": a062, "alpha071": a071, "alpha075": a075,
-    "alpha083": a083, "alpha093": a093, "alpha099": a099, "alpha101": a101,
+    "alpha009": a009, "alpha010": a010, "alpha011": a011, "alpha012": a012,
+    "alpha013": a013, "alpha014": a014, "alpha015": a015, "alpha016": a016,
+    "alpha017": a017, "alpha018": a018, "alpha019": a019, "alpha020": a020,
+    "alpha021": a021, "alpha022": a022, "alpha023": a023, "alpha024": a024,
+    "alpha026": a026, "alpha027": a027, "alpha028": a028, "alpha029": a029,
+    "alpha031": a031, "alpha032": a032, "alpha033": a033, "alpha034": a034,
+    "alpha035": a035, "alpha037": a037, "alpha038": a038, "alpha040": a040,
+    "alpha041": a041, "alpha042": a042, "alpha043": a043, "alpha044": a044,
+    "alpha045": a045, "alpha049": a049, "alpha050": a050, "alpha051": a051,
+    "alpha052": a052, "alpha053": a053, "alpha054": a054, "alpha055": a055,
+    "alpha056": a056, "alpha060": a060, "alpha062": a062, "alpha066": a066,
+    "alpha071": a071, "alpha075": a075, "alpha078": a078, "alpha083": a083,
+    "alpha093": a093, "alpha095": a095, "alpha099": a099, "alpha101": a101,
 }
 
 

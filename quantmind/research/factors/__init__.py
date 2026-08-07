@@ -11,6 +11,15 @@ from .alpha191 import Alpha191Factor, build_alpha191_factor, list_alpha191
 from .alpha_cs import (
     Panel, compute_alpha_cross_sectional, list_alpha_cs,
 )
+from .gtja191 import (
+    Gtja191Factor, build_gtja191_factor, list_gtja191,
+)
+from .qlib158 import (
+    Qlib158Factor, build_qlib158_factor, list_qlib158,
+)
+from .academic import (
+    AcademicFactor, build_academic_factor, list_academic,
+)
 from .seat_futures import (
     SeatFactor, compute_seat_factors, make_synthetic_seat_df,
 )
@@ -24,5 +33,8 @@ __all__ = [
     "AlphaFactor", "build_alpha_factor", "list_alpha101",
     "Alpha191Factor", "build_alpha191_factor", "list_alpha191",
     "Panel", "compute_alpha_cross_sectional", "list_alpha_cs",
+    "Gtja191Factor", "build_gtja191_factor", "list_gtja191",
+    "Qlib158Factor", "build_qlib158_factor", "list_qlib158",
+    "AcademicFactor", "build_academic_factor", "list_academic",
     "SeatFactor", "compute_seat_factors", "make_synthetic_seat_df",
 ]

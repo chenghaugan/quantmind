@@ -13,6 +13,9 @@ from .factors.registry import FactorRegistry, build_factor_registry
 from .factors.expression import eval_factor_expression, ExpressionError
 from .factors.alpha101 import AlphaFactor, build_alpha_factor, list_alpha101
 from .factors.alpha191 import Alpha191Factor, build_alpha191_factor, list_alpha191
+from .factors.gtja191 import Gtja191Factor, build_gtja191_factor, list_gtja191
+from .factors.qlib158 import Qlib158Factor, build_qlib158_factor, list_qlib158
+from .factors.academic import AcademicFactor, build_academic_factor, list_academic
 from .factors.seat_futures import SeatFactor, compute_seat_factors, make_synthetic_seat_df
 from .evaluator import FactorEvaluator, FactorReport
 from .eval import (
@@ -95,6 +98,15 @@ __all__ = [
     "Alpha191Factor",
     "build_alpha191_factor",
     "list_alpha191",
+    "Gtja191Factor",
+    "build_gtja191_factor",
+    "list_gtja191",
+    "Qlib158Factor",
+    "build_qlib158_factor",
+    "list_qlib158",
+    "AcademicFactor",
+    "build_academic_factor",
+    "list_academic",
     "SeatFactor",
     "compute_seat_factors",
     "make_synthetic_seat_df",
