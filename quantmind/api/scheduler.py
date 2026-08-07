@@ -50,6 +50,7 @@ class QuantMindScheduler:
         *,
         cron: Optional[str] = None,
         interval: Optional[int] = None,
+        timezone: Optional[str] = None,
         max_instances: int = 1,
         misfire_grace_time: int = 60,
         kwargs: Optional[Dict[str, Any]] = None,
@@ -60,6 +61,8 @@ class QuantMindScheduler:
         :param fn: 任务函数（可为 async）。
         :param cron: cron 表达式，如 ``"30 15 * * 1-5"``；与 ``interval`` 二选一。
         :param interval: 触发间隔（秒）；与 ``cron`` 二选一。
+        :param timezone: IANA 时区名（如 ``"Asia/Shanghai"``），用于 cron 触发时间。
+                         未指定时使用系统本地时区。
         :param max_instances: 同一任务最大并行实例（默认 1，防重入）。
         :param misfire_grace_time: 错过触发允许补跑的宽限秒数。
         :param kwargs: 传给 ``fn`` 的固定参数。
@@ -76,7 +79,16 @@ class QuantMindScheduler:
             self.remove(name)
         try:
             if cron:
-                trigger = CronTrigger.from_crontab(cron)
+                # 解析时区
+                tz = None
+                if timezone:
+                    try:
+                        from zoneinfo import ZoneInfo
+                        tz = ZoneInfo(timezone)
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.warning("时区 %s 无效，使用系统本地时区: %s", timezone, exc)
+                
+                trigger = CronTrigger.from_crontab(cron, timezone=tz)
                 self._sched.add_job(
                     fn, trigger,
                     id=name,
@@ -100,9 +112,10 @@ class QuantMindScheduler:
             "name": name,
             "cron": cron,
             "interval": interval,
+            "timezone": timezone,
             "next_run": self._next_run(name),
         }
-        _logger.info("已注册调度任务: %s (cron=%s, interval=%s)", name, cron, interval)
+        _logger.info("已注册调度任务: %s (cron=%s, interval=%s, tz=%s)", name, cron, interval, timezone)
         return True
 
     def start(self) -> None:
@@ -305,6 +318,7 @@ def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": "risk_day_rotation",
             "fn": _job_risk_day_rotation,
             "cron": "0 0 * * *",      # 每日 00:00
+            "timezone": "Asia/Shanghai",
             "kwargs": {"sys_state": sys_state},
             "required": False,
         },
@@ -312,6 +326,7 @@ def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": "data_sync",
             "fn": _job_data_sync,
             "cron": "30 15 * * 1-5",  # 交易日 15:30（后端仅登记，见函数内跳过逻辑）
+            "timezone": "Asia/Shanghai",
             "kwargs": {"sys_state": sys_state},
             "required": False,
         },
@@ -319,6 +334,7 @@ def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "name": "cache_refresh",
             "fn": _job_cache_refresh,
             "cron": "0 17 * * 1-5",   # 交易日 17:00 收盘后刷新本地行情仓库
+            "timezone": "Asia/Shanghai",
             "kwargs": {"sys_state": sys_state},
             "required": False,
         },
@@ -335,6 +351,7 @@ def build_scheduler(sys_state: Dict[str, Any], register_defaults: bool = True) -
                 spec["fn"],
                 cron=spec.get("cron"),
                 interval=spec.get("interval"),
+                timezone=spec.get("timezone"),
                 kwargs=spec.get("kwargs", {}),
             )
             if not ok:

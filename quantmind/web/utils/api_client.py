@@ -193,6 +193,19 @@ class APIClient:
     def factors(timeout: int = 5) -> Dict:
         return APIClient.get("/factors", timeout=timeout)
 
+    # ------------------------------------------------------------------
+    # 因子衰减监控（对标 Vibe-Trading strategy-dev-manager）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def factor_decay(timeout: int = 10) -> Dict:
+        """列出所有已扫描因子的衰减状态（GET /factors/decay）。"""
+        return APIClient.get("/factors/decay", timeout=timeout)
+
+    @staticmethod
+    def factor_decay_scan(timeout: int = 120) -> Dict:
+        """触发全量因子衰减扫描（POST /factors/decay/scan）。"""
+        return APIClient.post("/factors/decay/scan", json={}, timeout=timeout)
+
     @staticmethod
     def strategies(timeout: int = 10) -> Dict:
         return APIClient.get("/strategies", timeout=timeout)

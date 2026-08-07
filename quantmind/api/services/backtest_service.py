@@ -6,9 +6,12 @@ import math
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Tuple
 
+import pandas as pd
+
 from ...core.constant import Exchange, Interval
 from ...core.contracts import default_size
 from ...core.engine import EventEngine
+from ...core.event import Event, EventType
 from ...data.feed.base import HistoryRequest
 from ...data import DataManager
 from ...strategy import (
@@ -21,7 +24,9 @@ from ...strategy import (
 )
 from ...strategy.components import ComposableStrategy
 from ...backtest.walkforward import walk_forward
+from ...research.risk_xray import compute_risk_xray
 from ..schemas import BacktestRequest, WalkForwardRequest, StrategyInfo
+from ..ws import manager as ws_manager
 
 
 _logger = logging.getLogger("quantmind.api")
@@ -124,6 +129,16 @@ class BacktestService:
         strat_class = _STRATEGY_MAP.get(req.strategy) or self._extra_strategies.get(req.strategy) or MultiFactorStrategy
         vt = f"{req.symbol}.{req.exchange.upper()}"
         
+        # 发送开始事件
+        await ws_manager.broadcast({
+            "type": "backtest_start",
+            "strategy": req.strategy,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "mode": req.mode,
+            "timestamp": datetime.now().isoformat(),
+        })
+        
         try:
             bars = await self.dm.get_bar_data(
                 HistoryRequest(
@@ -134,7 +149,21 @@ class BacktestService:
             )
             if not bars:
                 _logger.warning(f"回测无数据: {req.symbol}.{req.exchange}")
+                await ws_manager.broadcast({
+                    "type": "backtest_error",
+                    "strategy": req.strategy,
+                    "error": "无数据",
+                })
                 return {"error": "无数据"}
+            
+            # 发送进度事件（数据加载完成）
+            await ws_manager.broadcast({
+                "type": "backtest_progress",
+                "strategy": req.strategy,
+                "progress": 0.3,
+                "message": f"已加载 {len(bars)} 根K线",
+            })
+            
             sizes = dict(req.sizes) or {vt: default_size(vt)}
             result = await asyncio.to_thread(
                 run_strategy,
@@ -150,9 +179,40 @@ class BacktestService:
                 req.cost,
             )
             _logger.info(f"回测完成: {req.strategy} on {vt}, {len(bars)} bars")
-            return _sanitize(result)
+            
+            # 计算风险 X 光指标
+            result_sanitized = _sanitize(result)
+            try:
+                equity_curve = _extract_equity_curve(result)
+                # trades/positions 可能为计数而非明细，归一化为 compute_risk_xray 所需结构
+                _raw_trades = result.get("trades", [])
+                trades = _raw_trades if isinstance(_raw_trades, list) else []
+                _raw_pos = result.get("positions", {})
+                positions = _raw_pos if isinstance(_raw_pos, dict) else {}
+                if equity_curve is not None and len(equity_curve) > 0:
+                    risk_xray = compute_risk_xray(equity_curve, trades, positions)
+                    result_sanitized["risk_xray"] = risk_xray.to_dict()
+                    _logger.info(f"风险 X 光已生成: 夏普={risk_xray.sharpe_ratio:.2f}, 最大回撤={risk_xray.max_drawdown:.2%}")
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(f"风险 X 光计算失败: {exc}")
+            
+            # 发送完成事件
+            await ws_manager.broadcast({
+                "type": "backtest_complete",
+                "strategy": req.strategy,
+                "progress": 1.0,
+                "message": "回测完成",
+                "summary": result_sanitized.get("summary", {}),
+            })
+            
+            return result_sanitized
         except Exception as e:
             _logger.error(f"回测失败: {req.strategy} on {vt} - {str(e)}", exc_info=True)
+            await ws_manager.broadcast({
+                "type": "backtest_error",
+                "strategy": req.strategy,
+                "error": str(e),
+            })
             return {"error": f"回测失败: {str(e)}"}
 
     async def run_walkforward(self, req: WalkForwardRequest) -> Dict[str, Any]:
@@ -219,6 +279,16 @@ class BacktestService:
             return {"error": f"策略不存在或未注册: {req.strategy}"}
         vt = f"{req.symbol}.{req.exchange.upper()}"
 
+        # 发送开始事件
+        await ws_manager.broadcast({
+            "type": "backtest_start",
+            "strategy": req.strategy,
+            "symbol": req.symbol,
+            "exchange": req.exchange,
+            "mode": "paper",
+            "timestamp": datetime.now().isoformat(),
+        })
+
         end_date = datetime.now()
         start_date = end_date - timedelta(days=req.days or 400)
         try:
@@ -232,9 +302,27 @@ class BacktestService:
                 )
             )
         except Exception as exc:  # noqa: BLE001
+            await ws_manager.broadcast({
+                "type": "backtest_error",
+                "strategy": req.strategy,
+                "error": f"取数失败: {exc}",
+            })
             return {"error": f"取数失败: {exc}"}
         if not bars:
+            await ws_manager.broadcast({
+                "type": "backtest_error",
+                "strategy": req.strategy,
+                "error": "无数据",
+            })
             return {"error": "无数据"}
+
+        # 发送进度事件
+        await ws_manager.broadcast({
+            "type": "backtest_progress",
+            "strategy": req.strategy,
+            "progress": 0.3,
+            "message": f"已加载 {len(bars)} 根K线",
+        })
 
         sizes = {vt: default_size(vt)}
         try:
@@ -253,6 +341,11 @@ class BacktestService:
             )
         except Exception as exc:  # noqa: BLE001
             _logger.error(f"模拟盘实跑失败: {req.strategy} on {vt} - {exc}", exc_info=True)
+            await ws_manager.broadcast({
+                "type": "backtest_error",
+                "strategy": req.strategy,
+                "error": f"模拟盘实跑失败: {exc}",
+            })
             return {"error": f"模拟盘实跑失败: {exc}"}
 
         summary = result.get("summary", {})
@@ -270,4 +363,40 @@ class BacktestService:
                 "open_positions": len(summary.get("positions", {})),
             },
         }
+        
+        # 发送完成事件
+        await ws_manager.broadcast({
+            "type": "backtest_complete",
+            "strategy": req.strategy,
+            "progress": 1.0,
+            "message": "模拟盘实跑完成",
+            "summary": summary,
+        })
+        
         return _sanitize(out)
+
+
+def _extract_equity_curve(result: Dict[str, Any]) -> pd.Series:
+    """从回测结果中提取权益曲线（归一化为数值 Series）。
+
+    equity_curve 可能为 ``[{date, equity...}, ...]`` 的 dict 列表，
+    也可能为纯数值列表；这里统一转成 float Series，供指标计算使用。
+    """
+    raw = None
+    if "equity_curve" in result:
+        raw = result["equity_curve"]
+    elif "portfolio" in result and "equity" in result["portfolio"]:
+        raw = result["portfolio"]["equity"]
+    elif "summary" in result and "equity_curve" in result["summary"]:
+        raw = result["summary"]["equity_curve"]
+    if raw is None:
+        return pd.Series(dtype=float)
+
+    series = pd.Series(raw)
+    # 若元素为 dict，抽取数值字段；否则按原值处理
+    if series.notna().any() and isinstance(series.dropna().iloc[0], dict):
+        first = series.dropna().iloc[0]
+        key = next((k for k in ("equity", "value", "balance", "nav") if k in first), None)
+        if key is not None:
+            series = series.apply(lambda d: d.get(key) if isinstance(d, dict) else d)
+    return pd.to_numeric(series, errors="coerce")

@@ -122,6 +122,47 @@ else:
         for e in code_errors:
             st.error(f"  · {e}")
 
+# ----------------------------------------------------------------- 研究溯源
+section("研究溯源")
+prov = result.get("provenance")
+if isinstance(prov, dict) and prov:
+    note(
+        "**溯源 = 可追溯证据链**（对标 Vibe-Trading 的 evidence chain）：记录本次研究的数据来源、"
+        "AI 工具调用与假设演进，结论可审计、可复现。",
+        "info",
+    )
+    srcs = prov.get("data_sources") or []
+    if srcs:
+        st.markdown(
+            "数据来源：" + " ".join(badge(s, "info") for s in srcs),
+            unsafe_allow_html=True,
+        )
+    gen_at = prov.get("generated_at")
+    if gen_at:
+        st.caption(f"生成时间：{gen_at}")
+
+    sub_sections = [
+        ("工具调用", prov.get("tool_calls")),
+        ("证据链", prov.get("evidence_chain")),
+        ("研究假设", prov.get("hypotheses")),
+        ("研究日志", prov.get("research_log")),
+    ]
+    for name, items in sub_sections:
+        if not isinstance(items, list) or not items:
+            continue
+        rows = []
+        for it in items:
+            if isinstance(it, dict):
+                for k, v in it.items():
+                    rows.append({"字段": k, "值": str(v) if v is not None else ""})
+            else:
+                rows.append({"字段": name, "值": str(it)})
+        if rows:
+            st.markdown(f"**{name}（{len(items)} 条）**")
+            st.dataframe(rows, width="stretch", hide_index=True, height=min(60 + 35 * len(rows), 320))
+else:
+    note("本次研究未附带溯源信息。", "info")
+
 with st.expander("🔎 原始返回", expanded=False):
     st.json(result)
 

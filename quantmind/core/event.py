@@ -20,6 +20,11 @@ class EventType(Enum):
     EVENT_RISK = "eRisk"
     EVENT_LOG = "eLog"
     EVENT_EXCEPTION = "eException"
+    # 回测/模拟盘生命周期事件（WebSocket 实时推送）
+    EVENT_BACKTEST_START = "eBacktestStart"
+    EVENT_BACKTEST_PROGRESS = "eBacktestProgress"
+    EVENT_BACKTEST_COMPLETE = "eBacktestComplete"
+    EVENT_BACKTEST_ERROR = "eBacktestError"
 
 
 @dataclass

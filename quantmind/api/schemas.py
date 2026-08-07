@@ -50,6 +50,17 @@ class ResearchResult(BaseModel):
     generated_factors: List[dict] = []
     code_safe: bool = False
     code_errors: List[str] = []
+    provenance: Optional[Provenance] = None
+
+
+class Provenance(BaseModel):
+    """研究结果溯源信息（对标 Vibe-Trading 的 evidence chain）。"""
+    data_sources: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    evidence_chain: List[Dict[str, Any]] = []
+    hypotheses: List[Dict[str, Any]] = []
+    research_log: List[Dict[str, Any]] = []
+    generated_at: Optional[str] = None
 
 
 # ---- 因子 ----

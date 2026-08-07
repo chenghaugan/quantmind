@@ -17,6 +17,9 @@ class Exchange(Enum):
     SZSE = "SZSE"     # 深圳证券交易所
     # 港股
     HKEX = "HKEX"     # 香港交易所
+    # 美股
+    NYSE = "NYSE"     # 纽约证券交易所
+    NASDAQ = "NASDAQ" # 纳斯达克
     # 现货（预留）
     SGE = "SGE"       # 上海黄金交易所
 

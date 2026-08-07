@@ -280,6 +280,70 @@ if cr is not None:
                "ok": " —— 成本可控。"}[tone], tone)
 st.caption(f"保证金占用峰值：{fmt_money(report.get('margin_used'))}")
 
+# ------------------------------------------------------------ 风险 X 光
+xray = res.get("risk_xray")
+if isinstance(xray, dict) and xray:
+    section("风险 X 光")
+    with st.expander("🩻 风险 X 光详情", expanded=False):
+        ret = xray.get("return") or {}
+        rsk = xray.get("risk") or {}
+        tail = xray.get("tail_risk") or {}
+        conc = xray.get("concentration") or {}
+        trad = xray.get("trading") or {}
+
+        kpi_row([
+            {"label": "总收益率", "value": fmt_pct(ret.get("total")), "tone": tone_of(ret.get("total"))},
+            {"label": "年化收益", "value": fmt_pct(ret.get("annualized")), "tone": tone_of(ret.get("annualized"))},
+            {"label": "夏普比率", "value": fmt_num(ret.get("sharpe"), 2), "tone": tone_of((ret.get("sharpe") or 0) - 0.5)},
+            {"label": "索提诺", "value": fmt_num(ret.get("sortino"), 2), "tone": tone_of(ret.get("sortino"))},
+        ])
+        st.write("")
+        kpi_row([
+            {"label": "年化波动率", "value": fmt_pct(rsk.get("volatility")), "tone": "neutral"},
+            {"label": "最大回撤", "value": fmt_pct(rsk.get("max_drawdown")), "tone": "down" if (rsk.get("max_drawdown") or 0) < -0.2 else "neutral"},
+            {"label": "回撤持续天数", "value": f"{rsk.get('max_drawdown_duration', 0)} 天", "tone": "accent"},
+            {"label": "卡玛比率", "value": fmt_num(rsk.get("calmar"), 2), "tone": tone_of(rsk.get("calmar"))},
+        ])
+        st.write("")
+        kpi_row([
+            {"label": "95% VaR", "value": fmt_pct(tail.get("var_95")), "tone": "down" if (tail.get("var_95") or 0) < -0.05 else "neutral"},
+            {"label": "95% CVaR", "value": fmt_pct(tail.get("cvar_95")), "tone": "down" if (tail.get("cvar_95") or 0) < -0.05 else "neutral"},
+            {"label": "偏度", "value": fmt_num(tail.get("skewness"), 2), "tone": "neutral"},
+            {"label": "峰度", "value": fmt_num(tail.get("kurtosis"), 2), "tone": "neutral"},
+        ])
+        st.write("")
+        kpi_row([
+            {"label": "前5持仓占比", "value": fmt_pct(conc.get("top_5")), "tone": "warn" if (conc.get("top_5") or 0) > 0.8 else "neutral"},
+            {"label": "Herfindahl", "value": fmt_num(conc.get("herfindahl"), 4), "tone": "neutral"},
+            {"label": "成交笔数", "value": str(trad.get("total_trades", 0)), "tone": "accent"},
+            {"label": "胜率", "value": fmt_pct(trad.get("win_rate"), 1)},
+            {"label": "盈亏比", "value": fmt_num(trad.get("profit_factor"), 2), "tone": tone_of((trad.get("profit_factor") or 0) - 1)},
+            {"label": "平均持仓", "value": f"{trad.get('avg_holding_days', 0):.1f} 天", "tone": "neutral"},
+        ])
+
+        # 风险诊断（对齐 risk_xray._generate_diagnosis 阈值）
+        warns = []
+        if (rsk.get("max_drawdown") or 0) < -0.30:
+            warns.append("最大回撤超过 30%")
+        if (ret.get("sharpe") or 0) < 0.5:
+            warns.append("夏普比率低于 0.5")
+        if (tail.get("var_95") or 0) < -0.05:
+            warns.append("95% VaR 超过 5%")
+        if (conc.get("top_5") or 0) > 0.80:
+            warns.append("前 5 大持仓占比 > 80%")
+        if (trad.get("win_rate") or 0) < 0.40:
+            warns.append("胜率低于 40%")
+        if warns:
+            verdict("风险提示：" + "；".join(warns), "warn", icon="⚠️")
+        else:
+            verdict("风险指标正常，无明显异常。", "ok", icon="✅")
+
+        flat = []
+        for grp in ("return", "risk", "tail_risk", "concentration", "trading", "metadata"):
+            for k, v in (xray.get(grp) or {}).items():
+                flat.append({"分组": grp, "指标": k, "值": _fmt_val(v)})
+        st.dataframe(flat, width="stretch", hide_index=True)
+
 with st.expander("📄 完整报告字段", expanded=False):
     st.dataframe([{"字段": k, "值": _fmt_val(v)} for k, v in report.items()],
                  width="stretch", hide_index=True)

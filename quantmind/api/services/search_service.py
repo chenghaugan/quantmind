@@ -481,6 +481,21 @@ class SearchService:
         out["date_range"] = [panel.dates[0].isoformat() if len(panel.dates) else None,
                              panel.dates[-1].isoformat() if len(panel.dates) else None]
 
+        # 构建溯源信息（对标 Vibe-Trading evidence chain）
+        evidence = report.get("evidence") or {}
+        out["provenance"] = {
+            "data_sources": [f"{req.exchange}:{s}" for s in (req.symbols or []) if s],
+            "tool_calls": [
+                {"tool": "run_e2e", "config": {
+                    "algo": cfg.algo, "rounds": cfg.rounds,
+                    "forward_periods": cfg.forward_periods,
+                }},
+            ],
+            "evidence_chain": evidence.get("hypotheses") or [],
+            "verified_exprs": evidence.get("verified_exprs") or [],
+            "generated_at": report.get("generated_at"),
+        }
+
         if ingest:
             n = self._ingest_report(report, idea=req.idea, symbols=symbols,
                                     asset_class=req.asset_class, market=req.market)

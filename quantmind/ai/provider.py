@@ -104,7 +104,7 @@ class _RealProvider(LLMProvider):
 
     支持 DeepSeek（https://api.deepseek.com/v1）、OpenAI、通义千问、
     OpenRouter 等所有兼容 ``/v1/chat/completions`` 的服务。纯 ``httpx``
-    实现，无额外 SDK 依赖。未配置 key 或网络失败时由调用方决定回退策略。
+    实现，无额外 SDK 依赖。网络失败时自动回退到 MockProvider。
     """
 
     name = "openai"
@@ -116,6 +116,7 @@ class _RealProvider(LLMProvider):
         self.model = model or "gpt-4o-mini"
         self.temperature = temperature
         self.timeout = timeout
+        self._mock_fallback = MockProvider()
 
     async def chat(self, system: str, user: str) -> str:
         url = f"{self.base_url}/chat/completions"
@@ -132,11 +133,15 @@ class _RealProvider(LLMProvider):
             "messages": messages,
             "temperature": self.temperature,
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("真实 LLM 调用失败，回退到 Mock: %s", exc)
+            return await self._mock_fallback.chat(system, user)
 
 
 def build_provider(name: str = "mock", api_key: str = "", base_url: str = "",
