@@ -35,7 +35,9 @@ from quantmind.data.feed.base import HistoryRequest
 from quantmind.research.evaluator import FactorEvaluator
 from quantmind.research.factors.registry import FactorRegistry
 
-# 真实商品/金融期货主力连续（已验证可稳定通过 AKShare 拉到）
+# 真实商品/金融期货主力连续（已验证可稳定通过 AKShare 拉到）。
+# 覆盖黑色(螺纹/铁矿石/焦炭)、金融(沪深300)、有色(铜/铝/锌/金)、
+# 农产(豆粕/豆一/白糖/棉花/豆油)、能化(PTA/甲醇/塑料/燃油/沥青/PP/乙二醇)。
 SYMBOLS = [
     ("rb0", "螺纹钢", Exchange.SHFE),
     ("IF0", "沪深300股指", Exchange.CFFEX),
@@ -45,6 +47,18 @@ SYMBOLS = [
     ("i0", "铁矿石", Exchange.SHFE),
     ("au0", "沪金", Exchange.SHFE),
     ("y0", "豆油", Exchange.SHFE),
+    ("j0", "焦炭", Exchange.SHFE),
+    ("al0", "沪铝", Exchange.SHFE),
+    ("zn0", "沪锌", Exchange.SHFE),
+    ("SR0", "白糖", Exchange.SHFE),
+    ("CF0", "棉花", Exchange.SHFE),
+    ("MA0", "甲醇", Exchange.SHFE),
+    ("L0", "塑料", Exchange.SHFE),
+    ("FU0", "燃油", Exchange.SHFE),
+    ("a0", "豆一", Exchange.SHFE),
+    ("bu0", "沥青", Exchange.SHFE),
+    ("pp0", "聚丙烯", Exchange.SHFE),
+    ("eg0", "乙二醇", Exchange.SHFE),
 ]
 
 
