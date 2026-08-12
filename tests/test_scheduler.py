@@ -79,10 +79,10 @@ def test_duplicate_name_overrides():
 
 @pytest.mark.skipif(not _aps_available(), reason="apscheduler 未安装")
 def test_build_default_jobs_four():
-    """内置任务表应含：health_check / risk_day_rotation / data_sync / cache_refresh。"""
+    """内置任务表应含：health_check / risk_day_rotation / data_sync / cache_refresh / market_warm。"""
     specs = build_default_jobs({"dm": None, "ee": None})
     names = {s["name"] for s in specs}
-    assert {"health_check", "risk_day_rotation", "data_sync", "cache_refresh"} <= names
+    assert {"health_check", "risk_day_rotation", "data_sync", "cache_refresh", "market_warm"} <= names
 
 
 @pytest.mark.skipif(not _aps_available(), reason="apscheduler 未安装")
@@ -94,8 +94,79 @@ def test_build_scheduler_registers_defaults():
         names = {j["name"] for j in sched.list_jobs()}
         assert "health_check" in names
         assert "data_sync" in names
+        assert "market_warm" in names
     finally:
         sched.stop()
+
+
+def test_market_warm_disabled_skips():
+    """market_warm 未启用时应优雅跳过（默认 QM_MARKET_WARM_ENABLED=False）。"""
+    import asyncio
+    from quantmind.api.scheduler import _job_market_warm
+
+    result = asyncio.run(_job_market_warm({"dm": None, "ee": None}))
+    assert result.get("action") == "market_warm"
+    assert result.get("skipped") is True
+
+
+def test_market_warm_warms_pending_batch(monkeypatch):
+    """启用后应只预热 batch 个未缓存标的（增量），已缓存的不重复拉。"""
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+    from quantmind.api.scheduler import _job_market_warm, _MARKET_EXCHANGES
+    from quantmind.core.constant import Exchange, Interval
+    from quantmind.core.object import BarData
+    from quantmind.data import DataManager, InMemoryStore
+    from quantmind.data.feed.base import BaseDataFeed, HistoryRequest
+    from quantmind.data.feed.registry import DataFeedRegistry
+    from quantmind.data.store.disk_cache import DiskBarCache
+
+    UTC = timezone.utc
+
+    class _FakeFeed(BaseDataFeed):
+        name = "fake"
+        def __init__(self):
+            self.calls = []
+        async def fetch_bar_data(self, req):
+            self.calls.append(req.symbol)
+            return [BarData(
+                symbol=req.symbol, exchange=req.exchange, interval=Interval.DAILY,
+                datetime=datetime(2023, 1, 1, tzinfo=UTC),
+                open_price=1.0, high_price=1.0, low_price=1.0, close_price=1.0,
+                volume=1.0, open_interest=0.0, turnover=0.0,
+            )]
+
+    # 启用 market_warm，batch=2
+    monkeypatch.setattr(
+        "quantmind.config.get_settings", _flat_settings(
+            market_warm_enabled=True, market_warm_batch=2, market_warm_max_symbols=1000,
+        ))
+    # 固定全市场清单：A股 3 个 + 港股 1 个（绕过 akshare，patch 到源模块）
+    import quantmind.data.feed.market_universe as _mu
+    monkeypatch.setattr(
+        _mu, "discover_all",
+        lambda cap_a=None, cap_hk=None: ["600519.SSE", "000001.SZSE", "300750.SZSE", "00700.HKEX"])
+    # 用一个 fake dm：手动构造注册表+store+disk_cache
+    import tempfile
+    feed = _FakeFeed()
+    reg = DataFeedRegistry(); reg.register(feed, priority=10)
+    with tempfile.TemporaryDirectory() as td:
+        dc = DiskBarCache(td)
+        dm = DataManager(reg, InMemoryStore(), disk_cache=dc)
+        result = asyncio.run(_job_market_warm({"dm": dm, "ee": None}))
+        assert result["action"] == "market_warm"
+        assert result["warmed"] == 2          # 只预热 batch=2 个
+        assert result["pending_left"] == 2    # 4 个 - 2 = 剩余 2
+        assert result.get("skipped") is None  # 非跳过路径不返回 skipped
+
+
+def _flat_settings(**kw):
+    """返回一个伪造 get_settings() 结果（仅暴露被用到的字段）。"""
+    class _S:
+        def __init__(self, d):
+            self.__dict__.update(d)
+    s = _S(kw)
+    return lambda: s
 
 
 @pytest.mark.skipif(not _aps_available(), reason="apscheduler 未安装")

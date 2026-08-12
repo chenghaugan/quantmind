@@ -41,7 +41,7 @@ with cl:
     asset_class = st.selectbox("资产类别", list(EXCHANGES.keys()))
     exchange = st.selectbox("交易所", EXCHANGES[asset_class],
                             format_func=lambda x: f"{x} · {EXCHANGE_NAMES.get(x, '')}")
-    symbol = st.text_input("合约代码", "rb0")
+    symbol = st.text_input("合约代码", "IF0")
     interval = st.selectbox("周期", INTERVALS, index=INTERVALS.index("1d"),
                             format_func=lambda x: INTERVAL_NAMES.get(x, x))
 

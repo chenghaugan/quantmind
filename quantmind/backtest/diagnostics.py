@@ -17,6 +17,28 @@ from .analyzer import PerformanceReport
 from ..research.evaluator import FactorReport, _spearman
 
 
+def limit_price_range(
+    bars: List[BarData],
+    idx: int,
+    limit_pct: float = 0.10,
+) -> Tuple[Optional[float], Optional[float]]:
+    """计算第 *idx* 根 K 线的涨跌停价格区间。
+
+    基于前一根 K 线收盘价 × (1 ± limit_pct)，精度 0.01（A 股最小变动价位）。
+    首根 K 线（无前收）或前收 ≤ 0 时返回 ``(None, None)``。
+
+    :return: ``(limit_down_price, limit_up_price)``
+    """
+    if idx <= 0 or idx >= len(bars):
+        return None, None
+    prev_close = bars[idx - 1].close_price
+    if prev_close <= 0:
+        return None, None
+    limit_up = round(prev_close * (1 + limit_pct), 2)
+    limit_down = round(prev_close * (1 - limit_pct), 2)
+    return limit_down, limit_up
+
+
 def limit_day_mask(bars: List[BarData], limit_pct: Optional[float] = 0.10, eps: float = 1e-6) -> List[Optional[str]]:
     """识别每日是否涨跌停（需 ``limit_pct`` 非 None）。
 

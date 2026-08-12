@@ -7,7 +7,7 @@
 
 import os
 import httpx
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # 直连 IPv4，避免 localhost 解析到 [::1] 超时
 API_URL = os.getenv("QM_API_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -309,8 +309,25 @@ class APIClient:
         return APIClient.post("/factor/pipeline", json=payload, timeout=timeout)
 
     @staticmethod
+    def factor_e2e_start(payload: Dict[str, Any], timeout: int = 30) -> Dict:
+        """端到端流水线（异步启动，POST /factor/e2e/start）：立即返回 task_id。
+
+        任务在后台执行，用 ``factor_e2e_status(task_id)`` 轮询进度/结果，
+        彻底规避长跑单次请求超时问题。
+        """
+        return APIClient.post("/factor/e2e/start", json=payload, timeout=timeout)
+
+    @staticmethod
+    def factor_e2e_status(task_id: str, timeout: int = 30) -> Dict:
+        """查询端到端流水线后台任务状态（GET /factor/e2e/status/{task_id}）。"""
+        return APIClient.get(f"/factor/e2e/status/{task_id}", timeout=timeout)
+
+    @staticmethod
     def factor_e2e(payload: Dict[str, Any], timeout: int = 900) -> Dict:
-        """端到端流水线（POST /factor/e2e）：Idea→AI证据→因子挖掘→OOS复合alpha→策略代码→知识库。"""
+        """端到端流水线（同步，POST /factor/e2e，向后兼容）。
+
+        长跑可能超出单请求超时；新代码请优先用 ``factor_e2e_start`` + ``factor_e2e_status``。
+        """
         return APIClient.post("/factor/e2e", json=payload, timeout=timeout)
 
     @staticmethod
@@ -395,6 +412,11 @@ class APIClient:
         """手动触发全量刷新：把仓库内所有标的从真实源重拉回写。POST /data/cache/refresh。"""
         return APIClient.post("/data/cache/refresh", json=None, timeout=timeout)
 
+    @staticmethod
+    def cache_warm_market(timeout: int = 900) -> Dict:
+        """全市场（A股+港股）增量预热：未缓存标的分批拉入行情仓库。POST /data/cache/market-warm。"""
+        return APIClient.post("/data/cache/market-warm", json=None, timeout=timeout)
+
 
     # ------------------------------------------------------------------
     # 告警通知配置
@@ -406,3 +428,47 @@ class APIClient:
     @staticmethod
     def alert_settings_save(payload: Dict[str, Any], timeout: int = 15) -> Dict:
         return APIClient.put("/settings/alert", json=payload, timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # LLM 策略挖掘
+    # ------------------------------------------------------------------
+    @staticmethod
+    def strategy_mining_architect(
+        factors: List[Dict[str, Any]],
+        constraint: Optional[str] = None,
+        template_preference: Optional[str] = None,
+        symbol: str = "rb0",
+        exchange: str = "SHFE",
+        timeout: int = 60,
+    ) -> Dict:
+        """LLM 策略架构师（POST /strategy-mining/architect）。"""
+        payload: Dict[str, Any] = {
+            "factors": factors,
+            "symbol": symbol,
+            "exchange": exchange,
+        }
+        if constraint:
+            payload["constraint"] = constraint
+        if template_preference:
+            payload["template_preference"] = template_preference
+        return APIClient.post("/strategy-mining/architect", json=payload, timeout=timeout)
+
+    @staticmethod
+    def strategy_mining_auto_backtest(
+        spec: Dict[str, Any],
+        strategy_id: Optional[str] = None,
+        max_iterations: int = 3,
+        min_sharpe: float = 0.5,
+        max_drawdown: float = -0.30,
+        timeout: int = 120,
+    ) -> Dict:
+        """自动回测循环（POST /strategy-mining/auto-backtest）。"""
+        payload: Dict[str, Any] = {
+            "spec": spec,
+            "max_iterations": max_iterations,
+            "min_sharpe": min_sharpe,
+            "max_drawdown": max_drawdown,
+        }
+        if strategy_id:
+            payload["strategy_id"] = strategy_id
+        return APIClient.post("/strategy-mining/auto-backtest", json=payload, timeout=timeout)

@@ -20,7 +20,7 @@ from ..strategy.context import StrategyContext
 from .analyzer import PerformanceAnalyzer, PerformanceReport
 from .broker import fill_price
 from .cost import default_cost_table, lookup_cost, compute_commission, apply_slippage
-from .diagnostics import limit_day_mask
+from .diagnostics import limit_day_mask, limit_price_range
 
 _logger = logging.getLogger("quantmind.backtest")
 
@@ -112,6 +112,54 @@ class BacktestEngine(StrategyContext):
         kept = [vt for vt in vt_symbols if vt in self.data]
         self.strategy.vt_symbols = kept or list(self.data.keys())
 
+    # ---- 辅助方法 ----
+    def _is_a_share(self, vt_symbol: str) -> bool:
+        """判断是否为 A 股标的（SSE/SZSE）。"""
+        _, exch = vt_symbol.rsplit(".", 1)
+        return exch in ("SSE", "SZSE")
+
+    def _find_bar_index(self, bars: List[BarData]) -> Optional[int]:
+        """在 bars 中找当前日期的索引（兼容 tz-aware/naive）。"""
+        if not bars or self._current_date is None:
+            return None
+        for i, bar in enumerate(bars):
+            # 尝试直接比较
+            if bar.datetime == self._current_date:
+                return i
+            # 兜底：归一化比较（去掉时区信息）
+            bar_dt = bar.datetime.replace(tzinfo=None) if bar.datetime.tzinfo else bar.datetime
+            cur_dt = self._current_date.replace(tzinfo=None) if self._current_date.tzinfo else self._current_date
+            if bar_dt == cur_dt:
+                return i
+        return None
+
+    def _check_t1_sell(self, vt_symbol: str, volume: float, fill_date: datetime) -> bool:
+        """A 股 T+1 检查：当日买入的股票不可当日卖出。
+
+        利用已有的 _open_lots 记账（FIFO 批次），检查今日买入量。
+        仅对 SSE/SZSE 生效。
+
+        :return: True 表示允许卖出，False 表示 T+1 限制
+        """
+        if not self._is_a_share(vt_symbol):
+            return True  # 非 A 股不限制
+
+        # 计算今日买入量（_open_lots 中今日日期、正数量的批次）
+        today_bought = sum(
+            abs(vol) for dt, vol, px in self._open_lots.get(vt_symbol, [])
+            if dt.date() == fill_date.date() and vol > 0
+        )
+
+        # 可卖量 = 当前持仓 - 今日买入量（今日买入的不可卖）
+        pos = self.get_position(vt_symbol)
+        available_to_sell = max(0, pos.volume - today_bought) if pos.volume > 0 else 0
+
+        if volume > available_to_sell + 1e-9:
+            _logger.info("T+1 限制：%s 可卖 %.0f < 委托 %.0f（今日买入 %.0f 锁定）",
+                         vt_symbol, available_to_sell, volume, today_bought)
+            return False
+        return True
+
     # ---- StrategyContext 接口 ----
     def get_history(self, vt_symbol: str, count: int) -> List[BarData]:
         bars = self.data.get(vt_symbol, [])
@@ -131,6 +179,34 @@ class BacktestEngine(StrategyContext):
         return lookup_cost(vt_symbol, self._cost_table)
 
     def send_order(self, req: OrderRequest) -> str:
+        vt_symbol = f"{req.symbol}.{req.exchange.value}"
+
+        # A股整手校验：买入必须是100股整数倍
+        if self._is_a_share(vt_symbol) and req.direction == Direction.LONG:
+            lot_size = 100
+            if req.volume % lot_size != 0:
+                rounded_vol = (req.volume // lot_size) * lot_size
+                if rounded_vol <= 0:
+                    _logger.warning(f"A股整手校验失败: {vt_symbol} 委托数量 {req.volume} 不足1手({lot_size}股)")
+                    return ""
+                _logger.info(f"A股整手调整: {vt_symbol} {req.volume} → {rounded_vol}")
+                req.volume = rounded_vol
+
+        # A股涨跌停价格限制
+        if self._is_a_share(vt_symbol) and self.exclude_limit and req.price > 0:
+            bars = self.data.get(vt_symbol, [])
+            # 在 bars 中找当前日期的索引（兼容 tz-aware/naive 比较）
+            current_idx = self._find_bar_index(bars)
+
+            if current_idx is not None:
+                limit_down, limit_up = limit_price_range(bars, current_idx, self.limit_pct or 0.10)
+                if limit_up is not None and req.price > limit_up:
+                    _logger.warning(f"A股涨停价限制: {vt_symbol} 委托价 {req.price} > 涨停价 {limit_up}")
+                    return ""
+                if limit_down is not None and req.price < limit_down:
+                    _logger.warning(f"A股跌停价限制: {vt_symbol} 委托价 {req.price} < 跌停价 {limit_down}")
+                    return ""
+
         # 可选：保证金占用约束（默认关闭，避免破坏旧行为）
         if self.enforce_margin and self._cost_table is not None and req.offset in (Offset.OPEN, Offset.NONE):
             cost = self._cost_for(f"{req.symbol}.{req.exchange.value}")
@@ -146,7 +222,7 @@ class BacktestEngine(StrategyContext):
         order_id = f"BT-{self._order_seq}"
         fill_date = self._next_date.get(self._current_date)
         self.pending.append({
-            "vt_symbol": f"{req.symbol}.{req.exchange.value}",
+            "vt_symbol": vt_symbol,
             "req": req,
             "fill_date": fill_date,
         })
@@ -211,6 +287,15 @@ class BacktestEngine(StrategyContext):
             if flag == "up" and req.direction == Direction.LONG:
                 return False
             if flag == "down" and req.direction == Direction.SHORT:
+                return False
+        # A股T+1限制：当日买入的股票当日不能卖出
+        if req.direction == Direction.SHORT and self._is_a_share(vt):
+            if not self._check_t1_sell(vt, req.volume, bar.datetime):
+                # T+1限制，推迟到下一交易日
+                nxt = self._next_date.get(bar.datetime)
+                if nxt is not None:
+                    p["fill_date"] = nxt
+                    return False  # 不成交但保留挂单
                 return False
         cost = self._cost_for(vt)
         px = apply_slippage(cost, bar, req.direction, self.slippage)

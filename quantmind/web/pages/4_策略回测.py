@@ -118,9 +118,9 @@ with st.form("bt_form"):
                         format_func=lambda m: {"backtest": "回测", "paper": "模拟盘",
                                                "live": "实盘路由"}[m])
     with c2:
-        symbol = st.text_input("合约代码", "rb0")
+        symbol = st.text_input("合约代码", "IF0")
         all_ex = [e for exs in EXCHANGES.values() for e in exs]
-        exchange = st.selectbox("交易所", all_ex,
+        exchange = st.selectbox("交易所", all_ex, index=1,
                                 format_func=lambda x: f"{x} · {EXCHANGE_NAMES.get(x, '')}")
         gateway = st.selectbox("网关（实盘模式生效）", list(GATEWAYS),
                                format_func=lambda g: GATEWAYS[g],
@@ -233,19 +233,24 @@ kpi_row([
 ])
 
 section("净值与回撤")
-c1, c2 = st.columns([1.6, 1], gap="medium")
-with c1:
-    st.plotly_chart(create_equity_curve(curve, title="资金曲线", height=360),
-                    width="stretch", key="bt_eq")
-with c2:
+
+# 资金曲线 — 全宽展示，更突出
+st.plotly_chart(create_equity_curve(curve, title="资金曲线", height=400),
+                width="stretch", key="bt_eq")
+
+# 夏普比率与最大回撤 — 并排仪表盘，更紧凑
+g1, g2 = st.columns(2, gap="large")
+with g1:
     st.plotly_chart(create_gauge(sharpe, "夏普比率（门槛 0.5）", vmin=-1, vmax=3,
-                                 good=0.5, height=180),
+                                 good=0.5, height=220),
                     width="stretch", key="bt_g1")
+with g2:
     st.plotly_chart(create_gauge(abs(mdd), "最大回撤（红线 30%）", vmin=0, vmax=0.6,
-                                 good=0.0, height=180),
+                                 good=0.0, height=220),
                     width="stretch", key="bt_g2")
 
-st.plotly_chart(create_drawdown_chart(curve, title="水下回撤曲线", height=260),
+# 水下回撤曲线 — 全宽展示
+st.plotly_chart(create_drawdown_chart(curve, title="水下回撤曲线", height=280),
                 width="stretch", key="bt_dd")
 
 section("收益分布")

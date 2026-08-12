@@ -38,9 +38,9 @@ section("评估设置")
 with st.form("factor_form"):
     c1, c2 = st.columns(2, gap="medium")
     with c1:
-        symbol = st.text_input("合约代码", "rb0")
+        symbol = st.text_input("合约代码", "IF0")
         all_ex = [e for exs in EXCHANGES.values() for e in exs]
-        exchange = st.selectbox("交易所", all_ex, index=0,
+        exchange = st.selectbox("交易所", all_ex, index=1,
                                 format_func=lambda x: f"{x} · {EXCHANGE_NAMES.get(x, '')}")
         mode = st.radio("因子来源", ["内置因子库", "自定义表达式"], horizontal=True)
     with c2:

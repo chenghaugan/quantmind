@@ -28,19 +28,40 @@ class MootdxAStockFeed(BaseDataFeed):
     name = "mootdx_astock"
 
     async def fetch_bar_data(self, req: HistoryRequest) -> List[BarData]:
+        # 主源：腾讯（akshare stock_zh_a_daily，GET 不封 IP、本网络下 ~1s）；
+        # 回退：mootdx 通达信 → akshare 东财。
+        # 延迟导入 + 分层降级，保证任一源失败不影响整链。
+        try:
+            return await self._fetch_tencent(req)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("腾讯A股源失败，尝试 mootdx: %s", exc)
         try:
             return await self._fetch_mootdx(req)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("mootdx 失败，回退 akshare: %s", exc)
             return await self._fetch_akshare_fallback(req)
 
-    async def _fetch_mootdx(self, req: HistoryRequest) -> List[BarData]:
-        from mootdx.Quotes import Quotes
+    async def _fetch_tencent(self, req: HistoryRequest) -> List[BarData]:
+        """腾讯日线（akshare ``stock_zh_a_daily``）：股票代码需带 sh/sz 前缀。"""
+        import akshare as ak
 
-        client = await asyncio.to_thread(Quotes.factory, market=_market_of(req.symbol))
+        prefix = "sh" if _market_of(req.symbol) == 1 else "sz"
+        df = await asyncio.to_thread(
+            ak.stock_zh_a_daily,
+            symbol=f"{prefix}{req.symbol}",
+            adjust="qfq",
+        )
+        return self._df_to_bars(df, req)
+
+    async def _fetch_mootdx(self, req: HistoryRequest) -> List[BarData]:
+        from mootdx.quotes import Quotes
+
+        client = await asyncio.to_thread(
+            Quotes.factory, market="sh" if _market_of(req.symbol) == 1 else "sz"
+        )
         freq = self._freq(req.interval)
         df = await asyncio.to_thread(
-            client.stock, code=req.symbol, frequency=freq, adjust="qfq"
+            client.k, symbol=req.symbol, begin=None, end=None, frequency=freq,
         )
         return self._df_to_bars(df, req)
 

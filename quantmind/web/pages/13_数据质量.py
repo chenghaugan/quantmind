@@ -36,7 +36,7 @@ with cl:
                             format_func=lambda x: f"{x} · {EXCHANGE_NAMES.get(x, '')}")
     presets = SYMBOL_PRESETS.get(asset_class, [])
     preset_sym = st.selectbox("速选标的", ["" ] + [f"{s}（{n}）" for s, _, n in presets])
-    symbol = st.text_input("合约代码", "rb0")
+    symbol = st.text_input("合约代码", "IF0")
     if preset_sym:
         symbol = preset_sym.split("（")[0]
         exchange = next((e for s, e, _ in presets if s == preset_sym.split("（")[0]), exchange)

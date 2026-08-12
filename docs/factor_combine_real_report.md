@@ -84,6 +84,6 @@
 ## 生成信息
 
 - 脚本：`scripts/factor_combine_real.py`
-- 标的：rb0, IF0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0
+- 标的：IF0, IH0, IC0, IM0, rb0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0
 - 共同交易日：300 · fp=1 · groups=5 · cost=0.0
 - 生成时间：2026-08-10 11:31:58

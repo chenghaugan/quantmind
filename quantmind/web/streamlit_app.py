@@ -58,7 +58,6 @@ MODULES = [
     ("🔬", "因子研究", "单标的因子 IC / IR / 衰减 / 分位收益评估", "pages/3_因子研究.py"),
     ("🧬", "截面研究", "多标的面板 Alpha 因子与多空组合回测", "pages/12_截面研究.py"),
     ("🔎", "因子搜索", "co/ea/tot 三种算法迭代挖掘更强因子", "pages/17_因子搜索.py"),
-    ("🧬", "因子挖掘流水线", "端到端：搜索→去冗余→OOS回测→复合alpha", "pages/18_因子挖掘流水线.py"),
     ("🚀", "端到端流水线", "Idea→证据→挖掘→OOS→代码→知识库一键跑通", "pages/20_端到端流水线.py"),
     ("📚", "因子库", "内置 Alpha101 / Alpha191 因子检索", "pages/9_FactorLibrary.py"),
     ("🤖", "AI 研究", "自然语言想法 → 假设 / 因子 / 策略代码", "pages/5_AI_研究.py"),
@@ -69,6 +68,7 @@ MODULES = [
     ("🔄", "生命周期", "IDEA → RESEARCH → … → LIVE 晋升闸门", "pages/6_生命周期.py"),
     ("📡", "实时监控", "WebSocket 事件流与手动下单", "pages/7_实时监控.py"),
     ("⚙️", "设置", "配置 AI 模型 API Key / Base URL / 模型", "pages/14_设置.py"),
+    ("🧠", "LLM 策略挖掘", "选因子 → LLM 设计策略 → 自动回测 → 注册生命周期", "pages/22_LLM策略挖掘.py"),
 ]
 
 cols = st.columns(3, gap="small")

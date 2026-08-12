@@ -20,9 +20,9 @@ setup_page("行情数据", "📈")
 page_header("行情数据", "商品期货 / 金融期货 / A股 / 港股 多市场历史行情查询与可视化", "📈")
 
 if "md_symbol" not in st.session_state:
-    st.session_state.md_symbol = "rb0"
+    st.session_state.md_symbol = "IF0"
 if "md_exchange" not in st.session_state:
-    st.session_state.md_exchange = "SHFE"
+    st.session_state.md_exchange = "CFFEX"
 
 # ---------------------------------------------------------------- 速选
 section("常用标的", "点击即可填入查询条件")

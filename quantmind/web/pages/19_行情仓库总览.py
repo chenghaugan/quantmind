@@ -149,7 +149,7 @@ c1, c2 = st.columns([2, 1], gap="medium")
 with c1:
     _warm_txt = st.text_input(
         "预热标的（逗号分隔，如 rb0,hc0,bu0,i0）",
-        value="rb0,hc0,bu0,i0", help="从真实源（akshare 等）拉取并落盘；已有缓存也会增量追新",
+        value="IF0,IH0,IC0,IM0,rb0,hc0,bu0,i0", help="从真实源（akshare 等）拉取并落盘；已有缓存也会增量追新",
     )
     _exch = st.selectbox("交易所", list(EXCH_MAP.keys()),
                          format_func=lambda e: EXCH_MAP[e], index=0)

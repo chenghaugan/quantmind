@@ -13,7 +13,9 @@ from utils.theme import (  # noqa: E402
     kpi_row, fmt_num, fmt_pct, tone_of, badge,
 )
 from utils.api_client import APIClient  # noqa: E402
-from utils.constants import CS_BASKETS, EXCHANGE_NAMES  # noqa: E402
+from utils.constants import (  # noqa: E402
+    BASKET_CHOICES, resolve_basket_symbols, EXCHANGE_NAMES,
+)
 from utils.charts import create_ic_chart, create_equity_curve, create_drawdown_chart, create_gauge  # noqa: E402
 
 setup_page("截面研究", "🧬")
@@ -39,9 +41,15 @@ if not factors:
 # ----------------------------------------------------------------- 输入
 cl, cr = st.columns([1, 2], gap="medium")
 with cl:
-    basket = st.selectbox("标的篮子", list(CS_BASKETS.keys()),
+    basket = st.selectbox("标的篮子", BASKET_CHOICES,
                           format_func=lambda x: f"{x}")
-    symbols, exch = CS_BASKETS[basket]
+    _is_pool = str(basket).startswith("指数·")
+    _pool_n = 40
+    if _is_pool:
+        _pool_n = st.number_input("股票池标的数上限", min_value=5, max_value=200,
+                                  value=40, step=5,
+                                  help="指数/全A 股票池按此数量截断成分股后再做截面")
+    symbols, exch = resolve_basket_symbols(basket, max_symbols=_pool_n if _is_pool else None)
     st.caption("篮子标的：" + " · ".join(symbols))
     custom = st.text_input("自定义标的（逗号分隔，覆盖篮子）", "")
     exchange = st.selectbox("交易所", [exch] + list(EXCHANGE_NAMES.keys()),
@@ -63,7 +71,8 @@ with cr:
         "- **IR**：IC 的均值 / 标准差，衡量稳定性（|IR|>0.5 较稳）。\n"
         "- **单调性**：头组到尾组收益是否单调，验证因子区分度。\n"
         "- **多空组合**：每日按因子值排名，头组做多、尾组做空，等权，回测净值。\n"
-        "- 可用标的内置篮子：黑色系 / 有色 / 贵金属能化 / 农产品 / A股白马。"
+        "- 可用标的内置篮子：黑色系 / 有色 / 贵金属能化 / 农产品 / A股白马，"
+        "以及常用指数股票池（全A市场 / 沪深300 / 中证500 / 中证2000）。"
     )
 
 # ----------------------------------------------------------------- 运行

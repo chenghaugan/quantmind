@@ -278,6 +278,6 @@
 ## 生成信息
 
 - 脚本：`scripts/factor_dedup_real.py`
-- 标的：rb0, IF0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0
+- 标的：IF0, IH0, IC0, IM0, rb0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0
 - 共同交易日：300 · 相关阈值：0.7 · metric：|截面IC|
 - 生成时间：2026-08-10 10:04:46

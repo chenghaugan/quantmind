@@ -4,6 +4,7 @@
 证据研究、因子挖掘、样本外复合 alpha、代码生成与知识库入库。
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -20,7 +21,9 @@ from utils.theme import (  # noqa: E402
     kpi_row, fmt_num, fmt_pct, badge,
 )
 from utils.api_client import APIClient  # noqa: E402
-from utils.constants import CS_BASKETS, ALL_EXCHANGES, EXCHANGE_NAMES  # noqa: E402
+from utils.constants import (  # noqa: E402
+    BASKET_CHOICES, resolve_basket_symbols, ALL_EXCHANGES, EXCHANGE_NAMES,
+)
 
 
 def _flow(steps):
@@ -41,11 +44,16 @@ def _status_tone(status: Optional[str]) -> str:
     s = (status or "").lower()
     if "verif" in s or s == "verified":
         return "success"
-    if "reject" in s or "fail" in s or s == "rejected":
+    if "reject" in s or s == "fail" or s == "rejected":
         return "danger"
     if "propos" in s or s == "proposed" or s == "pending":
         return "info"
     return "muted"
+
+
+#: 指数/全A 股票池在端到端流水线中默认展开到的标的数上限
+#  （截面因子挖掘对每标的跑多轮 OOS 回测，全量沪深300/中证2000会非常慢，故默认截断）
+_DEFAULT_POOL = 40
 
 
 setup_page("端到端流水线", "🚀")
@@ -107,8 +115,14 @@ with l:
     run_composite = st.checkbox("启用复合 alpha 组合回测", value=True)
 
 with r:
-    basket = st.selectbox("标的篮子", list(CS_BASKETS.keys()), format_func=lambda x: str(x))
-    symbols, exch = CS_BASKETS[basket]
+    basket = st.selectbox("标的篮子", BASKET_CHOICES, format_func=lambda x: str(x))
+    _is_pool = str(basket).startswith("指数·")
+    _pool_n = _DEFAULT_POOL
+    if _is_pool:
+        _pool_n = st.number_input("股票池标的数上限", min_value=5, max_value=200,
+                                  value=_DEFAULT_POOL, step=5,
+                                  help="指数/全A 股票池按此数量截断成分股后再送入流水线")
+    symbols, exch = resolve_basket_symbols(basket, max_symbols=_pool_n if _is_pool else None)
     st.caption("篮子：" + " · ".join(symbols[:5]) + ("…" if len(symbols) > 5 else ""))
     custom = st.text_input("自定义标的（逗号分隔，覆盖篮子）", "")
     exchange = st.selectbox("交易所", ALL_EXCHANGES, index=ALL_EXCHANGES.index(exch),
@@ -123,7 +137,7 @@ with r:
     ingest_knowledge = st.checkbox("研究结果写入知识库", value=True)
     run_btn = st.button("🚀 运行端到端流水线", type="primary", width="stretch")
 
-if not run_btn:
+if not run_btn and not st.session_state.get("e2e_task_id") and not st.session_state.get("e2e_result"):
     note("填写想法与参数后点击运行，结果会整页展示：<b>AI 证据研究</b> / <b>因子挖掘与 OOS</b> / "
          "<b>复合 alpha</b> / <b>策略代码</b> / <b>知识库</b>（标签页切换）。", "info")
     st.stop()
@@ -166,10 +180,61 @@ payload = {
     "ingest_knowledge": ingest_knowledge,
 }
 
-with st.spinner(f"正在跑通端到端流水线（{idea[:40]}…，{algo.upper()} × {rounds} 轮）…"):
-    result = APIClient.factor_e2e(payload, timeout=900)
+# ---- 异步启动 + 非阻塞轮询（st.fragment run_every 自动刷新，规避长跑超时/会话卡死）----
+@st.fragment(run_every=3)
+def _e2e_poll_fragment() -> None:
+    """轮询后台端到端任务：运行中更新进度条；完成/失败后写入 session_state 并整页重跑。"""
+    tid = st.session_state.get("e2e_task_id")
+    submitted = st.session_state.get("e2e_submitted_at", time.time())
+    s = APIClient.factor_e2e_status(tid, timeout=30)
+    status = (s or {}).get("status")
+    elapsed = time.time() - submitted
+    if status == "success":
+        st.session_state["e2e_result"] = (s or {}).get("result") or {}
+        st.session_state.pop("e2e_task_id", None)
+        st.rerun()
+        return
+    if status in ("error", "cancelled"):
+        st.session_state["e2e_result"] = {"error": (s or {}).get("message") or f"任务{status}"}
+        st.session_state.pop("e2e_task_id", None)
+        st.rerun()
+        return
+    if status == "not_found":
+        st.session_state["e2e_result"] = {
+            "error": (s or {}).get("message") or "任务不存在（后端可能已重启），请重新运行。"}
+        st.session_state.pop("e2e_task_id", None)
+        st.rerun()
+        return
+    # 仍在运行：进度条随时间推进（近似，非真实百分比）
+    frac = min(0.95, elapsed / 1800.0)
+    st.progress(
+        frac,
+        text=f"正在跑通端到端流水线（{idea[:40]}…，{algo.upper()} × {rounds} 轮）"
+             f"· 已运行 {int(elapsed)}s（后台任务，页面每 3s 自动刷新）",
+    )
 
-if guard_error(result, "端到端流水线"):
+
+if run_btn:
+    # 新一次提交：清空旧结果，启动后台任务，随后整页重跑进入轮询分支
+    _started = APIClient.factor_e2e_start(payload, timeout=30)
+    tid = (_started or {}).get("task_id")
+    if not tid:
+        guard_error(_started, "端到端流水线启动")
+        st.stop()
+    st.session_state["e2e_task_id"] = tid
+    st.session_state["e2e_submitted_at"] = time.time()
+    st.session_state.pop("e2e_result", None)
+    st.rerun()
+
+_e2e_tid = st.session_state.get("e2e_task_id")
+if _e2e_tid:
+    # 任务进行中：渲染轮询片段（每 3s 自动刷新）并暂不渲染结果
+    _e2e_poll_fragment()
+    st.stop()
+
+result = st.session_state.get("e2e_result")
+
+if guard_error(result or {"error": "端到端流水线未返回有效结果"}, "端到端流水线"):
     st.stop()
 
 ev = result.get("evidence") or {}

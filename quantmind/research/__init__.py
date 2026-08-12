@@ -74,6 +74,8 @@ from .combine import (
 )
 from .target import FactorSpec, MultiFactorModel, build_model_from_specs, icir_weights
 from .neutralize import winsorize, cross_sectional_neutralize, orthogonalize_factors
+from .ml_factor import MLFactorTrainer, MLFactorConfig
+from .ml_ranker import MLRanker, MLRankerConfig
 
 __all__ = [
     "Factor",

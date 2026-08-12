@@ -38,7 +38,7 @@ with cl:
     )
     asset_class = st.selectbox("资产类别", list(EXCHANGES.keys()))
     exchange = st.selectbox("交易所", EXCHANGES[asset_class])
-    symbol = st.text_input("合约代码", "rb0")
+    symbol = st.text_input("合约代码", "IF0")
 
     st.markdown("**窗口参数**")
     train_window = st.number_input("训练窗口（根）", value=250, min_value=50, step=10)

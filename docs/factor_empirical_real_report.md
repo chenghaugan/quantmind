@@ -1,6 +1,6 @@
 # 真实数据多标的截面因子实证报告
 
-> 数据：**20** 个真实期货主力连续（rb0, IF0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0），
+> 数据：**23** 个真实期货主力连续（IF0, IH0, IM0, IC0, rb0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0），
   对齐到共同交易日 **300** 个，日均 K 线样本约 **300** 根。
 > 评估：多标的**截面 IC**（Spearman 秩相关，逐日截面取均值/标准差→IR），
   收盘价 `pct_change(1)` 对齐截面前向收益；综合分同源 composite。
@@ -217,6 +217,6 @@
 ## 生成信息
 
 - 脚本：`scripts/factor_empirical_real.py`
-- 标的：rb0, IF0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0
+- 标的：IF0, IH0, IC0, IM0, rb0, cu0, m0, ta0, i0, au0, y0, j0, al0, zn0, SR0, CF0, MA0, L0, FU0, a0, bu0, pp0, eg0
 - 共同交易日：300 · 日均K线：300
 - 生成时间：2026-08-10 08:56:42

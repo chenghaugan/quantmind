@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     local_option_root: str = ""  # 本地期权数据根目录（股指/ETF/商品期权日频 Parquet/CSV）；非空时注册 ChinaOptionParquetFeed（优先于 akshare_option）
     seat_data_root: str = ""  # 期货席位持仓排名数据根目录（如 TradingAgents_for_Futures 的 qihuo/database/positioning）；非空时启用 F1-F8 真实席位因子
     local_cache_root: str = ""  # 本地行情仓库（Parquet 写缓存）根目录；非空时 DataManager 自动把真实源拉取结果落盘，后续请求秒级返回（默认随项目根 .data_cache/ 若为空则从项目根生成）
+    market_warm_enabled: bool = False  # 开启全市场（A股+港股）自动预热：调度器周期性把未缓存标的拉入本地行情仓库
+    market_warm_batch: int = 50  # 每趟预热标的上限（防止单趟打爆数据源/阻塞 API）
+    market_warm_max_symbols: int = 5000  # 全市场标的池总上限（A股≈5000 + 港股）
+    market_warm_interval_minutes: int = 15  # 全市场预热任务触发间隔（分钟）
 
 
 @lru_cache

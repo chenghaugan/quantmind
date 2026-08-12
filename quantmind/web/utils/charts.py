@@ -128,51 +128,114 @@ def create_price_chart(bars: list, title: str = "", ma: Sequence[int] = (5, 20, 
 # 回测
 # --------------------------------------------------------------------------
 def create_equity_curve(equity_curve: list, title: str = "净值曲线",
-                        benchmark: Optional[list] = None, height: int = 400) -> go.Figure:
-    """净值曲线（自动归一化为 1.0 起点）。"""
+                        benchmark: Optional[list] = None, height: int = 420) -> go.Figure:
+    """净值曲线（自动归一化为 1.0 起点），带渐变填充与关键标注。"""
     df = _to_df(equity_curve, ["equity"])
     if df is None:
         return empty_figure("无权益数据", height=height)
 
     x = pd.to_datetime(df["date"]) if "date" in df.columns else pd.RangeIndex(len(df))
     init = float(df["equity"].iloc[0]) or 1.0
-    nav = df["equity"].astype(float) / init
+    nav = (df["equity"].astype(float) / init).round(6)
 
     fig = go.Figure()
+
+    # 策略净值 — 渐变填充
     fig.add_trace(go.Scatter(
         x=x, y=nav, mode="lines", name="策略净值",
-        line=dict(color=COLORS["primary"], width=2.1),
-        fill="tozeroy", fillcolor="rgba(59,130,246,.10)",
+        line=dict(color=COLORS["primary"], width=2.4, shape="spline", smoothing=0.8),
+        fill="tozeroy",
+        fillcolor="rgba(59,130,246,.08)",
+        hovertemplate="日期: %%{x|%%Y-%%m-%%d}<br>净值: %%{y:.4f}<extra></extra>",
     ))
+
     if benchmark:
         bdf = _to_df(benchmark, ["equity"])
         if bdf is not None:
             bx = pd.to_datetime(bdf["date"]) if "date" in bdf.columns else pd.RangeIndex(len(bdf))
             binit = float(bdf["equity"].iloc[0]) or 1.0
-            fig.add_trace(go.Scatter(x=bx, y=bdf["equity"].astype(float) / binit,
-                                     mode="lines", name="基准",
-                                     line=dict(color=COLORS["text_dim"], width=1.4, dash="dot")))
+            bnav = (bdf["equity"].astype(float) / binit).round(6)
+            fig.add_trace(go.Scatter(
+                x=bx, y=bnav, mode="lines", name="基准",
+                line=dict(color=COLORS["text_dim"], width=1.6, dash="dot"),
+                hovertemplate="基准: %%{y:.4f}<extra></extra>",
+            ))
+
+    # 起点参考线
     fig.add_hline(y=1.0, line=dict(color=COLORS["border"], width=1, dash="dash"))
-    return _base_layout(fig, title, height, yaxis_title="净值", showlegend=True)
+
+    # 标注最高点与最终点
+    peak_idx = nav.idxmax()
+    peak_x = x[peak_idx] if not isinstance(x, pd.RangeIndex) else peak_idx
+    peak_y = nav.iloc[peak_idx]
+    fig.add_trace(go.Scatter(
+        x=[peak_x], y=[peak_y], mode="markers+text",
+        marker=dict(size=8, color=COLORS["up"], symbol="diamond",
+                    line=dict(color="white", width=1.2)),
+        text=[f"峰值 {peak_y:.2f}"], textposition="top center",
+        textfont=dict(size=10, color=COLORS["text"]),
+        showlegend=False, hoverinfo="skip",
+    ))
+
+    final_x = x.iloc[-1] if not isinstance(x, pd.RangeIndex) else len(nav) - 1
+    final_y = nav.iloc[-1]
+    fig.add_trace(go.Scatter(
+        x=[final_x], y=[final_y], mode="markers+text",
+        marker=dict(size=8, color=COLORS["primary"], symbol="circle",
+                    line=dict(color="white", width=1.2)),
+        text=[f"终值 {final_y:.2f}"], textposition="top right",
+        textfont=dict(size=10, color=COLORS["text"]),
+        showlegend=False, hoverinfo="skip",
+    ))
+
+    return _base_layout(fig, title, height, yaxis_title="净值", showlegend=True,
+                        yaxis=dict(tickformat=".2f", gridcolor=COLORS["border_soft"]))
 
 
 def create_drawdown_chart(equity_curve: list, title: str = "回撤",
-                          height: int = 260) -> go.Figure:
-    """水下回撤曲线。"""
+                          height: int = 280) -> go.Figure:
+    """水下回撤曲线，标注最大回撤区间。"""
     df = _to_df(equity_curve, ["equity"])
     if df is None:
         return empty_figure("无权益数据", height=height)
 
     x = pd.to_datetime(df["date"]) if "date" in df.columns else pd.RangeIndex(len(df))
     eq = df["equity"].astype(float)
-    dd = eq / eq.cummax() - 1.0
+    running_max = eq.cummax()
+    dd = eq / running_max - 1.0
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=dd, fill="tozeroy", name="回撤",
-                             line=dict(color=COLORS["danger"], width=1.4),
-                             fillcolor="rgba(242,72,62,.20)"))
+
+    # 回撤填充区域 — 更柔和的渐变
+    fig.add_trace(go.Scatter(
+        x=x, y=dd, fill="tozeroy", name="回撤",
+        line=dict(color=COLORS["danger"], width=1.6, shape="spline", smoothing=0.6),
+        fillcolor="rgba(242,72,62,.15)",
+        hovertemplate="回撤: %{y:.2%}<extra></extra>",
+    ))
+
+    # 零线 — 加粗高亮
+    fig.add_hline(y=0, line=dict(color=COLORS["text_muted"], width=1.2, dash="solid"))
+
+    # 标注最大回撤点
+    trough_idx = dd.idxmin()
+    if dd.iloc[trough_idx] < -0.01:  # 只在回撤超过1%时标注
+        trough_x = x[trough_idx] if not isinstance(x, pd.RangeIndex) else trough_idx
+        trough_y = dd.iloc[trough_idx]
+        fig.add_trace(go.Scatter(
+            x=[trough_x], y=[trough_y], mode="markers+text",
+            marker=dict(size=9, color=COLORS["danger"], symbol="diamond",
+                        line=dict(color="white", width=1.5)),
+            text=[f"最大回撤 {trough_y:.1%}"], textposition="bottom center",
+            textfont=dict(size=11, color=COLORS["text"]),
+            showlegend=False, hoverinfo="skip",
+        ))
+
     return _base_layout(fig, title, height, yaxis_title="回撤",
-                        yaxis_tickformat=".1%", showlegend=False)
+                        yaxis_tickformat=".1%", showlegend=False,
+                        yaxis=dict(gridcolor=COLORS["border_soft"],
+                                   zerolinecolor=COLORS["text_muted"],
+                                   zerolinewidth=1.2))
 
 
 def create_returns_histogram(returns: Sequence[float], title: str = "收益分布",
@@ -312,26 +375,61 @@ def create_optimize_scatter(results: List[dict], metric: str = "sharpe",
 
 
 def create_gauge(value: float, title: str, vmin: float = -1.0, vmax: float = 3.0,
-                 good: float = 1.0, height: int = 190) -> go.Figure:
-    """绩效仪表盘。"""
+                 good: float = 1.0, height: int = 220) -> go.Figure:
+    """绩效仪表盘 — 精致版，带渐变阈值色阶与状态标签。"""
     v = 0.0 if value is None or value != value else float(value)
-    color = COLORS["up"] if v >= good else (COLORS["amber"] if v >= 0 else COLORS["down"])
+
+    # 根据值动态选择颜色与状态
+    if v >= good:
+        color = COLORS["up"]
+        status_text = "✓ 达标"
+    elif v >= 0:
+        color = COLORS["amber"]
+        status_text = "△ 待改进"
+    else:
+        color = COLORS["down"]
+        status_text = "✗ 警示"
+
     fig = go.Figure(go.Indicator(
-        mode="gauge+number", value=v,
-        number=dict(font=dict(size=22, color=COLORS["text"])),
-        title=dict(text=title, font=dict(size=12, color=COLORS["text_muted"])),
+        mode="gauge+number",
+        value=v,
+        number=dict(
+            font=dict(size=30, color=COLORS["text"], family="Inter, sans-serif"),
+            valueformat=".2f",
+        ),
+        title=dict(
+            text=f"<b>{title}</b><br><span style='font-size:12px;color:{color}'>{status_text}</span>",
+            font=dict(size=13, color=COLORS["text_muted"]),
+        ),
         gauge=dict(
-            axis=dict(range=[vmin, vmax], tickfont=dict(size=9)),
-            bar=dict(color=color, thickness=0.7),
-            bgcolor="rgba(0,0,0,0)", borderwidth=0,
+            axis=dict(
+                range=[vmin, vmax],
+                tickwidth=1.5,
+                tickcolor=COLORS["text_muted"],
+                tickfont=dict(size=10, color=COLORS["text_muted"]),
+            ),
+            bar=dict(
+                color=color,
+                thickness=0.75,
+                line=dict(color="rgba(255,255,255,0.25)", width=2),
+            ),
+            bgcolor="rgba(0,0,0,0)",
+            borderwidth=0,
+            bordercolor="rgba(0,0,0,0)",
             steps=[
-                dict(range=[vmin, 0], color="rgba(242,72,62,.10)"),
-                dict(range=[0, good], color="rgba(245,158,11,.10)"),
-                dict(range=[good, vmax], color="rgba(18,184,134,.10)"),
+                dict(range=[vmin, 0], color="rgba(242,72,62,.20)"),
+                dict(range=[0, good], color="rgba(245,158,11,.16)"),
+                dict(range=[good, vmax], color="rgba(18,184,134,.20)"),
             ],
+            threshold=dict(
+                line=dict(color=color, width=4),
+                thickness=0.85,
+                value=v,
+            ),
         ),
     ))
-    return _base_layout(fig, "", height, margin=dict(l=18, r=18, t=34, b=8))
+
+    return _base_layout(fig, "", height, margin=dict(l=28, r=28, t=56, b=14))
 
 
 def create_multi_line(series: Dict[str, Sequence[float]], x: Optional[Sequence] = None,

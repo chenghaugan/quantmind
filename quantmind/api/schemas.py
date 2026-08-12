@@ -191,7 +191,7 @@ class OptimizeRequest(BaseModel):
 
 # ---- 截面（多标的面板）因子研究 ----
 class CrossSectionRequest(BaseModel):
-    symbols: List[str] = ["rb0", "hc0", "i0", "j0", "jm0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0", "j0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -272,7 +272,7 @@ class ExprEvalRequest(BaseModel):
     """表达式截面评估请求（多标的面板，index=日期 × columns=标的）。"""
 
     expression: str                        # 因子表达式（函数式 mean(close,20) 或 Qlib 式 Mean($close,20)）
-    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -285,7 +285,7 @@ class ExprEvalBatchRequest(BaseModel):
     """批量表达式评估请求。"""
 
     expressions: List[str] = ["Mean($close, 5)", "Rank($close, 20)"]
-    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -298,7 +298,7 @@ class FactorSearchRequest(BaseModel):
     """因子迭代搜索请求（co / ea / tot 三种算法）。"""
 
     seed: str = "Mean($close, 20)"         # 初始因子表达式
-    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -317,7 +317,7 @@ class FactorDedupRequest(BaseModel):
     """因子相关性聚类去冗余请求。"""
 
     expressions: List[str] = ["Mean($close, 5)", "Rank($close, 20)"]
-    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -333,7 +333,7 @@ class ExpressionBacktestRequest(BaseModel):
     """对挖掘出的 DSL 因子表达式直接做截面多空组合回测。"""
 
     expression: str = "delta(close, 20)"
-    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -348,7 +348,7 @@ class FactorPipelineRequest(BaseModel):
     """端到端因子挖掘流水线请求（挖掘 → 去冗余 → 逐因子OOS回测 → 复合组合）。"""
 
     seeds: List[str] = ["delta(close, 5)", "ts_zscore(close, 20)", "rank(close, 10)"]
-    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -384,7 +384,7 @@ class FactorE2ERequest(BaseModel):
     idea: str
     asset_class: str = "期货"
     seeds: Optional[List[str]] = None       # 用户额外种子；None → 用 AI 证据阶段产出
-    symbols: List[str] = ["rb0", "hc0", "bu0", "i0"]
+    symbols: List[str] = ["IF0", "rb0", "hc0", "i0"]
     exchange: str = "SHFE"
     interval: str = "1d"
     start: Optional[str] = None
@@ -431,4 +431,25 @@ class KnowledgeSearchRequest(BaseModel):
     query: str
     top_k: int = 10
     kind: Optional[str] = None          # factor | strategy | research_log | None=全部
+
+
+# ---- LLM 策略挖掘 ----
+class StrategyMiningRequest(BaseModel):
+    """LLM 策略挖掘请求：从因子库选择因子，LLM 设计策略规格。"""
+
+    factors: List[Dict[str, Any]]       # 因子列表（含 name/kind/window/ic_mean/icir/sharpe 等）
+    constraint: Optional[str] = None    # 用户约束（如"偏动量"、"低换手"）
+    template_preference: Optional[str] = None  # 模板偏好（dual_ma/multifactor/vol_target/pair_trading）
+    symbol: str = "rb0"
+    exchange: str = "SHFE"
+
+
+class AutoBacktestRequest(BaseModel):
+    """自动回测请求：对生成的策略规格执行自动回测循环。"""
+
+    spec: Dict[str, Any]                # StrategySpec 字典
+    strategy_id: Optional[str] = None   # 生命周期策略 ID
+    max_iterations: int = 3             # 最大迭代次数
+    min_sharpe: float = 0.5             # 最低 Sharpe 闸门
+    max_drawdown: float = -0.30         # 最大回撤下限
 

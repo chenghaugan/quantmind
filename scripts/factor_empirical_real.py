@@ -39,26 +39,31 @@ from quantmind.research.factors.registry import FactorRegistry
 # 覆盖黑色(螺纹/铁矿石/焦炭)、金融(沪深300)、有色(铜/铝/锌/金)、
 # 农产(豆粕/豆一/白糖/棉花/豆油)、能化(PTA/甲醇/塑料/燃油/沥青/PP/乙二醇)。
 SYMBOLS = [
-    ("rb0", "螺纹钢", Exchange.SHFE),
+    # 股指期货（CFFEX）— 四大品种全覆盖
     ("IF0", "沪深300股指", Exchange.CFFEX),
+    ("IH0", "上证50股指", Exchange.CFFEX),
+    ("IC0", "中证500股指", Exchange.CFFEX),
+    ("IM0", "中证1000股指", Exchange.CFFEX),
+    # 商品期货
+    ("rb0", "螺纹钢", Exchange.SHFE),
     ("cu0", "沪铜", Exchange.SHFE),
-    ("m0", "豆粕", Exchange.SHFE),
-    ("ta0", "PTA", Exchange.SHFE),
-    ("i0", "铁矿石", Exchange.SHFE),
+    ("m0", "豆粕", Exchange.DCE),
+    ("ta0", "PTA", Exchange.CZCE),
+    ("i0", "铁矿石", Exchange.DCE),
     ("au0", "沪金", Exchange.SHFE),
-    ("y0", "豆油", Exchange.SHFE),
-    ("j0", "焦炭", Exchange.SHFE),
+    ("y0", "豆油", Exchange.DCE),
+    ("j0", "焦炭", Exchange.DCE),
     ("al0", "沪铝", Exchange.SHFE),
     ("zn0", "沪锌", Exchange.SHFE),
-    ("SR0", "白糖", Exchange.SHFE),
-    ("CF0", "棉花", Exchange.SHFE),
-    ("MA0", "甲醇", Exchange.SHFE),
-    ("L0", "塑料", Exchange.SHFE),
+    ("SR0", "白糖", Exchange.CZCE),
+    ("CF0", "棉花", Exchange.CZCE),
+    ("MA0", "甲醇", Exchange.CZCE),
+    ("L0", "塑料", Exchange.DCE),
     ("FU0", "燃油", Exchange.SHFE),
-    ("a0", "豆一", Exchange.SHFE),
+    ("a0", "豆一", Exchange.DCE),
     ("bu0", "沥青", Exchange.SHFE),
-    ("pp0", "聚丙烯", Exchange.SHFE),
-    ("eg0", "乙二醇", Exchange.SHFE),
+    ("pp0", "聚丙烯", Exchange.DCE),
+    ("eg0", "乙二醇", Exchange.DCE),
 ]
 
 

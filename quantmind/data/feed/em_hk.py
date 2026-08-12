@@ -30,11 +30,24 @@ class EmHkFeed(BaseDataFeed):
     name = "em_hk"
 
     async def fetch_bar_data(self, req: HistoryRequest) -> List[BarData]:
+        # 分层降级：新浪(stock_hk_daily, GET 不封 IP、本网络稳定) → yfinance → 东财。
+        # 任一源失败不中断整链。
+        try:
+            return await self._fetch_sina(req)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("新浪港股源失败，尝试 yfinance: %s", exc)
         try:
             return await self._fetch_yfinance(req)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("yfinance 失败，回退东财: %s", exc)
             return await self._fetch_em(req)
+
+    async def _fetch_sina(self, req: HistoryRequest) -> List[BarData]:
+        """新浪港股日线（akshare ``stock_hk_daily``）：5 位代码，GET 不封 IP。"""
+        import akshare as ak
+
+        df = await asyncio.to_thread(ak.stock_hk_daily, symbol=req.symbol)
+        return self._df_to_bars(df, req)
 
     async def _fetch_yfinance(self, req: HistoryRequest) -> List[BarData]:
         import yfinance as yf

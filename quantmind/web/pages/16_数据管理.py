@@ -51,7 +51,7 @@ section("下载 / 更新入库")
 with st.form("dl_form"):
     c1, c2, c3 = st.columns(3, gap="medium")
     with c1:
-        symbol = st.text_input("合约代码", "rb0")
+        symbol = st.text_input("合约代码", "IF0")
         all_ex = [e for exs in EXCHANGES.values() for e in exs]
         exchange = st.selectbox("交易所", all_ex, index=0,
                                 format_func=lambda x: f"{x} · {EXCHANGE_NAMES.get(x, '')}")
@@ -79,6 +79,33 @@ if submit:
                 f"（{dl.get('start', '—')} ~ {dl.get('end', '—')}）", "ok", icon="✅")
     else:
         note(f"未取到数据：{dl.get('error', '未知原因')}", "error")
+
+st.markdown("---")
+
+# ---------------------------------------------------------------- 全市场预热
+section("全市场预热（A股 + 港股）")
+note(
+    "把尚未缓存的 A股 / 港股标的分批拉入本地行情仓库（增量，重复标的自动跳过）。"
+    "开启 <code>QM_MARKET_WARM_ENABLED=true</code> 后由调度器周期性自推进；也可点按下方按钮手动跑一趟。",
+    "info",
+)
+mcol1, mcol2 = st.columns([1, 3], gap="medium")
+if mcol1.button("🚀 全市场预热（增量）", type="primary", width="stretch"):
+    with st.spinner("正在预热未缓存的 A股/港股标的（首趟受数据源限速影响可能较慢）…"):
+        mw = APIClient.cache_warm_market(timeout=900)
+    if guard_error(mw, "全市场预热"):
+        st.stop()
+    if mw.get("skipped"):
+        verdict(f"已跳过：{mw.get('reason', '未知原因')}", "warn")
+    else:
+        kpi_row([
+            {"label": "本趟目标", "value": mw.get("target", 0), "tone": "accent"},
+            {"label": "成功拉取", "value": mw.get("warmed", 0), "tone": "up"},
+            {"label": "失败", "value": mw.get("failed", 0), "tone": "down" if mw.get("failed") else "neutral"},
+            {"label": "剩余待建", "value": mw.get("pending_left", 0), "tone": "accent"},
+        ])
+        done = mw.get("done")
+        verdict("全市场已全部建库" if done else "本趟完成，剩余标的将随后续调度继续建库", "ok")
 
 st.markdown("---")
 

@@ -48,17 +48,22 @@ from .schemas import (
     FactorDedupRequest, ExpressionBacktestRequest, FactorPipelineRequest,
     FactorE2ERequest, KnowledgeIngestRequest, KnowledgeSearchRequest,
     StrategyRegisterRequest, PaperRunRequest,
+    StrategyMiningRequest, AutoBacktestRequest,
 )
 from .ws import manager
 from .services import (
     DataService, FactorService, BacktestService, LifecycleService, ResearchService,
     RiskService, OptimizeService, CrossSectionService, SettingsService, SeatService,
     DataSettingsService, DataAdminService, AlertSettingsService, SearchService,
-    KnowledgeService,
+    KnowledgeService, StrategyMiningService,
 )
 from .logging_config import setup_api_logger
 from .routes_auth import router as auth_router
+from .routes_profile import router as profile_router
+from .routes_ml import router as ml_router
 from .scheduler import QuantMindScheduler, build_scheduler
+from .services.ml_service import MLService
+from .services.profile_service import ProfileService
 
 _logger = setup_api_logger("INFO")
 
@@ -67,6 +72,42 @@ _ee: Optional[EventEngine] = None
 
 # AI 设置允许更新的字段白名单
 _AI_ALLOWED = {"provider", "api_key", "base_url", "model", "temperature"}
+
+# ---------------------------------------------------------------- 长任务存储
+# 端到端流水线等长耗时任务用「启动 + 轮询」模式，避免单次 HTTP 请求超时。
+# 内存态 task_id -> {task, status, message, result}
+_E2E_TASKS: Dict[str, Dict[str, Any]] = {}
+
+
+def _submit_task(coro) -> str:
+    """把协程提交为后台任务，返回 task_id。"""
+    task_id = uuid.uuid4().hex
+    record: Dict[str, Any] = {
+        "task": None,
+        "status": "running",
+        "message": "任务已提交，正在初始化…",
+        "result": None,
+    }
+    _E2E_TASKS[task_id] = record
+
+    async def _run() -> None:
+        try:
+            record["result"] = await coro
+            record["status"] = "success"
+            record["message"] = "任务完成"
+        except asyncio.CancelledError:  # noqa: PERF203
+            record["status"] = "cancelled"
+            record["message"] = "任务已取消"
+            raise
+        except Exception as exc:  # noqa: BLE001
+            _logger.exception("后台任务失败: %s", exc)
+            record["status"] = "error"
+            record["message"] = str(exc)
+        finally:
+            record["task"] = None
+
+    record["task"] = asyncio.create_task(_run())
+    return task_id
 
 
 def _jsonable(o: Any) -> Any:
@@ -103,7 +144,12 @@ def _broadcast(e: Event) -> None:
 async def lifespan(app: FastAPI):
     global _ee
     settings = get_settings()
-    registry = build_default_registry()
+    registry = build_default_registry(
+        local_data_root=settings.local_data_root or None,
+        local_stock_root=settings.local_stock_root or None,
+        local_hk_root=settings.local_hk_root or None,
+        local_option_root=settings.local_option_root or None,
+    )
     try:
         store = TimescaleStore(settings.db_url)
         await store.connect()
@@ -153,12 +199,19 @@ async def lifespan(app: FastAPI):
     app.state.data_admin_service = DataAdminService(dm, data_settings)
     app.state.alert_settings_service = AlertSettingsService()
 
+    # 初始化 ML 服务和 Profile 服务
+    app.state.ml_service = MLService()
+    app.state.profile_service = ProfileService()
+
+    # 初始化 LLM 策略挖掘服务
+    app.state.strategy_mining_service = StrategyMiningService(dm, lifecycle_mgr, provider)
+
     app.state.dm = dm
     app.state.ee = _ee
     app.state.lifecycle = lifecycle_mgr
 
     # ---- 任务调度器（APScheduler）----
-    sys_state = {"dm": dm, "ee": _ee, "lifecycle": lifecycle_mgr}
+    sys_state = {"dm": dm, "ee": _ee, "lifecycle": lifecycle_mgr, "settings": settings}
     scheduler = build_scheduler(sys_state, register_defaults=True)
     scheduler.start()
     app.state.scheduler = scheduler
@@ -223,6 +276,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 # 注册路由
 app.include_router(auth_router)
+app.include_router(profile_router)
+app.include_router(ml_router)
 
 
 @app.get("/")
@@ -428,6 +483,23 @@ async def refresh_data_cache():
     return {"ok": True, "refreshed": refreshed, "failed": failed, "results": results}
 
 
+@app.post("/data/cache/market-warm")
+async def warm_market_cache():
+    """手动触发全市场（A股+港股）预热：复用调度器 ``market_warm`` job，跑一趟增量。
+
+    与调度任务共用 ``_job_market_warm``，便于点按手动推进与后台自动维护共用单一路径。
+    """
+    from .scheduler import _job_market_warm
+
+    sys_state = {
+        "dm": app.state.dm,
+        "ee": app.state.ee,
+        "lifecycle": app.state.lifecycle,
+        "settings": get_settings(),
+    }
+    return await _job_market_warm(sys_state)
+
+
 @app.post("/research", response_model=ResearchResult)
 async def research(req: ResearchRequest):
     service: ResearchService = app.state.research_service
@@ -627,9 +699,59 @@ async def factor_pipeline(req: FactorPipelineRequest):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+@app.post("/factor/e2e/start")
+async def factor_e2e_start(req: FactorE2ERequest):
+    """端到端因子研究（异步启动）：AI 证据 → 挖掘 → OOS 复合 alpha → 策略代码。
+
+    立即返回 ``{"task_id": ...}``，任务在后台执行，客户端通过
+    ``GET /factor/e2e/status/{task_id}`` 轮询进度/结果。避免长跑超时。
+    """
+    service: SearchService = app.state.search_service
+    try:
+        # 先做轻量参数/数据校验，尽早把明显错误抛给客户端（不进入后台任务）
+        if not (req.idea or "").strip():
+            return JSONResponse(status_code=400, content={"error": "投资想法不能为空"})
+        symbols = [s for s in (req.symbols or []) if s and s.strip()]
+        if len(symbols) < 2:
+            return JSONResponse(status_code=400,
+                                content={"error": "端到端流水线至少需要 2 个标的"})
+        task_id = _submit_task(service.e2e(req, ingest=req.ingest_knowledge))
+        return {"task_id": task_id, "status": "running"}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("端到端任务提交失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/factor/e2e/status/{task_id}")
+async def factor_e2e_status(task_id: str):
+    """查询端到端流水线后台任务状态。
+
+    ``status``: running / success / error / cancelled / not_found。
+    任务成功后 ``result`` 携带完整结果（与 /factor/e2e 返回体一致）。
+    """
+    rec = _E2E_TASKS.get(task_id)
+    if rec is None:
+        return JSONResponse(status_code=404,
+                            content={"task_id": task_id, "status": "not_found",
+                                     "message": "任务不存在（可能后端已重启）"})
+    done = rec["status"] in ("success", "error", "cancelled")
+    return {
+        "task_id": task_id,
+        "status": rec["status"],
+        "message": rec["message"],
+        "result": rec["result"] if done else None,
+    }
+
+
 @app.post("/factor/e2e")
 async def factor_e2e(req: FactorE2ERequest):
-    """端到端因子研究：AI 证据 → 挖掘 → OOS 复合 alpha → 策略代码（可选沉淀知识库）。"""
+    """端到端因子研究（同步，向后兼容）：AI 证据 → 挖掘 → OOS 复合 alpha → 策略代码。
+
+    注意：同步模式受单次请求超时限制，长跑请改用
+    ``POST /factor/e2e/start`` + ``GET /factor/e2e/status/{task_id}``。
+    """
     service: SearchService = app.state.search_service
     try:
         return await service.e2e(req, ingest=req.ingest_knowledge)
@@ -945,6 +1067,23 @@ async def cross_section(req: CrossSectionRequest):
         return await service.run(req)
     except (ValueError, KeyError) as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+# --------------------------------------------------------------------------
+# LLM 策略挖掘
+# --------------------------------------------------------------------------
+@app.post("/strategy-mining/architect")
+async def strategy_mining_architect(req: StrategyMiningRequest):
+    """LLM 策略架构师：从因子设计策略规格。"""
+    service: StrategyMiningService = app.state.strategy_mining_service
+    return await service.architect(req)
+
+
+@app.post("/strategy-mining/auto-backtest")
+async def strategy_mining_auto_backtest(req: AutoBacktestRequest):
+    """自动回测循环：编译 → 回测 → 评估 → 调整（迭代）。"""
+    service: StrategyMiningService = app.state.strategy_mining_service
+    return await service.auto_backtest(req)
 
 
 # --------------------------------------------------------------------------

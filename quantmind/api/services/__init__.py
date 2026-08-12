@@ -18,6 +18,7 @@ from .data_admin_service import DataAdminService
 from .alert_settings_service import AlertSettingsService
 from .search_service import SearchService
 from .knowledge_service import KnowledgeService
+from .strategy_mining_service import StrategyMiningService
 
 __all__ = [
     "DataService",
@@ -35,4 +36,5 @@ __all__ = [
     "AlertSettingsService",
     "SearchService",
     "KnowledgeService",
+    "StrategyMiningService",
 ]

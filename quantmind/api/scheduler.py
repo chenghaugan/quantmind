@@ -304,6 +304,87 @@ def _record_refresh_error(dc, key, exch, interv, detail):
         pass
 
 
+# _MARKET_EXCHANGES: 全市场预热只关心这些交易所（A股沪深 + 港股）
+_MARKET_EXCHANGES = {"SSE", "SZSE", "HKEX"}
+
+
+async def _job_market_warm(sys_state: Dict[str, Any]) -> Dict[str, Any]:
+    """全市场（A股+港股）自动预热：把未缓存的标的分批拉入本地行情仓库。
+
+    每趟发现全市场清单 -> 与仓库已缓存键取差集得到「待建标的」-> 按 batch 上限
+    取前 N 个逐个 ``dm.get_bar_data`` 拉到真实源并落盘。已在缓存的不重复拉（增量），
+    跑完本趟即返回，剩余留给下一趟（自推进 catch-up，无持久队列，KISS）。
+
+    默认关闭（``QM_MARKET_WARM_ENABLED`` 为 False 时跳过），保证开箱离线/测试不受影响。
+    """
+    from ..config import get_settings
+    from ..data.feed.market_universe import discover_all
+    from ..data.feed.base import HistoryRequest
+    from ..core.constant import Exchange, Interval
+
+    dm = sys_state.get("dm")
+    dc = getattr(dm, "disk_cache", None) if dm is not None else None
+    if dm is None or dc is None:
+        return {"action": "market_warm", "skipped": True, "reason": "数据管理器或行情仓库未启用"}
+
+    try:
+        settings = get_settings()
+        if not settings.market_warm_enabled:
+            return {"action": "market_warm", "skipped": True, "reason": "未启用(settings.market_warm_enabled=False)"}
+        batch = int(settings.market_warm_batch or 50)
+        cap = int(settings.market_warm_max_symbols or 5000)
+    except Exception as exc:  # noqa: BLE001
+        _logger.exception("market_warm 读取配置失败: %s", exc)
+        return {"action": "market_warm", "skipped": True, "reason": f"配置读取失败: {exc}"}
+
+    # 发现全市场清单（A股在前，港股在后；失败返回空则跳过本趟）
+    universe = discover_all(cap_a=cap, cap_hk=cap)
+    universe = [u for u in universe if u.split(".")[-1] in _MARKET_EXCHANGES]
+    if not universe:
+        return {"action": "market_warm", "skipped": True, "reason": "全市场清单为空(akshare 不可用?)"}
+
+    # 已缓存键（仅市场交易所），用于增量差集
+    try:
+        cached_keys = {
+            k["symbol"] + "." + k["exchange"].upper()
+            for k in dc.list_keys() if k.get("exchange", "").upper() in _MARKET_EXCHANGES
+        }
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("market_warm 读取已缓存键失败: %s", exc)
+        cached_keys = set()
+
+    pending = [u for u in universe if u not in cached_keys]
+    todo = pending[:batch]
+    total_pending = len(pending)
+
+    warmed, failed = 0, 0
+    for vt in todo:
+        try:
+            symbol, exch = vt.rsplit(".", 1)
+            req = HistoryRequest(symbol=symbol, exchange=Exchange(exch), interval=Interval.DAILY)
+            sink: Dict[str, Any] = {}
+            bars = await dm.get_bar_data(req, source_sink=sink)
+            ok = bool(bars)
+            source = sink.get(symbol, "")
+            _record_refresh(dc, {"symbol": symbol, "exchange": exch, "interval": "1d"},
+                            Exchange(exch), Interval.DAILY, bars, ok, source)
+            warmed += 1 if ok else 0
+            failed += 0 if ok else 1
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            _record_refresh_error(dc, {"symbol": vt.split(".")[0], "exchange": vt.split(".")[-1], "interval": "1d"},
+                                  Exchange(vt.split(".")[-1]), Interval.DAILY, str(exc)[:120])
+
+    return {
+        "action": "market_warm",
+        "target": len(todo),
+        "warmed": warmed,
+        "failed": failed,
+        "pending_left": max(total_pending - len(todo), 0),
+        "done": total_pending == 0,
+    }
+
+
 def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """构造内置任务注册表（懒解析，依赖从 sys_state 注入，可缺省）。"""
     return [
@@ -335,6 +416,16 @@ def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "fn": _job_cache_refresh,
             "cron": "0 17 * * 1-5",   # 交易日 17:00 收盘后刷新本地行情仓库
             "timezone": "Asia/Shanghai",
+            "kwargs": {"sys_state": sys_state},
+            "required": False,
+        },
+        {
+            "name": "market_warm",
+            "fn": _job_market_warm,
+            # 自推进 catch-up：每趟预热 batch 个未缓存标的，剩余留给下一趟；
+            # 间隔由配置决定（默认 15 分钟），apscheduler 未装时忽略该条。
+            "interval": 15 * 60,
+            "max_instances": 1,
             "kwargs": {"sys_state": sys_state},
             "required": False,
         },

@@ -14,7 +14,9 @@ from utils.theme import (  # noqa: E402
     kpi_row, fmt_num, fmt_pct, badge,
 )
 from utils.api_client import APIClient  # noqa: E402
-from utils.constants import CS_BASKETS, ALL_EXCHANGES, EXCHANGE_NAMES  # noqa: E402
+from utils.constants import (  # noqa: E402
+    BASKET_CHOICES, resolve_basket_symbols, ALL_EXCHANGES, EXCHANGE_NAMES,
+)
 
 setup_page("因子挖掘流水线", "🧬")
 page_header(
@@ -69,8 +71,14 @@ with l:
         )
     run_composite = st.checkbox("启用复合 alpha 组合回测", value=True)
 with r:
-    basket = st.selectbox("标的篮子", list(CS_BASKETS.keys()), format_func=lambda x: str(x))
-    symbols, exch = CS_BASKETS[basket]
+    basket = st.selectbox("标的篮子", BASKET_CHOICES, format_func=lambda x: str(x))
+    _is_pool = str(basket).startswith("指数·")
+    _pool_n = 40
+    if _is_pool:
+        _pool_n = st.number_input("股票池标的数上限", min_value=5, max_value=200,
+                                  value=40, step=5,
+                                  help="指数/全A 股票池按此数量截断成分股后再挖掘")
+    symbols, exch = resolve_basket_symbols(basket, max_symbols=_pool_n if _is_pool else None)
     st.caption("篮子：" + " · ".join(symbols[:5]) + ("…" if len(symbols) > 5 else ""))
     custom = st.text_input("自定义标的（逗号分隔，覆盖篮子）", "")
     exchange = st.selectbox("交易所", ALL_EXCHANGES, index=ALL_EXCHANGES.index(exch),

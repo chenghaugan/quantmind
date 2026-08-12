@@ -150,7 +150,7 @@ st.markdown("---")
 section("交易日历与交易时段")
 cld, clr = st.columns([1, 2], gap="medium")
 with cld:
-    csymbol = st.text_input("标的", "rb0", key="cal_symbol")
+    csymbol = st.text_input("标的", "IF0", key="cal_symbol")
     cexch = st.selectbox("交易所", list(EXCHANGE_NAMES.keys()),
                          format_func=lambda x: f"{x} · {EXCHANGE_NAMES.get(x, '')}",
                          key="cal_exch")
