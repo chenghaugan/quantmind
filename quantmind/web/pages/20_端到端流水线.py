@@ -131,13 +131,13 @@ def _render_history():
     if guard_error(det, "运行详情"):
         return
     md = det.get("metadata") or {}
-    kpi_row({
-        "复合前向IC": fmt_num(md.get("composite_fwd_ic"), 4),
-        "复合Sharpe": fmt_num(md.get("composite_sharpe"), 3),
-        "代表因子": str(md.get("n_representative") or 0),
-        "已验证假设": str(md.get("n_verified_hypotheses") or 0),
-        "算法": str(md.get("algo") or "—"),
-    })
+    kpi_row([
+        {"label": "复合前向IC", "value": fmt_num(md.get("composite_fwd_ic"), 4)},
+        {"label": "复合Sharpe", "value": fmt_num(md.get("composite_sharpe"), 3)},
+        {"label": "代表因子", "value": str(md.get("n_representative") or 0)},
+        {"label": "已验证假设", "value": str(md.get("n_verified_hypotheses") or 0)},
+        {"label": "算法", "value": str(md.get("algo") or "—")},
+    ])
     with st.expander("📝 AI 经验简报", expanded=False):
         st.write(str(md.get("brief") or "（无简报）"))
     trials = det.get("trials") or []
