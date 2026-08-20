@@ -83,14 +83,37 @@ def _status_tone(status: Optional[str]) -> str:
     return "muted"
 
 
+def _history_sources():
+    """拿到 (runs 列表, detail 函数)。优先走后端 /runs；后端不可用（旧代码/未启动/
+    404）时退回直读本地 KnowledgeStore，保证历史报告始终可看。返回 (runs, detail_fun)。"""
+    try:
+        data = APIClient.runs(limit=50, timeout=15)
+        if data and "error" not in data and data.get("runs") is not None:
+            return (data.get("runs") or []), APIClient.run_detail
+    except Exception:  # noqa: BLE001 后端异常则走本地兜底，不阻断页面
+        pass
+    try:
+        from quantmind.knowledge import KnowledgeStore
+        ks = KnowledgeStore()
+        runs = (ks.list_runs(limit=50) or []) if ks else []
+        def _detail(run_id, timeout=20):
+            run = ks.get_run(run_id) or {}
+            run["trials"] = ks.trials_for_run(run_id)
+            return run
+        return runs, _detail
+    except Exception:  # noqa: BLE001 本地库也不可读则返回空
+        return [], None
+
+
 def _render_history():
     """端到端运行历史报告：列出历史 run（idea/时间/复合统计/AI brief），选中可看因子试验明细。"""
     st.markdown("#### 📜 历史运行报告")
-    data = APIClient.runs(limit=50, timeout=15)
-    runs = (data or {}).get("runs") or []
+    runs, detail_fun = _history_sources()
     if not runs:
-        note("暂无历史运行记录。跑完一次「端到端流水线」即会留存（含复合 alpha 统计与 AI 经验简报）。", "info")
+        note("暂无历史运行记录。跑完一次「端到端流水线」即会留存（含复合 alpha 统计与 AI 经验简报）。"
+             "<br>提示：若刚跑完仍看不到，请重启后端（旧后端无 /runs 接口），再重跑一次。", "info")
         return
+    source_hint = "（本地知识库直读）" if detail_fun is not APIClient.run_detail else ""
     labels = {}
     for r in runs:
         md = r.get("metadata") or {}
@@ -98,11 +121,12 @@ def _render_history():
         created = str(r.get("created_at") or "")[:19]
         status = str(md.get("status") or "")
         labels[r["run_id"]] = f"{created} ｜ {idea} ｜ {status}"
+    st.caption(f"数据源：后端 /runs{source_hint}")
     page = st.selectbox("选择运行记录", list(labels),
                         format_func=lambda k: labels.get(k, k))
     if page != st.session_state.get("hist_sel") or st.button("🔄 加载该次报告"):
         st.session_state["hist_sel"] = page
-        st.session_state["hist_detail"] = APIClient.run_detail(page, timeout=20)
+        st.session_state["hist_detail"] = detail_fun(page, timeout=20)
     det = st.session_state.get("hist_detail") or {}
     if guard_error(det, "运行详情"):
         return
