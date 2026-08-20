@@ -58,9 +58,13 @@ class DiskBarCache:
         return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in s)
 
     def _path(self, req: HistoryRequest) -> Path:
+        # 文件名形如 {code}.{exchange}.{interval}.parquet（与仓库既有文件/list_keys 解析一致）。
+        # req.symbol 通常已含交易所后缀（如 cu0.SHFE），此处剥去后缀取裸 code，避免重复写交易所。
+        sym = req.symbol
+        code = sym.rsplit(".", 1)[0] if "." in sym else sym
         return (
             self.root
-            / f"{self._safe_name(req.symbol)}.{self._safe_name(req.exchange.value)}.{req.interval.value}.parquet"
+            / f"{self._safe_name(code)}.{self._safe_name(req.exchange.value)}.{req.interval.value}.parquet"
         )
 
     # ----------------------------------------------------------------- 读取

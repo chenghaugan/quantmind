@@ -70,8 +70,17 @@ with st.form("md_query"):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch(symbol, exchange, interval, start, end, limit):
-    return APIClient.data(symbol, exchange, interval, start=start, end=end,
-                          page=1, page_size=limit, timeout=60)
+    # 先取第 1 页拿到总条数，再请求最后一页，确保展示的是“最新” limit 根，
+    # 而不是最旧的 limit 根（page=1 对长历史序列会倒退到多年前的旧数据）。
+    first = APIClient.data(symbol, exchange, interval, start=start, end=end,
+                           page=1, page_size=limit, timeout=60)
+    total = (first.get("pagination") or {}).get("total", 0) or len(first.get("data") or [])
+    last_page = max(1, -(-total // limit)) if total else 1
+    if last_page <= 1:
+        return first
+    last = APIClient.data(symbol, exchange, interval, start=start, end=end,
+                          page=last_page, page_size=limit, timeout=60)
+    return last
 
 
 if not submitted:
