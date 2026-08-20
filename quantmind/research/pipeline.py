@@ -82,6 +82,8 @@ class PipelineConfig:
     # 控制
     max_candidates: int = 12               # 去重后最多回测的代表数
     persist_pairs: bool = True             # 把 (expr, IC) 落库（FactorPairStore）
+    # 持续学习闭环：历史知识库上下文（success/fail/briefs）注入搜索 LLM prompt
+    knowledge_context: Optional[dict] = None
 
 
 @dataclass
@@ -278,7 +280,7 @@ def run_pipeline(
             searcher = _make_searcher()
             result = asyncio.run(searcher.run(
                 seed, train_p, forward_periods=config.forward_periods,
-                market=config.market))
+                market=config.market, knowledge_context=config.knowledge_context))
             best = result.best_expression
             if best and best not in candidates:
                 candidates[best] = seed

@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,9 +32,12 @@ from ..config import get_settings
 from ..data import build_default_registry, DataManager, TimescaleStore, InMemoryStore
 from ..data.store.disk_cache import DiskBarCache
 from ..core.engine import EventEngine
+from ..core.constant import Exchange, Interval
 from ..core.event import Event, EventType
 from ..ai import build_provider
+from ..knowledge import KnowledgeStore
 from ..paper.promotion import LifecycleManager, LifecycleState
+from ..research.knowledge_loop import judge_strategy, run_strategy_knowledge_loop
 from ..monitoring import Notifier
 from ..research import FactorRegistry
 from ..research.decay import FactorDecayScanner, DecayConfig, FactorState
@@ -140,6 +143,82 @@ def _broadcast(e: Event) -> None:
         pass
 
 
+# ------------------------------------------------------------------ 策略级 AI 沉淀
+# 策略注册/回测/模拟盘逐步落库到 lifecycle：用真实指标做 AI 判读（judge_strategy）、
+# 把 status/reason/brief 写回 KnowledgeStore。只修改持久层，失败仅 warning 不阻断主流程。
+_STRATEGY_GATE = {"min_sharpe": 0.5, "min_drawdown": -0.30}
+
+
+def _llm_provider() -> Any:
+    """取当前 LLM Provider（供 AI 判读；不可用回退规则判读）。"""
+    svc = getattr(app.state, "search_service", None)
+    if svc is not None and getattr(svc, "provider", None) is not None:
+        return svc.provider
+    res = getattr(app.state, "research_service", None)
+    if res is not None and getattr(res, "provider", None) is not None:
+        return res.provider
+    return None
+
+
+async def _persist_backtest_lifecycle(strategy_id: str, risk_xray: Any) -> Optional[dict]:
+    """回填回测真实指标 + 策略级判读（state=BACKTEST）。失败仅 warning。"""
+    try:
+        ks = KnowledgeStore()
+        if (risk_xray or {}).get("return", {}).get("sharpe") is None:
+            return None
+        rx_return = risk_xray.get("return", {})
+        rx_risk = risk_xray.get("risk", {})
+        sharpe = rx_return.get("sharpe")
+        mdd = rx_risk.get("max_drawdown")
+        ks.update_strategy_state(
+            strategy_id, state="BACKTEST",
+            sharpe=sharpe, max_drawdown=mdd, status="", reason="",
+        )
+        judged = await judge_strategy(
+            _llm_provider(),
+            {"sharpe": sharpe, "max_drawdown": mdd, "state": "BACKTEST"},
+            gate=_STRATEGY_GATE, fallback_rules=True,
+        )
+        ks.update_strategy_state(
+            strategy_id, status=judged.get("status"), reason=judged.get("reason"),
+        )
+        _logger.info("策略生命周期回测判读落库: %s -> %s (sharpe=%s)", strategy_id,
+                     judged.get("status"), sharpe)
+        return judged
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("策略回测生命周期回填/判读失败(%s): %s", strategy_id, exc)
+        return None
+
+
+async def _persist_paper_lifecycle(strategy_id: str, metrics: Dict, idea: str = "") -> Optional[dict]:
+    """模拟盘判读落库：state=PAPER（含真实 sharpe/回撤）+ 经验 brief。失败仅 warning。"""
+    try:
+        ks = KnowledgeStore()
+        loop = await run_strategy_knowledge_loop(
+            ks, _llm_provider(),
+            [{
+                "strategy_id": strategy_id, "state": "PAPER",
+                "sharpe": metrics.get("sharpe"),
+                "max_drawdown": metrics.get("max_drawdown"),
+                "status": "paper",
+            }],
+            idea=idea,
+        )
+        judged = (loop.get("judged") or [{}])[0] if loop.get("judged") else {
+            "status": "active", "reason": "", "tags": [],
+        }
+        ks.update_strategy_state(
+            strategy_id,
+            status=judged.get("status"), reason=judged.get("reason"),
+            brief=loop.get("brief") or "",
+        )
+        _logger.info("策略生命周期模拟盘判读落库: %s -> %s", strategy_id, judged.get("status"))
+        return judged
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("策略模拟盘生命周期判读/落库失败(%s): %s", strategy_id, exc)
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _ee
@@ -176,7 +255,7 @@ async def lifespan(app: FastAPI):
     _ee.register_general(_broadcast)
     notifier = Notifier()
     notifier.attach(_ee)
-    lifecycle_mgr = LifecycleManager()
+    lifecycle_mgr = LifecycleManager(store=KnowledgeStore())
     settings_service = SettingsService()
     provider = settings_service.rebuild_provider()
 
@@ -187,7 +266,9 @@ async def lifespan(app: FastAPI):
     app.state.lifecycle_service = LifecycleService(lifecycle_mgr, _ee)
     app.state.research_service = ResearchService(provider)
     app.state.risk_service = RiskService()
-    app.state.optimize_service = OptimizeService(dm)
+    app.state.optimize_service = OptimizeService(
+        dm, resolver=lambda n: app.state.backtest_service._resolve_strategy_class(n)
+    )
     app.state.cross_section_service = CrossSectionService(dm)
     app.state.settings_service = settings_service
     app.state.search_service = SearchService(dm, provider)
@@ -369,49 +450,80 @@ async def warm_data_cache(payload: Dict[str, Any]):
     """预热本地行情仓库：把给定标的多真实源拉取并落盘（后续 /factor/pipeline 秒级）。
 
     payload: {symbols: [..], exchange: "SHFE", start?: "YYYY-MM-DD", end?: "YYYY-MM-DD"}
+    与 ``/data/cache/refresh`` 共用统一落盘/日志核心 :func:`_warm_cache_symbols`，
+    返回相同 schema（``refreshed`` / ``failed`` / ``results[{key,status,n,source,latest,error}]``）。
     """
     dm: DataManager = app.state.dm
     if dm is None or dm.disk_cache is None:
         return {"ok": False, "error": "本地行情仓库未启用"}
-    from ..core.constant import Exchange, Interval
-    from ..data.feed.base import HistoryRequest
-
     symbols = [s for s in (payload.get("symbols") or []) if s and str(s).strip()]
     if not symbols:
         return {"ok": False, "error": "至少提供 1 个标的"}
     exch = Exchange(str(payload.get("exchange", "SHFE")).upper())
-    _start = datetime.fromisoformat(payload["start"]) if payload.get("start") else None
-    _end = datetime.fromisoformat(payload["end"]) if payload.get("end") else None
+    start = datetime.fromisoformat(payload["start"]) if payload.get("start") else None
+    end = datetime.fromisoformat(payload["end"]) if payload.get("end") else None
 
+    todos: List[Tuple[str, str, str, Optional[datetime], Optional[datetime]]] = [
+        (str(s).strip(), exch.value, Interval.DAILY.value, start, end) for s in symbols
+    ]
+    refreshed, failed, results = await _warm_cache_symbols(dm, todos)
+    return {"ok": True, "refreshed": refreshed, "failed": failed, "results": results}
+
+
+async def _warm_cache_symbols(
+    dm: DataManager,
+    todos: List[Tuple[str, str, str, Optional[datetime], Optional[datetime]]],
+) -> Tuple[int, int, List[Dict[str, Any]]]:
+    """统一落盘核心：把一组 (symbol, exchange, interval, start, end) 逐标的真实源拉取并落盘。
+
+    由 ``/data/cache/warm``（显式标的）与 ``/data/cache/refresh``（已缓存键）共用，
+    消除二者重复的 fetch/record_refresh 逻辑与结果 schema 差异。每个标的返回统一记录：
+    ``{key:{symbol,exchange,interval}, status: ok|empty|error|bad_key, n, source, latest, error}``。
+    """
+    from ..data.feed.base import HistoryRequest
+
+    dc = getattr(dm, "disk_cache", None)
     results: List[Dict[str, Any]] = []
-    for sym in symbols:
-        req = HistoryRequest(symbol=str(sym).strip(), exchange=exch,
-                             interval=Interval.DAILY, start=_start, end=_end)
-        sink: Dict[str, str] = {}
+    refreshed, failed = 0, 0
+    for (symbol, exch_str, interv_str, start, end) in todos:
+        key = {"symbol": symbol, "exchange": exch_str, "interval": interv_str}
         try:
+            exch = Exchange(exch_str.upper())
+            interv = Interval(interv_str)
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            results.append({"key": key, "status": "bad_key", "n": 0, "error": str(exc)[:80]})
+            continue
+        try:
+            req = HistoryRequest(
+                symbol=symbol, exchange=exch, interval=interv, start=start, end=end
+            )
+            sink: Dict[str, str] = {}
             bars = await dm.get_bar_data(req, source_sink=sink)
             ok = bool(bars)
-            results.append({"symbol": str(sym).strip(), "ok": ok,
-                            "n": len(bars), "source": sink.get(str(sym).strip(), "")})
-            dc = getattr(dm, "disk_cache", None)
+            latest = bars[-1].datetime.isoformat() if bars else None
+            source = sink.get(symbol, "") or ("empty" if not ok else "")
+            results.append({
+                "key": key, "status": "ok" if ok else "empty", "n": len(bars),
+                "source": source, "latest": latest,
+            })
+            refreshed += 1 if ok else 0
+            failed += 0 if ok else 1
             if dc is not None:
-                _latest = bars[-1].datetime.isoformat() if bars else None
                 dc.record_refresh(
-                    symbol=str(sym).strip(), exchange=str(exch.value), interval=Interval.DAILY.value,
-                    rows=len(bars), latest=_latest,
-                    status="ok" if ok else "empty",
-                    detail=(sink.get(str(sym).strip(), "") or "empty"),
+                    symbol=symbol, exchange=str(exch.value), interval=interv.value,
+                    rows=len(bars), latest=latest,
+                    status="ok" if ok else "empty", detail=source,
                 )
         except Exception as exc:  # noqa: BLE001
-            results.append({"symbol": str(sym).strip(), "ok": False, "error": str(exc)[:120]})
-            dc = getattr(dm, "disk_cache", None)
+            failed += 1
+            results.append({"key": key, "status": "error", "n": 0, "error": str(exc)[:120]})
             if dc is not None:
                 dc.record_refresh(
-                    symbol=str(sym).strip(), exchange=str(exch.value), interval=Interval.DAILY.value,
+                    symbol=symbol, exchange=str(exch.value), interval=interv.value,
                     rows=0, latest=None, status="error", detail=str(exc)[:120],
                 )
-    _ok = sum(1 for r in results if r.get("ok"))
-    return {"ok": True, "warmed": _ok, "failed": len(results) - _ok, "results": results}
+    return refreshed, failed, results
 
 
 @app.get("/data/cache/history")
@@ -427,57 +539,24 @@ async def get_data_cache_history(limit: int = Query(50, ge=1, le=500)):
 async def refresh_data_cache():
     """手动触发全量刷新：把仓库内所有已缓存标的从真实源重拉回写（追新）。
 
-    等价于 scheduler 的 ``cache_refresh`` 任务，可随时点按执行。
+    等价于 scheduler 的 ``cache_refresh`` 任务；与 ``/data/cache/warm`` 共用统一落盘核心
+    :func:`_warm_cache_symbols`，返回相同 schema。
     """
     dm: DataManager = app.state.dm
     if dm is None or dm.disk_cache is None:
         return {"ok": False, "error": "本地行情仓库未启用"}
     dc = dm.disk_cache
-    from ..core.constant import Exchange, Interval
-    from ..data.feed.base import HistoryRequest
-
     keys = dc.list_keys()
     if not keys:
         return {"ok": True, "refreshed": 0, "failed": 0, "results": [], "skipped": True}
 
+    todos: List[Tuple[str, str, str, None, None]] = [
+        (k["symbol"], str(k["exchange"]), str(k["interval"]), None, None) for k in keys
+    ]
     was_refresh = bool(getattr(dc, "refresh", False))
     dc.refresh = True
-    results: List[Dict[str, Any]] = []
-    refreshed, failed = 0, 0
     try:
-        for k in keys:
-            try:
-                exch = Exchange(str(k["exchange"]).upper())
-                interv = Interval(str(k["interval"]))
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                results.append({"key": k, "status": "bad_key", "error": str(exc)[:80]})
-                continue
-            req = HistoryRequest(symbol=k["symbol"], exchange=exch, interval=interv)
-            try:
-                sink: Dict[str, str] = {}
-                bars = await dm.get_bar_data(req, source_sink=sink)
-                ok = bool(bars)
-                n = len(bars)
-                results.append({
-                    "key": k, "status": "ok" if ok else "empty",
-                    "source": sink.get(k["symbol"], ""), "n": n,
-                })
-                dc.record_refresh(
-                    symbol=k["symbol"], exchange=str(exch.value), interval=interv.value,
-                    rows=n, latest=(bars[-1].datetime.isoformat() if bars else None),
-                    status="ok" if ok else "empty",
-                    detail=(sink.get(k["symbol"], "") or "empty"),
-                )
-                refreshed += 1 if ok else 0
-                failed += 0 if ok else 1
-            except Exception as exc:  # noqa: BLE001
-                failed += 1
-                results.append({"key": k, "status": "error", "error": str(exc)[:120]})
-                dc.record_refresh(
-                    symbol=k["symbol"], exchange=str(exch.value), interval=interv.value,
-                    rows=0, latest=None, status="error", detail=str(exc)[:120],
-                )
+        refreshed, failed, results = await _warm_cache_symbols(dm, todos)
     finally:
         dc.refresh = was_refresh
     return {"ok": True, "refreshed": refreshed, "failed": failed, "results": results}
@@ -813,11 +892,11 @@ async def factors_decay_scan():
 
 
 # --------------------------------------------------------------------------
-# 知识库（knowledge）：因子 / 策略 / 研究日志 沉淀 + 检索 + 列表
+# 知识库（knowledge）：因子 / 策略 / 研究日志 / 方法论 沉淀 + 检索 + 列表
 # --------------------------------------------------------------------------
 @app.post("/knowledge/ingest")
 async def knowledge_ingest(req: KnowledgeIngestRequest):
-    """手动写入一条知识库记录（factor | strategy | research_log）。"""
+    """手动写入一条知识库记录（factor | strategy | research_log | methodology）。"""
     service: KnowledgeService = app.state.knowledge_service
     try:
         return service.ingest(req)
@@ -841,10 +920,46 @@ async def knowledge_list(
     return service.list(kind=kind, limit=limit)
 
 
+@app.get("/runs")
+async def runs_list(limit: int = Query(30, ge=1, le=500)):
+    """端到端运行历史（最新在前）：run_id/idea/复合统计/AI brief/status。"""
+    return {"runs": KnowledgeStore().list_runs(limit=limit)}
+
+
+@app.get("/runs/{run_id}")
+async def runs_detail(run_id: str):
+    """单次运行详情：run 摘要 + 该 run 的全部因子试验明细（factor_trials）。"""
+    ks = KnowledgeStore()
+    run = ks.get_run(run_id)
+    if run is None:
+        return JSONResponse(status_code=404, content={"error": f"运行不存在: {run_id}"})
+    run["trials"] = ks.trials_for_run(run_id)
+    return run
+
+
 @app.post("/backtest")
 async def backtest(req: BacktestRequest):
     service: BacktestService = app.state.backtest_service
-    return await service.run_backtest(req)
+    result = await service.run_backtest(req)
+    if "error" not in result:
+        # 若该策略已存在于生命周期表，回填真实回测指标 + AI 判读（失败不阻断返回）
+        try:
+            if KnowledgeStore().get_strategy_lifecycle(req.strategy) is not None:
+                if "lifecycle" not in result:  # 勿覆盖既有 key
+                    result["lifecycle"] = {}
+                _judged = await _persist_backtest_lifecycle(req.strategy, result.get("risk_xray"))
+                _rec = KnowledgeStore().get_strategy_lifecycle(req.strategy)
+                if _rec is not None:
+                    result["lifecycle"] = {
+                        "state": _rec.get("state"),
+                        "status": _rec.get("status"),
+                        "reason": _rec.get("reason"),
+                        "sharpe": _rec.get("sharpe"),
+                        "max_drawdown": _rec.get("max_drawdown"),
+                    }
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("策略回测生命周期接线失败(%s): %s", req.strategy, exc)
+    return result
 
 
 @app.post("/walkforward")
@@ -871,8 +986,34 @@ async def strategy_register(req: StrategyRegisterRequest):
         lc.promote(req.name, LifecycleState.RESEARCH, metrics={}, note=f"AI生成:{req.idea[:40]}")
     except Exception:  # noqa: BLE001 晋升失败不阻断注册
         pass
+    # 关联 run_id + 写策略元信息（只在新行/尚无 run_id 时 upsert，避免覆盖已有回测指标）
+    try:
+        ks = KnowledgeStore()
+        existing = ks.get_strategy_lifecycle(req.name)
+        if existing is None or not (existing.get("run_id") or ""):
+            ks.upsert_strategy_lifecycle(
+                strategy_id=req.name,
+                run_id=req.run_id or "",
+                idea=req.idea,
+                state="RESEARCH",
+                source="AI生成",
+                code=req.code,
+                code_safe=True,       # 沙箱已通过
+                symbols=None,
+            )
+            if req.composite_fwd_ic is not None:
+                ks.update_strategy_state(req.name, composite_fwd_ic=req.composite_fwd_ic)
+    except Exception:  # noqa: BLE001 落库失败不阻断注册
+        _logger.warning("策略注册落库失败: %s", req.name)
     info["lifecycle"] = rec.state.value
-    return {"ok": True, "strategy_id": req.name, "info": info, "lifecycle": info.get("lifecycle")}
+    return {
+        "ok": True,
+        "strategy_id": req.name,
+        "run_id": req.run_id or "",
+        "info": info,
+        "lifecycle": info.get("lifecycle"),
+        "state": rec.state.value,
+    }
 
 
 @app.post("/strategies/paper")
@@ -895,7 +1036,15 @@ async def strategy_paper(req: PaperRunRequest):
     except Exception:  # noqa: BLE001 晋升失败不阻断实跑返回
         pass
     rec = lc.get_or_create(req.strategy)
-    result["lifecycle"] = rec.state.value
+    # 策略级 AI 判读 + 经验 brief 落库（失败不阻断返回）
+    _persisted = await _persist_paper_lifecycle(req.strategy, metrics)
+    if "lifecycle" not in result:  # 勿覆盖既有 key
+        result["lifecycle"] = {}
+    result["lifecycle"] = {
+        "state": rec.state.value,
+        "status": (_persisted or {}).get("status"),
+        "reason": (_persisted or {}).get("reason"),
+    }
     return result
 
 
@@ -1024,7 +1173,7 @@ async def optimize_space(strategy: str = Query("dual_ma")):
     """返回某策略的推荐搜索空间与可选目标指标。"""
     return {
         "strategy": strategy,
-        "param_space": OptimizeService.param_space_of(strategy),
+        "param_space": app.state.optimize_service.param_space_of(strategy),
         "metrics": OptimizeService.metrics(),
     }
 

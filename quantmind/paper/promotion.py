@@ -55,28 +55,99 @@ class LifecycleRecord:
     history: List[Dict] = field(default_factory=list)
     metrics: Dict = field(default_factory=dict)
     notes: List[str] = field(default_factory=list)
+    #: 可选持久化回调（由 LifecycleManager 注入）；None 时 transition 零开销。
+    _persist: Optional = field(default=None, repr=False, compare=False)
 
     def transition(self, to: LifecycleState, note: str = "") -> None:
+        old = self.state.value
         self.history.append({
-            "from": self.state.value,
+            "from": old,
             "to": to.value,
             "at": datetime.now(UTC).isoformat(),
             "note": note,
         })
         self.state = to
+        if self._persist is not None:
+            try:
+                self._persist(old, to.value, note)
+            except Exception:
+                _logger.exception("lifecycle 持久化 transition 失败（不影响内存状态）: %s",
+                                  self.strategy_id)
 
 
 class LifecycleManager:
-    """生命周期管理器。"""
+    """生命周期管理器。
 
-    def __init__(self, gate: PromotionGate | None = None) -> None:
+    可选 ``store`` 持久层（提供 get_strategy_lifecycle / update_strategy_state /
+    push_strategy_transition / upsert_strategy_lifecycle）。store 为 None 时保持
+    纯内存行为，完全向后兼容；store 存在时每次晋升/变更同步落库，重启可恢复。
+    所有 store 调用用 try/except 包裹，落库失败不影响内存状态机。
+    """
+
+    def __init__(self, gate: PromotionGate | None = None, store: Optional = None) -> None:
         self.gate = gate or PromotionGate()
+        self.store = store
         self.records: Dict[str, LifecycleRecord] = {}
 
     def get_or_create(self, strategy_id: str) -> LifecycleRecord:
-        if strategy_id not in self.records:
-            self.records[strategy_id] = LifecycleRecord(strategy_id)
-        return self.records[strategy_id]
+        if strategy_id in self.records:
+            return self.records[strategy_id]
+
+        rec = self._load_from_db(strategy_id)
+        if rec is None:
+            rec = LifecycleRecord(strategy_id)
+            # 新建时若可持久化则落一个 IDEA 初始行
+            if self.store is not None:
+                try:
+                    self.store.upsert_strategy_lifecycle(strategy_id, state="IDEA")
+                except Exception:
+                    _logger.exception("lifecycle upsert 失败：%s", strategy_id)
+        if self.store is not None:
+            rec._persist = self._make_persist(strategy_id)
+        self.records[strategy_id] = rec
+        return rec
+
+    def _make_persist(self, strategy_id: str):
+        """构造绑定到指定策略的持久化回调（供 LifecycleRecord.transition 调用）。"""
+
+        def _cb(from_state: str, to_state: str, note: str) -> None:
+            try:
+                self.store.push_strategy_transition(
+                    strategy_id, from_state, to_state, note)
+            except Exception:
+                _logger.exception("lifecycle push transition 失败：%s", strategy_id)
+
+        return _cb
+
+    def _load_from_db(self, strategy_id: str) -> Optional[LifecycleRecord]:
+        if self.store is None:
+            return None
+        try:
+            data = self.store.get_strategy_lifecycle(strategy_id)
+        except Exception:
+            _logger.exception("lifecycle get 失败：%s", strategy_id)
+            return None
+        if data is None:
+            return None
+        try:
+            state = LifecycleState(data["state"])
+        except (KeyError, ValueError):
+            state = LifecycleState.IDEA
+        history = data.get("history") or []
+        metrics: Dict = {}
+        for k in ("sharpe", "max_drawdown", "composite_fwd_ic"):
+            v = data.get(k)
+            if v is not None:
+                metrics[k] = v
+        for k in ("status", "reason"):
+            v = data.get(k)
+            if v:
+                metrics[k] = v
+        notes = [h.get("note", "") for h in history if h.get("note")]
+        return LifecycleRecord(
+            strategy_id, state=state, history=history,
+            metrics=metrics, notes=notes,
+        )
 
     def can_promote(self, rec: LifecycleRecord, to: LifecycleState) -> tuple:
         """返回 (是否可晋升, 原因列表)。"""
@@ -104,5 +175,20 @@ class LifecycleManager:
         ok, reasons = self.can_promote(rec, to)
         if not ok:
             return False, reasons
+        # transition 会触发 store.push_strategy_transition（若已注入 _persist）
         rec.transition(to, note)
+        # 晋升成功后同步状态与真实回测指标落库
+        if self.store is not None:
+            try:
+                self.store.update_strategy_state(
+                    strategy_id,
+                    state=to.value,
+                    sharpe=(metrics or {}).get("sharpe"),
+                    max_drawdown=(metrics or {}).get("max_drawdown"),
+                    status=(metrics or {}).get("status") or "",
+                    reason=(metrics or {}).get("reason", "") if metrics else "",
+                    brief=(metrics or {}).get("brief", "") if metrics else "",
+                )
+            except Exception:
+                _logger.exception("lifecycle update_strategy_state 失败：%s", strategy_id)
         return True, []

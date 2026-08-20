@@ -84,6 +84,7 @@ class FactorSearcher(BaseAlgo):
         market: str = "",
         instruction: str = "",
         search_fn: Optional[SearchFn] = None,
+        knowledge_context: Optional[dict] = None,
         **kwargs,
     ) -> SearchResult:
         """执行链式精炼搜索（== ``cot_search``）。
@@ -96,12 +97,14 @@ class FactorSearcher(BaseAlgo):
             market: 市场标识（透传评估/缓存键）。
             instruction: 附加变异方向提示。
             search_fn: 注入的候选生成函数（默认：真实 LLM 或 mock 变异器）。
+            knowledge_context: 可选历史知识库上下文（``kb_search_context`` 输出）。
+                非空时注入 LLM 搜索 prompt，让生成候选参考历史成功因子与失败避坑。
 
         Returns:
             ``SearchResult``（含轨迹 history、best 与可选 val 指标）。
         """
         evaluate_fn = self.evaluate_fn or await _default_evaluate(panel, forward_periods, market)
-        search_fn = search_fn or self._build_default_search_fn(instruction)
+        search_fn = search_fn or self._build_default_search_fn(instruction, knowledge_context)
 
         result = SearchResult(seed=seed, _best_expression=seed)
 
@@ -206,11 +209,13 @@ class FactorSearcher(BaseAlgo):
         market: str = "",
         instruction: str = "",
         search_fn: Optional[SearchFn] = None,
+        knowledge_context: Optional[dict] = None,
     ) -> SearchResult:
         """``cot_search`` 是 :meth:`run` 的向后兼容别名（等价）。"""
         return await self.run(
             seed, panel, val_panel=val_panel, forward_periods=forward_periods,
             market=market, instruction=instruction, search_fn=search_fn,
+            knowledge_context=knowledge_context,
         )
 
     # -- val 独立评估 ----------------------------------------------------------
@@ -226,10 +231,25 @@ class FactorSearcher(BaseAlgo):
             return None, None
 
     # -- 默认候选生成（真实 LLM 或 mock 变异器） ----------------------------
-    def _build_default_search_fn(self, instruction: str) -> SearchFn:
+    def _build_default_search_fn(self, instruction: str,
+                                 knowledge_context: Optional[dict] = None) -> SearchFn:
+        # 可选：把历史知识库上下文注入 LLM prompt（空则不注入，行为不变）
+        kb_block = ""
+        if knowledge_context:
+            try:
+                from .prompts import build_kb_block
+                kb_block = build_kb_block(knowledge_context) or ""
+            except Exception as exc:  # noqa: BLE001
+                _logger.debug("CoT 知识库上下文注入失败: %s", exc)
+
         async def _search(chain: str, seed: str, best: dict):
             # 优先真实 LLM
             if self.provider is not None:
+                if kb_block:
+                    chain = (
+                        "参考以上历史知识，避免重复失败模式，并尽量复用已验证的因子模式。\n"
+                        + kb_block + "\n\n" + chain
+                    )
                 resp = await self.provider.chat(SEARCH_SYSTEM, chain)
                 parsed = parse_expression_response(resp)
                 if parsed:

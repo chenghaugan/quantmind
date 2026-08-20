@@ -13,6 +13,38 @@ from utils.theme import (  # noqa: E402
 from utils.api_client import APIClient  # noqa: E402
 from utils.constants import LIFECYCLE_STATES, LIFECYCLE_DESC  # noqa: E402
 
+
+def _kb_conn_note():
+    """页面顶部显示当前知识库连接状态：真实 DB 路径 + 各类条数。
+
+    直读本地 KnowledgeStore。任何异常都降级为温和提示，绝不抛异常阻断页面；
+    某类目读取慢/异常时仅该类显示 '—'。
+    """
+    try:
+        from quantmind.knowledge import KnowledgeStore
+        ks = KnowledgeStore()
+        dbp = str(getattr(ks, "db_path", "") or "—")
+    except Exception:  # noqa: BLE001 包/库不可用则降级提示
+        st.caption("📚 知识库：后端/本地库不可用（页面仍可正常使用，从项目根启动可连到 db/knowledge.db）")
+        return
+    counts = {}
+    for kind in ("factor", "strategy", "methodology", "research_log"):
+        try:
+            counts[kind] = len(ks.list_items(kind=kind, limit=500))
+        except Exception:  # noqa: BLE001 单类读取失败仅该类降级
+            counts[kind] = "—"
+    try:
+        counts["lifecycle"] = len(ks.list_strategy_lifecycles())
+    except Exception:  # noqa: BLE001
+        counts["lifecycle"] = "—"
+    st.caption(
+        f"📚 知识库：<code>{dbp}</code> ｜ 因子 {counts['factor']} · "
+        f"策略 {counts['strategy']} · 方法论 {counts['methodology']} · "
+        f"研究日志 {counts['research_log']} · 生命周期 {counts['lifecycle']}",
+        unsafe_allow_html=True,
+    )
+
+
 setup_page("生命周期", "🔄")
 page_header(
     "策略生命周期",
@@ -20,11 +52,52 @@ page_header(
     "🔄",
 )
 
+_kb_conn_note()
+
 note(
     "流程：**IDEA → RESEARCH → BACKTEST → PAPER → APPROVED → LIVE**。"
     "晋升只能按顺序、不可跳级；到达 LIVE 前需满足 Sharpe、回撤、模拟天数与风险审查等闸门。",
     "info",
 )
+
+# ----------------------------------------------------------------- 生命周期一览（已落库）
+section("📊 生命周期一览（已落库）")
+try:
+    from quantmind.knowledge import KnowledgeStore  # 本地包，随页加载，降级不阻断
+except Exception:  # noqa: BLE001 包不可用则降级
+    KnowledgeStore = None
+if KnowledgeStore is not None:
+    try:
+        _lc_recs = KnowledgeStore().list_strategy_lifecycles(limit=200)
+    except Exception:  # noqa: BLE001 库未初始化/不可读则降级
+        _lc_recs = []
+else:
+    _lc_recs = []
+if not _lc_recs:
+    note("暂无已落库的策略生命周期记录（注册/回测/模拟盘后自动入库，本地库 `db/knowledge.db`）。", "info")
+else:
+    _lc_rows = []
+    for _rec in _lc_recs:
+        _st = _rec.get("status") or ""
+        _st_badge = badge(
+            _st or "—",
+            "success" if _st in ("verified", "paper", "backtested", "approved", "live")
+            else ("danger" if _st == "rejected" else "warning"),
+        )
+        _sharpe = _rec.get("sharpe")
+        _mdd = _rec.get("max_drawdown")
+        _lc_rows.append({
+            "策略ID": _rec.get("strategy_id") or "—",
+            "阶段": badge(_rec.get("state") or "—", "info"),
+            "判读": _st_badge,
+            "来源run_id": _rec.get("run_id") or "—",
+            "想法": _rec.get("idea") or "—",
+            "Sharpe": (f"{_sharpe:.3f}" if _sharpe is not None else "—"),
+            "MaxDD": (f"{_mdd:.3f}" if _mdd is not None else "—"),
+            "判读理由": _rec.get("reason") or "—",
+        })
+    st.dataframe(pd.DataFrame(_lc_rows), width="stretch", hide_index=True)
+    st.caption("💡 晋升前可先查看 AI 判读历史，避免对已 rejected 的策略重复晋升。")
 
 # ----------------------------------------------------------------- 闸门说明
 with st.expander("📋 晋升闸门要求", expanded=False):

@@ -26,6 +26,65 @@ note(
     "info",
 )
 
+# ------------------------------------------------------------ 0. 领域知识获取（阶段A）
+def _render_knowledge_block(knowledge: dict) -> None:
+    """渲染「领域知识获取」区块：知识来源 → 定义/买卖规则 → 候选因子方向。
+
+    数据来自后端 result['knowledge']（{concept, definition, buy_signal_rules,
+    candidate_factors, sources, kb_hits}）。缺失任一字段都静默跳过，绝不让页面报错。
+    """
+    if not isinstance(knowledge, dict) or not knowledge:
+        note("⚠️ 本次结果未启用知识增强（后端未返回 knowledge 字段）。", "warning")
+        return
+
+    with st.expander("📚 领域知识获取（阶段A）", expanded=True):
+        # 1. 知识来源
+        sources = knowledge.get("sources") or []
+        kb_hits = knowledge.get("kb_hits")
+        if sources or kb_hits:
+            st.markdown("**① 知识来源**")
+            if isinstance(sources, list) and sources:
+                for src in sources:
+                    if isinstance(src, str) and src:
+                        st.caption(f"· {src}")
+                    elif isinstance(src, dict):
+                        st.caption("· " + " | ".join(str(v) for v in src.values() if v))
+            if kb_hits:
+                st.caption(f"· 库内方法论命中 {kb_hits} 条")
+        else:
+            st.caption("① 知识来源：无")
+
+        # 2. 定义 + 买卖规则
+        definition = knowledge.get("definition")
+        concept = knowledge.get("concept")
+        rules = knowledge.get("buy_signal_rules")
+        if definition or concept:
+            st.markdown("**② 定义 (definition)**")
+            st.write(definition or concept)
+        if rules:
+            st.markdown("**③ 买卖规则 (buy_signal_rules)**")
+            if isinstance(rules, str):
+                st.write(rules)
+            else:
+                st.json(rules)
+
+        # 3. 候选因子方向
+        cands = knowledge.get("candidate_factors")
+        if cands:
+            st.markdown("**④ 候选因子方向 (candidate_factors)**")
+            if isinstance(cands, str):
+                st.write(cands)
+            else:
+                st.dataframe(
+                    pd.DataFrame([{"候选因子": c if isinstance(c, str) else str(c)}
+                                  for c in cands]),
+                    use_container_width=True, hide_index=True,
+                )
+
+
+# 页面上方展示：优先用本次/上次挖掘返回的知识字段，否则提示未启用增强
+_render_knowledge_block(st.session_state.get("mined_knowledge") or {})
+
 # ---------------------------------------------------------------- 1. 因子选择
 section("1️⃣ 选择因子")
 
@@ -113,6 +172,9 @@ if st.button("🚀 开始挖掘", type="primary", use_container_width=True):
     if not result.get("ok"):
         verdict(f"策略设计失败：{result.get('error', '未知错误')}", "bad")
         st.stop()
+
+    # 保存知识字段到 session state（供页面上方「领域知识获取」区块展示）
+    st.session_state["mined_knowledge"] = result.get("knowledge") or {}
 
     # 保存 spec 到 session state
     spec = result["spec"]

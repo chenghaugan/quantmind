@@ -86,3 +86,19 @@ def test_strategies_paper_unknown_strategy(client):
     })
     assert r.status_code == 400
     assert "未注册" in r.json()["error"]
+
+
+def test_runs_endpoints(client):
+    """历史运行报告端点：/runs 返回列表形状，/runs/{不存在} 返回 404。"""
+    r = client.get("/runs")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body.get("runs", None), list)
+    # 若库里有 run，则其详情端点可用且含 trials 字段
+    if body.get("runs"):
+        rid = body["runs"][0]["run_id"]
+        d = client.get(f"/runs/{rid}")
+        assert d.status_code == 200
+        assert "trials" in d.json() and "metadata" in d.json()
+    r404 = client.get("/runs/run-does-not-exist-xyz")
+    assert r404.status_code == 404

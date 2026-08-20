@@ -29,9 +29,6 @@ def _no_network(monkeypatch):
     u._mem_cache.clear()
 
 
-def _reset_disk():
-    import shutil
-    shutil.rmtree(u._CACHE_DIR, ignore_errors=True)
 
 
 def test_index_baskets_in_choices():
@@ -77,3 +74,45 @@ def test_exchange_mapping():
     assert u._exchange_of("000001") == "SZSE"
     assert u._exchange_of("300750") == "SZSE"
     assert u._exchange_of("002594") == "SZSE"
+
+
+def test_no_orphaned_pages():
+    """侧栏 NAV_GROUPS 必须覆盖 pages/ 下每个页面，防止出现不可达的"藏页"。
+
+    每个 quantmind/web/pages/*.py 都应在 NAV_GROUPS 里有对应入口（首页 streamlit_app.py 除外）。
+    若是新增页面而忘了加侧栏入口，本测试会失败，倒逼维护者在发布前登记。
+    """
+    from utils.theme import NAV_GROUPS
+
+    targets = set()
+    for _group, items in NAV_GROUPS:
+        for _label, tgt, _icon in items:
+            targets.add(tgt)
+
+    pages_dir = _WEB / "pages"
+    for page in sorted(pages_dir.glob("*.py")):
+        assert f"pages/{page.name}" in targets, (
+            f"页面 {page.name} 未登记到侧栏 NAV_GROUPS（藏页）"
+        )
+
+
+def test_build_strategy_options_merges_mined(monkeypatch):
+    """下拉选项合并：内置策略 + 后端返回的 AI 挖掘/注册策略。"""
+    from utils.api_client import APIClient
+
+    # 模拟后端返回 5 内置 + 1 挖掘策略
+    fake = [
+        {"name": "dual_ma", "description": "双均线"},
+        {"name": "RebarMomentumStrategy", "description": "AI挖掘:螺纹钢动量"},
+    ]
+    monkeypatch.setattr(APIClient, "strategies", staticmethod(lambda timeout=10: fake))
+    opts = APIClient.build_strategy_options(timeout=1)
+    assert "dual_ma" in opts
+    assert "RebarMomentumStrategy" in opts
+    assert opts["RebarMomentumStrategy"]["name"] == "RebarMomentumStrategy"
+    # 后端离线时退回内置且不崩
+    def boom(*a, **k):
+        raise RuntimeError("no backend")
+    monkeypatch.setattr(APIClient, "strategies", staticmethod(boom))
+    opts2 = APIClient.build_strategy_options(timeout=1)
+    assert "multifactor" in opts2

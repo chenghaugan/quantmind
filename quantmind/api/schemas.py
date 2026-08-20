@@ -119,6 +119,8 @@ class StrategyRegisterRequest(BaseModel):
     name: str
     code: str
     idea: str = ""
+    run_id: str = ""            # 来源 e2e run_id（策略来源，可缺省）
+    composite_fwd_ic: Optional[float] = None  # 来源 run 的 composite_fwd_ic（可缺省）
 
 
 class StrategyInfo(BaseModel):
@@ -409,6 +411,11 @@ class FactorE2ERequest(BaseModel):
     verify_threshold: float = 0.02
     run_search: bool = False
     max_rounds: int = 2
+    # 领域知识增强层
+    use_knowledge: bool = True            # 是否在 idea→因子 前注入领域知识
+    web_fallback: bool = True             # 库内方法论命中不足时是否联网补充
+    # 方法论知识层：当 e2e 返回 needs_input 时，用户补充的方法论说明（提交后先入库再重跑）
+    methodology_input: Optional[str] = None
     # 是否把结果沉淀进知识库
     ingest_knowledge: bool = True
 

@@ -169,3 +169,46 @@ def test_no_cache_preserves_old_behavior():
     bars = asyncio.run(dm.get_bar_data(req, source_sink=sink))
     assert len(bars) == 30
     assert sink["rb0"] == "fake_real"
+
+
+def test_cache_warm_refresh_unified_schema(tmp_path):
+    """/data/cache 的 warm 与 refresh 共用 _warm_cache_symbols，返回统一结果 schema。
+
+    校验 page 19 依赖的字段（key/status/n/source/error）在两种 scope 下一致，
+    防止 warm（曾返回 {warmed,...}）与 refresh（{refreshed,...}）schema 回退分叉。
+    """
+    from quantmind.api.app import _warm_cache_symbols
+
+    feed = _FakeRealFeed()
+    dm = _make_dm(str(tmp_path), feed)
+
+    # warm 语义：显式标的 + 日线
+    todos = [("rb0", "SHFE", "1d", None, None), ("hc0", "SHFE", "1d", None, None)]
+    refreshed, failed, results = asyncio.run(_warm_cache_symbols(dm, todos))
+    assert (refreshed, failed) == (2, 0)
+    assert len(results) == 2
+    for r in results:
+        # page 19 依赖字段必须齐全
+        assert r["status"] == "ok"
+        assert r["n"] == feed.n
+        assert r["source"] == "fake_real"
+        assert set(r["key"]) == {"symbol", "exchange", "interval"}
+        assert r["key"]["symbol"] in {"rb0", "hc0"}
+
+    # refresh 语义：已缓存键（含坏交易所/周期 -> bad_key 计入 failed）
+    todos_bad = [
+        ("rb0", "SHFE", "1d", None, None),
+        ("bad1", "NOT_A_REAL_EXCHANGE", "1d", None, None),
+        ("bad2", "SHFE", "not-an-interval", None, None),
+    ]
+    refreshed, failed, results = asyncio.run(_warm_cache_symbols(dm, todos_bad))
+    assert refreshed == 1 and failed == 2
+    statuses = {r["status"] for r in results}
+    assert statuses == {"ok", "bad_key"}
+    # bad 记录不尝试真实源，无 n
+    for r in results:
+        assert "key" in r and ("n" in r or "error" in r)
+
+    # 空 todos 幂等
+    r_, f_, res_ = asyncio.run(_warm_cache_symbols(dm, []))
+    assert (r_, f_, len(res_)) == (0, 0, 0)

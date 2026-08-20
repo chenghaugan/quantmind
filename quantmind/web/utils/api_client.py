@@ -20,55 +20,31 @@ class APIClient:
     """QuantMind REST API 客户端"""
 
     @staticmethod
-    def _close():
+    def _request(method: str, path: str, timeout: int = 30, **kwargs) -> Dict:
         try:
-            _HTTP.close()
-        except Exception:
-            pass
+            r = _HTTP.request(method, f"{API_URL}{path}", timeout=timeout, **kwargs)
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPError as e:
+            return {"error": f"HTTP 错误: {e}"}
+        except Exception as e:
+            return {"error": str(e)}
 
     @staticmethod
     def get(path: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict:
-        try:
-            r = _HTTP.get(f"{API_URL}{path}", params=params, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except httpx.HTTPError as e:
-            return {"error": f"HTTP 错误: {e}"}
-        except Exception as e:
-            return {"error": str(e)}
+        return APIClient._request("GET", path, timeout=timeout, params=params)
 
     @staticmethod
     def post(path: str, json: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict:
-        try:
-            r = _HTTP.post(f"{API_URL}{path}", json=json or {}, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except httpx.HTTPError as e:
-            return {"error": f"HTTP 错误: {e}"}
-        except Exception as e:
-            return {"error": str(e)}
+        return APIClient._request("POST", path, timeout=timeout, json=json or {})
 
     @staticmethod
     def put(path: str, json: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict:
-        try:
-            r = _HTTP.put(f"{API_URL}{path}", json=json or {}, timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except httpx.HTTPError as e:
-            return {"error": f"HTTP 错误: {e}"}
-        except Exception as e:
-            return {"error": str(e)}
+        return APIClient._request("PUT", path, timeout=timeout, json=json or {})
 
     @staticmethod
     def delete(path: str, timeout: int = 30) -> Dict:
-        try:
-            r = _HTTP.delete(f"{API_URL}{path}", timeout=timeout)
-            r.raise_for_status()
-            return r.json()
-        except httpx.HTTPError as e:
-            return {"error": f"HTTP 错误: {e}"}
-        except Exception as e:
-            return {"error": str(e)}
+        return APIClient._request("DELETE", path, timeout=timeout)
 
     @staticmethod
     def health(timeout: int = 5) -> Dict:
@@ -211,6 +187,33 @@ class APIClient:
         return APIClient.get("/strategies", timeout=timeout)
 
     @staticmethod
+    def build_strategy_options(timeout: int = 10) -> Dict[str, Dict]:
+        """合并内置策略与后端运行中的 AI 挖掘/注册策略，供回测/优化/WalkForward 下拉使用。
+
+        返回 {key: {name, desc, params}}：内置策略文案取自 ``utils.constants.STRATEGIES``，
+        运行期策略（挖掘/注册）从 ``GET /strategies`` 生成。后端离线时退回内置。
+        """
+        from .constants import STRATEGIES as _builtin
+
+        options = {
+            k: {"name": v.get("name", k), "desc": v.get("desc", ""), "params": v.get("params", {})}
+            for k, v in _builtin.items()
+        }
+        try:
+            for s in APIClient.strategies(timeout=timeout):
+                key = s.get("name")
+                if not key:
+                    continue
+                options.setdefault(key, {
+                    "name": key,
+                    "desc": s.get("description") or "AI 挖掘策略",
+                    "params": s.get("parameters") or {},
+                })
+        except Exception:  # noqa: BLE001  后端离线时退回内置
+            pass
+        return options
+
+    @staticmethod
     def strategy_register(name: str, code: str, idea: str = "", timeout: int = 30) -> Dict:
         """注册 AI 生成策略（POST /strategies/register）。"""
         return APIClient.post("/strategies/register",
@@ -340,12 +343,32 @@ class APIClient:
         return APIClient.post("/knowledge/search", json=json, timeout=timeout)
 
     @staticmethod
-    def knowledge_list(kind: Optional[str] = None, timeout: int = 30) -> Dict:
-        """知识库条目列表（GET /knowledge）。"""
+    def knowledge_list(kind: Optional[str] = None, limit: Optional[int] = None,
+                       timeout: int = 30) -> Dict:
+        """知识库条目列表（GET /knowledge）。
+
+        ``kind`` 可选值：factor / strategy / research_log / methodology。
+        ``limit`` 为可选条数上限（后端不要求时可不传）。
+        """
         params: Dict[str, Any] = {}
         if kind:
             params["kind"] = kind
+        if limit is not None:
+            params["limit"] = int(limit)
         return APIClient.get("/knowledge", params=params, timeout=timeout)
+
+    @staticmethod
+    def runs(limit: Optional[int] = None, timeout: int = 30) -> Dict:
+        """端到端运行历史列表（GET /runs）。"""
+        params: Dict[str, Any] = {}
+        if limit is not None:
+            params["limit"] = int(limit)
+        return APIClient.get("/runs", params=params, timeout=timeout)
+
+    @staticmethod
+    def run_detail(run_id: str, timeout: int = 30) -> Dict:
+        """单次运行详情：run 摘要 + 因子试验明细（GET /runs/{run_id}）。"""
+        return APIClient.get(f"/runs/{run_id}", timeout=timeout)
 
     # ------------------------------------------------------------------
     # 席位因子（商品期货）

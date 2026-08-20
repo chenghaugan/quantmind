@@ -12,7 +12,7 @@ from utils.theme import (  # noqa: E402
     kpi_row, fmt_num, fmt_pct, tone_of, badge,
 )
 from utils.api_client import APIClient  # noqa: E402
-from utils.constants import STRATEGIES, EXCHANGES, EXCHANGE_NAMES, INTERVALS, INTERVAL_NAMES  # noqa: E402
+from utils.constants import EXCHANGES, EXCHANGE_NAMES, INTERVALS, INTERVAL_NAMES  # noqa: E402
 from utils.charts import create_optimize_scatter  # noqa: E402
 
 setup_page("参数优化", "🎛️")
@@ -30,8 +30,9 @@ note(
 # ----------------------------------------------------------------- 策略 & 空间
 cl, cr = st.columns([1, 2], gap="medium")
 with cl:
-    strategy = st.selectbox("策略", list(STRATEGIES.keys()),
-                            format_func=lambda k: f"{STRATEGIES[k]['name']} — {STRATEGIES[k]['desc']}")
+    _opts = APIClient.build_strategy_options()
+    strategy = st.selectbox("策略", list(_opts.keys()),
+                            format_func=lambda k: f"{_opts[k]['name']} — {_opts[k]['desc']}")
     method = st.radio(
         "优化方法",
         ["网格搜索", "Optuna 贝叶斯"],
@@ -80,16 +81,15 @@ with cr:
                 lo2 = st.number_input(f"{name} 步长", value=1, min_value=1, step=1, key=f"st_{name}")
             param_ranges[name] = [int(low), int(high), int(lo2)]
 
+    metric_labels = dict((m["key"], m["label"]) for m in metrics) if metrics else {}
     metric = st.selectbox("优化指标",
                           [m["key"] for m in metrics] if metrics else ["sharpe"],
-                          format_func=lambda k: dict((m["key"], m["label"]) for m in metrics).get(
-                              k, k) if metrics else k,
+                          format_func=lambda k: metric_labels.get(k, k),
                           index=0)
     capital = st.number_input("初始资金", value=1_000_000, step=100_000, format="%d")
     if method == "Optuna 贝叶斯":
         n_trials = st.number_input("试验次数", value=30, min_value=1, step=10,
                                    help="Optuna 最多采样的参数组合数")
-        n_trials = int(n_trials)
     else:
         n_trials = 0
         max_combos = st.number_input("组合数上限", value=200, min_value=1, step=10)
@@ -128,12 +128,12 @@ if method == "Optuna 贝叶斯":
     payload["n_trials"] = n_trials
     payload["max_combos"] = n_trials
     api_call = APIClient.optimize_optuna
-    spinner_txt = f"正在 Optuna 贝叶斯搜索 {combos} 次试验（{STRATEGIES[strategy]['name']}）…"
+    spinner_txt = f"正在 Optuna 贝叶斯搜索 {combos} 次试验（{_opts[strategy]['name']}）…"
 else:
     payload["param_space"] = chosen
     payload["max_combos"] = int(max_combos)
     api_call = APIClient.optimize
-    spinner_txt = f"正在网格搜索 {combos} 个组合（{STRATEGIES[strategy]['name']}）…"
+    spinner_txt = f"正在网格搜索 {combos} 个组合（{_opts[strategy]['name']}）…"
 
 with st.spinner(spinner_txt):
     res = api_call(payload)

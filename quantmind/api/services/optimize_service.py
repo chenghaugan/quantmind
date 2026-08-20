@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
-import math
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -16,7 +14,8 @@ from ...core.contracts import default_size
 from ...data import DataManager
 from ...data.feed.base import HistoryRequest
 from ...backtest.optimizer import grid_search, optuna_optimize
-from .backtest_service import _STRATEGY_MAP
+from .backtest_service import _STRATEGY_MAP, _sanitize
+from ...strategy.mined import MINED_STRATEGIES
 
 
 _logger = logging.getLogger("quantmind.api")
@@ -24,9 +23,19 @@ _logger = logging.getLogger("quantmind.api")
 # 各策略推荐的搜索空间（Web 端默认填充）
 DEFAULT_PARAM_SPACE: Dict[str, Dict[str, List[Any]]] = {
     "dual_ma": {"fast": [3, 5, 10, 15], "slow": [20, 30, 40, 60]},
-    "multifactor": {"lookback": [10, 20, 40], "top_n": [1, 2, 3]},
+    # multifactor 仅 size/max_pos（及 specs）真正影响结果；lookback/top_n/threshold 均不生效。
+    "multifactor": {"size": [1, 3, 5, 10], "max_pos": [0.5, 1.0, 2.0]},
     "vol_target": {"target_vol": [0.10, 0.15, 0.20], "lookback": [20, 40, 60]},
     "pair": {"window": [20, 40, 60], "entry_z": [1.5, 2.0, 2.5]},
+}
+
+# AI 挖掘策略的通用参数空间（按类 parameters 字段生成）
+_MINE_SPACE_HINTS: Dict[str, List[Any]] = {
+    "threshold": [0.2, 0.4, 0.6],
+    "size": [1, 5, 10],
+    "max_pos": [0.5, 1.0],
+    "trend_window": [40, 60, 90],
+    "break_window": [10, 20, 30],
 }
 
 METRICS = [
@@ -37,32 +46,41 @@ METRICS = [
 ]
 
 
-def _sanitize(o: Any) -> Any:
-    if isinstance(o, float):
-        return o if math.isfinite(o) else None
-    if isinstance(o, dict):
-        return {k: _sanitize(v) for k, v in o.items()}
-    if isinstance(o, (list, tuple)):
-        return [_sanitize(x) for x in o]
-    return o
-
-
 class OptimizeService:
-    def __init__(self, dm: DataManager):
+    def __init__(self, dm: DataManager, resolver=None):
         self.dm = dm
+        # 策略解析器：默认只覆盖内置 + 规范挖掘类；由 app 注入 BacktestService 的
+        # _resolve_strategy_class 可一并解析 knowledge.db 已沉淀策略，保证
+        # 「页11 下拉能选 = /optimize 一定能跑」的一致性契约。
+        self._resolve = resolver or self._default_resolve
 
     @staticmethod
-    def param_space_of(strategy: str) -> Dict[str, List[Any]]:
-        return DEFAULT_PARAM_SPACE.get(strategy, {})
+    def _default_resolve(name: str):
+        return _STRATEGY_MAP.get(name) or MINED_STRATEGIES.get(name)
+
+    def param_space_of(self, strategy: str) -> Dict[str, List[Any]]:
+        if strategy in DEFAULT_PARAM_SPACE:
+            return dict(DEFAULT_PARAM_SPACE[strategy])
+        # AI 挖掘/注册策略：按其类 parameters 字段给一组通用搜索空间
+        cls = self._resolve(strategy)
+        if cls is not None:
+            space: Dict[str, List[Any]] = {}
+            for p in getattr(cls, "parameters", []):
+                if p in _MINE_SPACE_HINTS:
+                    space[p] = list(_MINE_SPACE_HINTS[p])
+            return space
+        return {}
 
     @staticmethod
     def metrics() -> List[dict]:
         return [{"key": k, "label": v} for k, v in METRICS]
 
     async def optimize(self, req) -> dict:
-        strategy_class = _STRATEGY_MAP.get(req.strategy)
+        strategy_class = self._resolve(req.strategy)
         if strategy_class is None:
-            raise ValueError(f"未知策略: {req.strategy}（可选: {list(_STRATEGY_MAP)}）")
+            raise ValueError(
+                f"未知策略: {req.strategy}（可选: {list(_STRATEGY_MAP) + list(MINED_STRATEGIES)}）"
+            )
 
         method = getattr(req, "method", "grid") or "grid"
         if method == "optuna":

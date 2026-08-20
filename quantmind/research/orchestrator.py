@@ -55,6 +55,9 @@ class E2EConfig:
     verify_threshold: float = 0.02        # |IC| 通过阈值（Hypothesis VERIFIED 依据）
     run_search: bool = False              # 是否在证据阶段额外跑 CoT 搜索改进
     max_rounds: int = 2                   # 证据阶段 CoT 轮数
+    # -- 领域知识增强层 --
+    use_knowledge: bool = True            # 是否在 idea→因子 前注入领域知识
+    web_fallback: bool = True             # 库内方法论命中不足时是否联网补充
     # -- 因子挖掘阶段（B 线，透传 PipelineConfig）--
     seeds: Optional[List[str]] = None     # 用户提供的额外种子；None → 用证据阶段产出的种子
     algo: str = "co"                      # co | ea | tot
@@ -73,6 +76,8 @@ class E2EConfig:
     cost_rate: float = 0.0
     max_candidates: int = 8
     persist_pairs: bool = False           # 编排器默认不额外落库，由知识库负责沉淀
+    # 持续学习闭环：历史知识库上下文（success/fail/briefs）注入挖掘搜索 LLM prompt
+    knowledge_context: Optional[dict] = None
     # -- 策略代码生成阶段 --
     code_threshold: float = 0.3
     code_size: int = 1
@@ -89,6 +94,7 @@ def run_e2e(
     provider: Optional[LLMProvider] = None,
     val_panel: Optional[Panel] = None,
     test_panel: Optional[Panel] = None,
+    knowledge_context: Optional[dict] = None,
 ) -> Dict[str, object]:
     """运行端到端编排：AI 证据研究 → 因子挖掘 → OOS 复合 alpha → 策略代码生成。
 
@@ -98,6 +104,8 @@ def run_e2e(
         provider: LLM provider；None → Mock（离线可跑/可测）。
         val_panel: 可选验证期面板（透传给挖掘阶段的 val 报告）。
         test_panel: 可选测试期面板（透传给挖掘阶段的 OOS 回测）。
+        knowledge_context: 可选历史知识库上下文（``kb_search_context`` 输出）。
+            None → 不注入，搜索保持原行为；非空 → 注入挖掘阶段 co/ea/tot 的 LLM prompt。
 
     Returns:
         统一契约 dict::
@@ -109,6 +117,8 @@ def run_e2e(
               "pipeline": { "config": {...}, "summary": {...}, "steps": [...],
                             "composite": {...} },
               "strategy": { "code", "code_safe", "code_errors", "lookahead" },
+              "knowledge": { concept, definition, buy_signal_rules,
+                             candidate_factors, sources, kb_hits }  # 或空 dict
             }
     """
     # 函数级延迟导入 ai.*（见模块顶部注释，避免加载期循环导入）
@@ -127,7 +137,9 @@ def run_e2e(
     # =====================================================================
     # 阶段 1：AI 证据研究（A 线）——真实面板 IC 验证，回灌种子
     # =====================================================================
-    agent = AutoResearchAgent(provider=provider)
+    agent = AutoResearchAgent(provider=provider,
+                              use_knowledge=config.use_knowledge,
+                              web_fallback=config.web_fallback)
     evidence = asyncio.run(agent.research_with_evidence(
         config.idea,
         panel,
@@ -139,6 +151,28 @@ def run_e2e(
         max_rounds=config.max_rounds,
         use_cache=False,
     ))
+
+    # 方法论知识层护栏：无法忠实实现时提前返回（请用户补充信息），跳过挖掘与代码生成。
+    if getattr(evidence, "needs_input", None):
+        return {
+            "idea": config.idea,
+            "client_ready": True,
+            "needs_input": {"missing": list(evidence.needs_input)},
+            "evidence": {
+                "hypotheses": [
+                    {"id": h.id, "statement": h.statement,
+                     "status": _hypothesis_repr(h.status), "evidence": h.evidence}
+                    for h in evidence.hypotheses
+                ],
+                "factors": [],
+                "verified_exprs": [],
+                "fact_sheet": dict(evidence.fact_sheet or {}),
+            },
+            "pipeline": None,
+            "strategy": {"code": "", "code_safe": False, "code_errors": [],
+                          "lookahead": []},
+            "knowledge": evidence.knowledge or {},
+        }
 
     # 提取 VERIFIED 因子表达式（含证据阶段写回的 spec.expression）
     verified_exprs: List[str] = []
@@ -183,6 +217,9 @@ def run_e2e(
         cost_rate=config.cost_rate,
         max_candidates=config.max_candidates,
         persist_pairs=config.persist_pairs,
+        knowledge_context=(
+            knowledge_context if knowledge_context is not None else config.knowledge_context
+        ),
     )
     pipeline_report = run_pipeline(
         panel,
@@ -254,6 +291,7 @@ def run_e2e(
             "code_errors": list(errors),
             "lookahead": list(lookahead),
         },
+        "knowledge": evidence.knowledge or {},
     }
 
 

@@ -12,7 +12,7 @@ from utils.theme import (  # noqa: E402
     kpi_row, fmt_pct, fmt_num, tone_of, badge,
 )
 from utils.api_client import APIClient  # noqa: E402
-from utils.constants import EXCHANGES, STRATEGIES  # noqa: E402
+from utils.constants import EXCHANGES  # noqa: E402
 from utils.charts import create_fold_chart, create_returns_histogram  # noqa: E402
 
 setup_page("Walk-Forward", "🔁")
@@ -32,9 +32,10 @@ note(
 cl, cr = st.columns([1, 2], gap="medium")
 with cl:
     st.markdown("**策略配置**")
+    opts = APIClient.build_strategy_options()
     strategy_key = st.selectbox(
-        "策略", list(STRATEGIES.keys()),
-        format_func=lambda k: f"{STRATEGIES[k]['name']} — {STRATEGIES[k]['desc']}",
+        "策略", list(opts.keys()),
+        format_func=lambda k: f"{opts[k]['name']} — {opts[k]['desc']}",
     )
     asset_class = st.selectbox("资产类别", list(EXCHANGES.keys()))
     exchange = st.selectbox("交易所", EXCHANGES[asset_class])
@@ -69,7 +70,7 @@ payload = {
     "train_window": train_window, "test_window": test_window, "step": step,
     "capital": capital, "cost": cost_model,
 }
-with st.spinner(f"正在运行 Walk-Forward 验证（{STRATEGIES[strategy_key]['name']}）…"):
+with st.spinner(f"正在运行 Walk-Forward 验证（{opts[strategy_key]['name']}）…"):
     result = APIClient.post("/walkforward", json=payload, timeout=180)
 
 if guard_error(result, "Walk-Forward"):

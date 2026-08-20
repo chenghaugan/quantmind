@@ -23,7 +23,39 @@ from utils.theme import (  # noqa: E402
 from utils.api_client import APIClient  # noqa: E402
 from utils.constants import (  # noqa: E402
     BASKET_CHOICES, resolve_basket_symbols, ALL_EXCHANGES, EXCHANGE_NAMES,
+    INTERVALS, INTERVAL_NAMES,
 )
+
+
+def _kb_conn_note():
+    """页面顶部显示当前知识库连接状态：真实 DB 路径 + 各类条数。
+
+    直读本地 KnowledgeStore。任何异常都降级为温和提示，绝不抛异常阻断页面；
+    某类目读取慢/异常时仅该类显示 '—'。
+    """
+    try:
+        from quantmind.knowledge import KnowledgeStore
+        ks = KnowledgeStore()
+        dbp = str(getattr(ks, "db_path", "") or "—")
+    except Exception:  # noqa: BLE001 包/库不可用则降级提示
+        st.caption("📚 知识库：后端/本地库不可用（页面仍可正常使用，从项目根启动可连到 db/knowledge.db）")
+        return
+    counts = {}
+    for kind in ("factor", "strategy", "methodology", "research_log"):
+        try:
+            counts[kind] = len(ks.list_items(kind=kind, limit=500))
+        except Exception:  # noqa: BLE001 单类读取失败仅该类降级
+            counts[kind] = "—"
+    try:
+        counts["lifecycle"] = len(ks.list_strategy_lifecycles())
+    except Exception:  # noqa: BLE001
+        counts["lifecycle"] = "—"
+    st.caption(
+        f"📚 知识库：<code>{dbp}</code> ｜ 因子 {counts['factor']} · "
+        f"策略 {counts['strategy']} · 方法论 {counts['methodology']} · "
+        f"研究日志 {counts['research_log']} · 生命周期 {counts['lifecycle']}",
+        unsafe_allow_html=True,
+    )
 
 
 def _flow(steps):
@@ -51,6 +83,64 @@ def _status_tone(status: Optional[str]) -> str:
     return "muted"
 
 
+def _render_history():
+    """端到端运行历史报告：列出历史 run（idea/时间/复合统计/AI brief），选中可看因子试验明细。"""
+    st.markdown("#### 📜 历史运行报告")
+    data = APIClient.runs(limit=50, timeout=15)
+    runs = (data or {}).get("runs") or []
+    if not runs:
+        note("暂无历史运行记录。跑完一次「端到端流水线」即会留存（含复合 alpha 统计与 AI 经验简报）。", "info")
+        return
+    labels = {}
+    for r in runs:
+        md = r.get("metadata") or {}
+        idea = str(md.get("idea") or "—")
+        created = str(r.get("created_at") or "")[:19]
+        status = str(md.get("status") or "")
+        labels[r["run_id"]] = f"{created} ｜ {idea} ｜ {status}"
+    page = st.selectbox("选择运行记录", list(labels),
+                        format_func=lambda k: labels.get(k, k))
+    if page != st.session_state.get("hist_sel") or st.button("🔄 加载该次报告"):
+        st.session_state["hist_sel"] = page
+        st.session_state["hist_detail"] = APIClient.run_detail(page, timeout=20)
+    det = st.session_state.get("hist_detail") or {}
+    if guard_error(det, "运行详情"):
+        return
+    md = det.get("metadata") or {}
+    kpi_row({
+        "复合前向IC": fmt_num(md.get("composite_fwd_ic"), 4),
+        "复合Sharpe": fmt_num(md.get("composite_sharpe"), 3),
+        "代表因子": str(md.get("n_representative") or 0),
+        "已验证假设": str(md.get("n_verified_hypotheses") or 0),
+        "算法": str(md.get("algo") or "—"),
+    })
+    with st.expander("📝 AI 经验简报", expanded=False):
+        st.write(str(md.get("brief") or "（无简报）"))
+    trials = det.get("trials") or []
+    if not trials:
+        note("该次运行暂无因子试验明细。", "info")
+        return
+    rows = []
+    for t in trials:
+        m = t.get("metadata") or {}
+        is_rep = bool(m.get("is_representative"))
+        rows.append({
+            "表达式": (str(m.get("expression") or ""))[:42],
+            "判定": m.get("status") or "",
+            "代表": "★" if is_rep else "",
+            "trainIC": fmt_num(m.get("train_ic"), 4),
+            "valIC": fmt_num(m.get("val_ic"), 4),
+            "testIC": fmt_num(m.get("test_ic"), 4),
+            "testSharpe": fmt_num(m.get("test_sharpe"), 3),
+            "收益%": fmt_num(m.get("test_return"), 2),
+            "回撤%": fmt_num(m.get("test_mdd"), 2),
+            "判读理由": str(m.get("reason") or ""),
+        })
+    st.caption(f"共 {len(rows)} 条因子试验（★=去冗余后的代表因子）")
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
+
 #: 指数/全A 股票池在端到端流水线中默认展开到的标的数上限
 #  （截面因子挖掘对每标的跑多轮 OOS 回测，全量沪深300/中证2000会非常慢，故默认截断）
 _DEFAULT_POOL = 40
@@ -63,6 +153,14 @@ page_header(
     "整条研究链一次跑通并整页可视化。",
     "🚀",
 )
+
+_kb_conn_note()
+
+# 视图切换：运行流水线 / 历史运行报告（历史上屏时不进入下方运行表单）
+_view = st.radio("视图", ["🚀 运行流水线", "📜 历史运行报告"], horizontal=True)
+if _view == "📜 历史运行报告":
+    _render_history()
+    st.stop()
 
 note(
     "**链路**：Idea → AI 证据研究（假设 + 候选因子）→ 多 seed 因子挖掘与去冗余 → "
@@ -115,6 +213,12 @@ with l:
     run_composite = st.checkbox("启用复合 alpha 组合回测", value=True)
 
 with r:
+    interval = st.selectbox(
+        "K线颗粒度", INTERVALS, index=INTERVALS.index("1d"),
+        format_func=lambda x: INTERVAL_NAMES.get(x, x),
+        help="决定 idea 在哪个时间颗粒度上做因子挖掘与 OOS 回测：1分钟/5分钟/1小时/日线等。"
+             "注意：分钟级与小时级需对应粒度数据可得",
+    )
     basket = st.selectbox("标的篮子", BASKET_CHOICES, format_func=lambda x: str(x))
     _is_pool = str(basket).startswith("指数·")
     _pool_n = _DEFAULT_POOL
@@ -124,7 +228,13 @@ with r:
                                   help="指数/全A 股票池按此数量截断成分股后再送入流水线")
     symbols, exch = resolve_basket_symbols(basket, max_symbols=_pool_n if _is_pool else None)
     st.caption("篮子：" + " · ".join(symbols[:5]) + ("…" if len(symbols) > 5 else ""))
-    custom = st.text_input("自定义标的（逗号分隔，覆盖篮子）", "")
+    custom = st.text_input(
+        "自定义标的（逗号分隔，与篮子取并集）",
+        "",
+        placeholder="如：IF0, IH0, IC0, IM0 或任意品种/代码",
+        help="在此追加任意具体品种（如股指期货 IF0/IH0/IC0/IM0、商品期货 rb0/cu0、"
+             "股票 600519 等），与上方篮子合并后一起送入流水线；留空则仅用篮子。",
+    )
     exchange = st.selectbox("交易所", ALL_EXCHANGES, index=ALL_EXCHANGES.index(exch),
                             format_func=lambda x: f"{x} · {EXCHANGE_NAMES.get(x, '')}")
     forward_periods = st.slider("前向期数", 1, 20, 1)
@@ -142,9 +252,11 @@ if not run_btn and not st.session_state.get("e2e_task_id") and not st.session_st
          "<b>复合 alpha</b> / <b>策略代码</b> / <b>知识库</b>（标签页切换）。", "info")
     st.stop()
 
-final_symbols = [s.strip() for s in custom.split(",") if s.strip()] or list(symbols)
+_extra_symbols = [s.strip() for s in custom.split(",") if s.strip()]
+final_symbols = list(dict.fromkeys([*list(symbols), *_extra_symbols]))
+st.caption("送入流水线的标的数：" + str(len(final_symbols)))
 if len(final_symbols) < 2:
-    note("端到端流水线至少需要 2 个标的。", "warning")
+    note("端到端流水线至少需要 2 个标的（篮子或自定义均不足 2 个）。", "warning")
     st.stop()
 if not idea.strip():
     note("请输入一个投资想法。", "warning")
@@ -156,7 +268,7 @@ payload = {
     "seeds": [],
     "symbols": final_symbols,
     "exchange": exchange,
-    "interval": "1d",
+    "interval": interval,
     "start": None,
     "end": None,
     "algo": algo,
@@ -237,6 +349,31 @@ result = st.session_state.get("e2e_result")
 if guard_error(result or {"error": "端到端流水线未返回有效结果"}, "端到端流水线"):
     st.stop()
 
+# ---- 方法论知识层·需澄清：库内/联网均无可靠资料 → 回问用户，不编造 ----
+_miss = (result.get("needs_input") or {}).get("missing") or []
+if _miss:
+    note("流水线暂无法从「知识库 + 网络资料」得到该方法论的可信、可计算实现。"
+         "为避免编造失真的策略，请补充以下信息后重跑（补充内容会写入知识库，下次直接可用）：", "warning")
+    for m in _miss:
+        st.markdown(f"- **{m}**")
+    user_info = st.text_area(
+        "请补充：该方法论的定义 / 计算规则 / 典型示例",
+        key="e2e_meth_input", height=160,
+        placeholder="例如：黄金分割线——取阶段高H/低L，回撤位=H-(H-L)*r（r=0.382/0.5/0.618），回踩到 0.618 附近止跌且收盘站回该位上方即做多…",
+    )
+    if st.button("提交补充并重跑", type="primary"):
+        payload["methodology_input"] = user_info.strip()
+        st.session_state.pop("e2e_result", None)
+        _started = APIClient.factor_e2e_start(payload, timeout=30)
+        tid = (_started or {}).get("task_id")
+        if not tid:
+            guard_error(_started, "重跑端到端流水线")
+        else:
+            st.session_state["e2e_task_id"] = tid
+            st.session_state["e2e_submitted_at"] = time.time()
+        st.rerun()
+    st.stop()
+
 ev = result.get("evidence") or {}
 pipeline = result.get("pipeline") or {}
 composite = pipeline.get("composite") or {}
@@ -278,6 +415,18 @@ with tab_overview:
         {"label": "策略代码", "value": "安全" if _code_safe else "未通过校验",
          "tone": "up" if _code_safe else "down"},
     ])
+    _judged_overview = knowledge.get("judged_trials") or []
+    if _judged_overview:
+        _ov_ok = sum(1 for t in _judged_overview if _status_tone(t.get("status")) == "success")
+        _ov_rej = sum(1 for t in _judged_overview if _status_tone(t.get("status")) == "danger")
+        kpi_row([
+            {"label": "已验证因子", "value": str(_ov_ok),
+             "tone": "up" if _ov_ok else "neutral"},
+            {"label": "被拒因子", "value": str(_ov_rej),
+             "tone": "down" if _ov_rej else "neutral"},
+            {"label": "经验 brief", "value": "有" if (knowledge.get("brief") or "") else "无",
+             "tone": "accent" if (knowledge.get("brief") or "") else "neutral"},
+        ])
     _flow(["IDEA", "AI 证据研究", "因子挖掘",
            "OOS 复合 alpha", "策略代码", "知识库"])
     st.caption(f"想法：{result.get('idea') or idea.strip()}　·　标的数：{result.get('client_ready') and len(final_symbols) or len(final_symbols)}")
@@ -520,6 +669,133 @@ with tab_kb:
          "tone": "up" if knowledge.get("ingested") else "neutral"},
         {"label": "KB 记录数", "value": str(knowledge.get("kb_records", 0)), "tone": "accent"},
     ])
+
+    # ---- 本次运行 AI 判读（后端追加字段，缺省防御；后端未返回时自然隐藏/显示空态）----
+    _judged = knowledge.get("judged_trials") or []
+    _brief = knowledge.get("brief") or ""
+    _run_id = knowledge.get("run_id")
+    if _judged or _brief or _run_id:
+        section("本次运行 AI 判读", "代表因子的成功/失败判读 + 经验归纳（AI 知识闭环）")
+        if _run_id:
+            st.caption(f"run_id: <code>{_run_id}</code>")
+        if _judged:
+            _n_ok = sum(1 for t in _judged if _status_tone(t.get("status")) == "success")
+            _n_rej = sum(1 for t in _judged if _status_tone(t.get("status")) == "danger")
+            kpi_row([
+                {"label": "已验证因子", "value": str(_n_ok), "tone": "up"},
+                {"label": "被拒因子", "value": str(_n_rej), "tone": "down"},
+            ])
+            # 因子判读表：数值列用 DataFrame，状态用 badge 逐行标注
+            _jdf = pd.DataFrame([{
+                "表达式": str(t.get("expression") or "")[:48],
+                "Train IC": fmt_num(t.get("train_ic"), 4),
+                "Test IC": fmt_num(t.get("test_ic"), 4),
+                "OOS Sharpe": fmt_num(t.get("test_sharpe"), 2),
+                "原因": str(t.get("reason") or "")[:60],
+                "标签": "、".join(str(x) for x in (t.get("tags") or [])),
+            } for t in _judged])
+            st.dataframe(_jdf, width="stretch", hide_index=True)
+            for t in _judged:
+                st.markdown(
+                    badge(str(t.get("status") or "?").upper(), _status_tone(t.get("status")))
+                    + f"　<code>{str(t.get('expression') or '')[:60]}</code>"
+                    + f"　·　Test IC {fmt_num(t.get('test_ic'), 4)}　OOS Sharpe "
+                    + f"{fmt_num(t.get('test_sharpe'), 2)}",
+                    unsafe_allow_html=True,
+                )
+                if t.get("reason"):
+                    st.caption("　　" + str(t["reason"]))
+        else:
+            note("本次运行暂无因子判读（judged_trials 未返回）。", "warn")
+        if _brief:
+            section("AI 经验归纳", "本次运行沉淀的可复用经验")
+            st.markdown(_brief)
+        for _name, _label, _tone in (
+            ("effective_themes", "✅ 有效主题", "up"),
+            ("failure_traps", "⚠️ 失败陷阱", "danger"),
+            ("next_suggestions", "➡️ 下一步建议", "info"),
+        ):
+            _items = knowledge.get(_name) or []
+            if _items:
+                st.markdown(
+                    f"<b style='color: {'#f87171' if _tone == 'danger' else '#60a5fa' if _tone == 'info' else '#34d399'}'>"
+                    f"{_label}</b>",
+                    unsafe_allow_html=True,
+                )
+                for _it in _items:
+                    st.markdown(f"- {_it}")
+            st.caption("")
+
+    # ---- 历史端到端 Run（直读本地知识库 e2e_runs + factor_trials，展示已沉淀闭环）----
+    section("🗂️ 历史端到端 Run", "已沉淀的挖掘运行：因子判读 + 经验 brief（从本地知识库直读）")
+    try:
+        from quantmind.knowledge import KnowledgeStore
+        _hks = KnowledgeStore()
+        _runs = _hks.list_runs(limit=50)
+    except Exception:  # noqa: BLE001 库不可用则温和降级
+        _runs = []
+    if not _runs:
+        note("暂无历史端到端 Run（可在本页跑一次端到端后沉淀，或先执行 backfill 回填脚本）。", "info")
+    else:
+        # 历史 run 概览表
+        _hrows = []
+        for _r in _runs:
+            _rm = _r.get("metadata") or {}
+            _rid = _rm.get("run_id") or _r.get("run_id") or ""
+            _n_ok = _rm.get("n_verified_hypotheses") or _rm.get("n_representative") or 0
+            _hrows.append({
+                "run_id": _rid,
+                "想法": str(_rm.get("idea") or "")[:40],
+                "已验证因子": _n_ok,
+                "状态": _rm.get("status") or "",
+            })
+        if _hrows:
+            st.dataframe(pd.DataFrame(_hrows), width="stretch", hide_index=True)
+        # 每个 run 展开：trials 判读表 + brief
+        for _r in _runs:
+            _rm = _r.get("metadata") or {}
+            _rid = _rm.get("run_id") or _r.get("run_id") or ""
+            _idea = str(_rm.get("idea") or _rid)
+            with st.expander(f"🧪 {_idea[:40]}　<code>{_rid}</code>", expanded=False):
+                try:
+                    _trials = _hks.trials_for_run(_rid, limit=200)
+                except Exception:  # noqa: BLE001
+                    _trials = []
+                # run 级 KPI
+                _brief = str(_rm.get("brief") or "")
+                _n_tri = len(_trials)
+                _n_ver = sum(1 for _t in _trials if (str((_t.get("metadata") or {}).get("status")) or "").lower() in ("verified", "pass", "passed"))
+                kpi_row([
+                    {"label": "因子试错总数", "value": str(_n_tri), "tone": "accent"},
+                    {"label": "已验证", "value": str(_n_ver), "tone": "up"},
+                    {"label": "状态", "value": str(_rm.get("status") or "—"), "tone": "neutral"},
+                ])
+                if _trials:
+                    _tdf = pd.DataFrame([{
+                        "表达式": str((_t.get("metadata") or {}).get("expression") or "")[:48],
+                        "Test IC": fmt_num((_t.get("metadata") or {}).get("test_ic"), 4),
+                        "OOS Sharpe": fmt_num((_t.get("metadata") or {}).get("test_sharpe"), 2),
+                        "状态": str((_t.get("metadata") or {}).get("status") or ""),
+                        "原因": str((_t.get("metadata") or {}).get("reason") or "")[:60],
+                    } for _t in _trials])
+                    st.dataframe(_tdf, width="stretch", hide_index=True)
+                    for _t in _trials:
+                        _tm = _t.get("metadata") or {}
+                        _ts = str(_tm.get("status") or "")
+                        st.markdown(
+                            badge(_ts.upper(), _status_tone(_ts))
+                            + f"　<code>{str(_tm.get('expression') or '')[:60]}</code>"
+                            + f"　·　Test IC {fmt_num(_tm.get('test_ic'), 4)}　OOS Sharpe "
+                            + f"{fmt_num(_tm.get('test_sharpe'), 2)}",
+                            unsafe_allow_html=True,
+                        )
+                        if _tm.get("reason"):
+                            st.caption("　　" + str(_tm["reason"]))
+                else:
+                    note("该 run 暂无因子试错明细。", "info")
+                if _brief:
+                    st.markdown(f"**AI 经验**：{_brief}")
+        st.caption("💡 历史 run 来自本地知识库 e2e_runs / factor_trials 表；缺失时可运行 scripts/backfill_e2e_history.py 回填。")
     st.subheader("语义检索")
     q = st.text_input("检索内容", "螺纹钢 期限结构 动量")
     top_k = st.slider("返回条数", 1, 20, 10)

@@ -67,10 +67,11 @@ class ToTSearcher(BaseAlgo):
         market: str = "",
         instruction: str = "",
         search_fn: Optional[SearchFn] = None,
+        knowledge_context: Optional[dict] = None,
         **kwargs,
     ) -> SearchResult:
         evaluate_fn = self.evaluate_fn or (await self._make_default_eval(panel, forward_periods, market))
-        search_fn = search_fn or self._build_default_search_fn(instruction)
+        search_fn = search_fn or self._build_default_search_fn(instruction, knowledge_context)
 
         result = SearchResult(seed=seed, _best_expression=seed)
         history: List[dict] = []
@@ -144,13 +145,28 @@ class ToTSearcher(BaseAlgo):
                     "ic": rep.ic_pearson if rep.ic_pearson == rep.ic_pearson else float("nan")}
         return _ev
 
-    def _build_default_search_fn(self, instruction: str) -> SearchFn:
+    def _build_default_search_fn(self, instruction: str,
+                                 knowledge_context: Optional[dict] = None) -> SearchFn:
+        kb_block = ""
+        if knowledge_context:
+            try:
+                from .prompts import build_kb_block
+                kb_block = build_kb_block(knowledge_context) or ""
+            except Exception as exc:  # noqa: BLE001
+                _logger.debug("ToT 知识库上下文注入失败: %s", exc)
+
         async def _search(seed: str, best: dict, **kw):
             if self.provider is not None:
                 try:
-                    resp = await self.provider.chat(_TOT_SYSTEM, f"{instruction}\n"
-                                                     f"Parent: {best.get('expression')}  "
-                                                     f"RankIC={best.get('rank_ic')}\n")
+                    user = f"{instruction}\n"
+                    if kb_block:
+                        user = (
+                            "参考以下历史知识，避免重复失败模式，并尽量复用已验证的因子模式。\n"
+                            + kb_block + "\n\n" + user
+                        )
+                    user += f"Parent: {best.get('expression')}  " \
+                            f"RankIC={best.get('rank_ic')}\n"
+                    resp = await self.provider.chat(_TOT_SYSTEM, user)
                     from .prompts import parse_expression_response
                     parsed = parse_expression_response(resp)
                     if parsed:

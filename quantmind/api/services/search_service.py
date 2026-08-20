@@ -12,6 +12,7 @@ import asyncio
 import logging
 import math
 import time
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -431,7 +432,7 @@ class SearchService:
         # 复用上次结果，避免前端重复点击触发 85s+ 长跑；参数/标的/idea 变化即换新 key。
         cache_key = (str(req.idea),
                      tuple(sorted(s for s in (req.symbols or []) if s)),
-                     str(req.exchange), str(req.algo), int(req.rounds),
+                     str(req.exchange), str(req.interval), str(req.algo), int(req.rounds),
                      int(req.forward_periods), bool(ingest))
         cached = self._e2e_cache.get(cache_key)
         if cached is not None and (time.time() - cached[0]) < _E2E_CACHE_TTL:
@@ -442,6 +443,31 @@ class SearchService:
         panel = await self._build_panel(req.symbols, req.exchange, req.interval,
                                         req.start, req.end)
         symbols = [s for s in (req.symbols or []) if s and s.strip()]
+
+        # 领域知识获取层·开箱即用：确保内置方法论种子（缠论/威科夫/海龟等）已入库，
+        # 供 enrich_idea 检索 + Web 知识库页浏览（幂等，按 title 去重）。
+        try:
+            from ...knowledge.seeds import ensure_seed_data
+            ensure_seed_data()
+        except Exception:  # noqa: BLE001 —— 种子缺失不影响主流程
+            pass
+
+        # 用户补充的方法论（needs_input 澄清后带上的信息）：先作为新方法论入库，
+        # 使本次 e2e 的 enrich_idea 能命中，也让下次同类想法直接可用（持续学习·写回）。
+        meth_input = getattr(req, "methodology_input", None)
+        if meth_input and str(meth_input).strip():
+            try:
+                from ...knowledge import KnowledgeStore
+                KnowledgeStore().ingest_methodology(
+                    title=f"{req.idea}（用户补充）",
+                    concept=str(req.idea),
+                    content=str(meth_input).strip(),
+                    source="user",
+                    tags=["方法论", "用户补充"],
+                    meta={"implementable": False, "evidence": "user"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.debug("用户方法论补充入库失败（不影响主流程）: %s", exc)
 
         # 知识库反哺（持续学习·消费端）：用 idea 检索历史已验证因子，
         # 把命中表达式作为额外种子注入挖掘，让相似想法复用已验证的 alpha 起点。
@@ -469,20 +495,39 @@ class SearchService:
             verify_threshold=req.verify_threshold,
             run_search=req.run_search,
             max_rounds=req.max_rounds,
+            use_knowledge=getattr(req, "use_knowledge", True),
+            web_fallback=getattr(req, "web_fallback", True),
         )
 
         loop = asyncio.get_running_loop()
+
+        # 持续学习闭环·实时参考：注入历史成功因子模式 + 失败避坑 到挖掘 LLM prompt。
+        # 空库/失败时不注入，搜索保持原行为。
+        knowledge_context: Dict[str, Any] = {}
+        try:
+            from ...research.knowledge_loop import kb_search_context
+            knowledge_context = await kb_search_context(
+                KnowledgeStore(), idea=req.idea, max_success=8, max_fail=8)
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug("知识库上下文检索失败，本次不注入（不影响主流程）: %s", exc)
+            knowledge_context = {}
+
         report = await loop.run_in_executor(
-            None, lambda: _run_e2e(panel, config=cfg, provider=self.provider),
+            None, lambda: _run_e2e(panel, config=cfg, provider=self.provider,
+                                   knowledge_context=knowledge_context),
         )
 
         out = _sanitize(report)
+        if out.get("needs_input"):
+            # 方法论知识层判定无法忠实实现：不回传伪结果，提示用户补充信息。
+            return out
         out["n_symbols"] = len(panel.symbols)
         out["date_range"] = [panel.dates[0].isoformat() if len(panel.dates) else None,
                              panel.dates[-1].isoformat() if len(panel.dates) else None]
 
         # 构建溯源信息（对标 Vibe-Trading evidence chain）
         evidence = report.get("evidence") or {}
+        knowledge = report.get("knowledge") or {}
         out["provenance"] = {
             "data_sources": [f"{req.exchange}:{s}" for s in (req.symbols or []) if s],
             "tool_calls": [
@@ -493,27 +538,77 @@ class SearchService:
             ],
             "evidence_chain": evidence.get("hypotheses") or [],
             "verified_exprs": evidence.get("verified_exprs") or [],
+            "knowledge_sources": list(knowledge.get("sources") or []),
             "generated_at": report.get("generated_at"),
         }
 
+        # 领域知识摘要（若有）并入统一契约
+        if knowledge:
+            out["knowledge"] = {
+                "concept": knowledge.get("concept", ""),
+                "definition": knowledge.get("definition", ""),
+                "buy_signal_rules": list(knowledge.get("buy_signal_rules") or []),
+                "candidate_factors": list(knowledge.get("candidate_factors") or []),
+                "sources": list(knowledge.get("sources") or []),
+                "kb_hits": list(knowledge.get("kb_hits") or []),
+            }
+
         if ingest:
-            n = self._ingest_report(report, idea=req.idea, symbols=symbols,
-                                    asset_class=req.asset_class, market=req.market)
-            out["knowledge"] = {"ingested": True, "kb_records": n}
+            ingested = await self._ingest_report(
+                report, idea=req.idea, symbols=symbols,
+                asset_class=req.asset_class, market=req.market)
+            out["knowledge"] = out.get("knowledge") or {}
+            out["knowledge"]["ingested"] = True
+            out["knowledge"]["kb_records"] = int(ingested.get("kb_records", 0))
+            for k in ("run_id", "judged_trials", "brief",
+                      "effective_themes", "failure_traps", "next_suggestions"):
+                if ingested.get(k):
+                    out["knowledge"][k] = ingested[k]
 
         return out
 
-    def _ingest_report(self, report: dict, idea: str, symbols: List[str],
-                       asset_class: str = "", market: str = "") -> int:
-        """把 e2e report 沉淀进知识库，返回写入的记录条数。
+    async def _ingest_report(self, report: dict, idea: str, symbols: List[str],
+                             asset_class: str = "", market: str = "",
+                             store: Optional[KnowledgeStore] = None) -> dict:
+        """把 e2e report 沉淀进知识库，返回写入摘要 dict。
 
         - 每个 evidence 因子 → ``ingest_factor``
         - strategy → ``ingest_strategy``
         - 研究过程假设 → ``ingest_research_log``
+        - 领域知识摘要（KnowledgeBrief）→ ``ingest_methodology``（title=concept，幂等）
+
+        新增「AI 持续学习闭环」落库（C1）：
+        - 用 :func:`quantmind.research.knowledge_loop.run_knowledge_loop` 判读每个
+          代表因子（verified/active/rejected + reason + tags）并生成经验 brief；
+        - ``start_e2e_run`` 建 run 行 → 每个 judged trial 落 ``factor_trials`` →
+          ``finish_e2e_run`` 回填统计与 brief。
+
+        返回：``{"kb_records": n, "run_id", "judged_trials", "brief",
+        "effective_themes", "failure_traps", "next_suggestions"}``。
         """
-        store = KnowledgeStore()
+        kb = store or KnowledgeStore()
         n = 0
         try:
+            # 领域知识摘要：把 brief 作为方法论条目落库（title=concept，幂等）
+            knowledge = report.get("knowledge") or {}
+            concept = str(knowledge.get("concept") or "").strip()
+            if concept:
+                guidance = "\n".join(
+                    "- " + str(r) for r in (knowledge.get("buy_signal_rules") or [])
+                )
+                summary = (knowledge.get("definition")
+                           or "由领域知识增强层提炼的方法论摘要。" or "")
+                kb.ingest_methodology(
+                    title=concept,
+                    concept=concept,
+                    summary=str(summary),
+                    content=guidance,
+                    source="knowledge_enrichment",
+                    tags=[f"{c.get('kind')}" for c in
+                          (knowledge.get("candidate_factors") or []) if isinstance(c, dict)],
+                )
+                n += 1
+
             evidence = report.get("evidence") or {}
             hypotheses = evidence.get("hypotheses") or []
             factors = evidence.get("factors") or []
@@ -525,7 +620,7 @@ class SearchService:
                 if not name and not expr:
                     continue
                 status = "verified" if (expr and expr in verified) else "active"
-                store.ingest_factor(
+                kb.ingest_factor(
                     name=name, expression=expr, idea=idea,
                     ic=None, ir=None, status=status,
                     symbols=symbols, asset_class=asset_class, market=market,
@@ -538,7 +633,7 @@ class SearchService:
                 scheme = composite.get("scheme") or (report.get("pipeline", {}).get("config", {})
                                                      .get("composite_scheme") or "")
                 sharpe = _flt(composite.get("sharpe"))
-                store.ingest_strategy(
+                kb.ingest_strategy(
                     code=str(strategy.get("code", "")),
                     code_safe=bool(strategy.get("code_safe")),
                     idea=idea,
@@ -548,7 +643,7 @@ class SearchService:
                 )
                 n += 1
 
-            store.ingest_research_log(
+            kb.ingest_research_log(
                 idea=idea,
                 hypotheses=hypotheses,
                 evidence=dict(evidence),
@@ -556,7 +651,106 @@ class SearchService:
             n += 1
         except Exception as exc:  # noqa: BLE001
             _logger.warning("知识库沉淀失败（不影响主流程返回）: %s", exc)
-        return n
+
+        # ---------- AI 持续学习闭环落库（C1，try/except 隔离不阻断主返回） ----------
+        loop_out: Dict[str, Any] = {
+            "kb_records": n,
+            "run_id": "",
+            "judged_trials": [],
+            "brief": "",
+            "effective_themes": [],
+            "failure_traps": [],
+            "next_suggestions": [],
+        }
+        try:
+            from ...research.knowledge_loop import run_knowledge_loop
+
+            loop_res = await run_knowledge_loop(kb, self.provider, report, idea=idea)
+            # 建 run 行：run_id 用 run-<ts>-<hex6>，保证唯一且含时间信息
+            run_id = (f"run-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                      f"-{uuid.uuid4().hex[:6]}")
+            pipe = report.get("pipeline", {}) or {}
+            pcfg = pipe.get("config", {}) or {}
+            algo = str(pcfg.get("algo") or "")
+            rounds = int(pcfg.get("rounds") or 0)
+            scheme = str((pipe.get("composite") or {}).get("scheme") or "")
+            kb.start_e2e_run(
+                run_id=run_id, idea=idea, asset_class=asset_class, market=market,
+                symbols=symbols, exchange="", interval="", algo=algo, rounds=rounds,
+                forward_periods=int(pcfg.get("forward_periods") or 0),
+                status="running",
+            )
+
+            # 代表因子集合：去冗余后各代表（含 removed_redundant）作为 is_representative
+            rep_exprs = {s.get("expression") for s in (pipe.get("steps") or [])
+                         if isinstance(s, dict) and s.get("expression")}
+            summary = report.get("summary") or {}
+            n_rep = int(summary.get("representative_count") or 0) or len(rep_exprs)
+
+            judged_trials: List[Dict[str, Any]] = []
+            for t in loop_res.get("trials") or []:
+                expression = t.get("expression") or ""
+                if not expression:
+                    continue
+                is_rep = bool(expression in rep_exprs)
+                try:
+                    kb.ingest_factor_trial(
+                        run_id=run_id,
+                        expression=expression,
+                        algo=algo or str(t.get("algo") or ""),
+                        seed=str(t.get("seed") or ""),
+                        train_ic=_flt(t.get("train_ic")),
+                        val_ic=_flt(t.get("val_ic")),
+                        test_ic=_flt(t.get("test_ic")),
+                        test_sharpe=_flt(t.get("test_sharpe")),
+                        test_return=_flt(t.get("test_return")),
+                        test_mdd=_flt(t.get("test_mdd")),
+                        is_representative=is_rep,
+                        status=str(t.get("status") or "active"),
+                        reason=str(t.get("reason") or ""),
+                        removed_redundant=(
+                            [str(x) for x in t["removed_redundant"]]
+                            if isinstance(t.get("removed_redundant"), list) else None
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("因子试验落库失败 %s: %s", expression, exc)
+                judged_trials.append({
+                    "expression": expression,
+                    "status": str(t.get("status") or "active"),
+                    "reason": str(t.get("reason") or ""),
+                    "tags": [str(x) for x in (t.get("tags") or [])],
+                })
+                n += 1
+
+            # 回填统计 + AI brief
+            composite = pipe.get("composite") or {}
+            n_verified = int(summary.get("n_verified_hypotheses")
+                             if summary.get("n_verified_hypotheses") is not None
+                             else len(evidence.get("verified_exprs") or []))
+            kb.finish_e2e_run(
+                run_id=run_id,
+                n_representative=n_rep,
+                n_verified_hypotheses=n_verified,
+                composite_scheme=str(scheme or ""),
+                composite_fwd_ic=_flt(composite.get("ic_mean")),
+                composite_sharpe=_flt(composite.get("sharpe")),
+                brief=str(loop_res.get("brief") or ""),
+                status="done",
+            )
+            loop_out.update({
+                "run_id": run_id,
+                "judged_trials": judged_trials,
+                "brief": str(loop_res.get("brief") or ""),
+                "effective_themes": list(loop_res.get("effective_themes") or []),
+                "failure_traps": list(loop_res.get("failure_traps") or []),
+                "next_suggestions": list(loop_res.get("next_suggestions") or []),
+            })
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("AI 持续学习闭环落库失败（不影响主流程返回）: %s", exc)
+
+        loop_out["kb_records"] = n
+        return loop_out
 
     @staticmethod
     def _kb_context_seeds(idea: str, user_seeds: List[str], top_k: int = 6) -> List[str]:

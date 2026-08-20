@@ -1,4 +1,4 @@
-"""KnowledgeService：知识库（因子 / 策略 / 研究日志）的 API 服务层。
+"""KnowledgeService：知识库（因子 / 策略 / 研究日志 / 方法论）的 API 服务层。
 
 封装 :class:`quantmind.knowledge.KnowledgeStore`，暴露为 FastAPI 可调用的
 ``ingest`` / ``search`` / ``list`` 方法。检索为轻量关键词（无向量库）。
@@ -25,7 +25,7 @@ class KnowledgeService:
     def ingest(self, req: KnowledgeIngestRequest) -> dict:
         """写入一条知识库记录。
 
-        ``req.kind`` ∈ ``factor`` | ``strategy`` | ``research_log``，
+        ``req.kind`` ∈ ``factor`` | ``strategy`` | ``research_log`` | ``methodology``，
         ``req.payload`` 为对应字段 dict，返回 ``{"kb_id", "kind", "ok"}``。
         """
         kind = (req.kind or "").strip().lower()
@@ -58,9 +58,19 @@ class KnowledgeService:
                 hypotheses=payload.get("hypotheses"),
                 evidence=payload.get("evidence"),
             )
+        elif kind == "methodology":
+            kb_id = self.store.ingest_methodology(
+                title=payload.get("title", ""),
+                concept=payload.get("concept", ""),
+                summary=payload.get("summary", ""),
+                content=payload.get("content", ""),
+                source=payload.get("source", ""),
+                tags=payload.get("tags"),
+            )
         else:
             raise ValueError(
-                f"未知知识库类型: {kind!r}（应为 factor | strategy | research_log）"
+                f"未知知识库类型: {kind!r}"
+                "（应为 factor | strategy | research_log | methodology）"
             )
 
         return {"ok": True, "kb_id": kb_id, "kind": kind}

@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 from .provider import LLMProvider, MockProvider
 from .idea_parser import ResearchSpec, parse_idea
 from .factor_gen import generate_factors
+from .knowledge_enrichment import KnowledgeBrief, enrich_idea
 from .codegen import generate_strategy_code
 from .sandbox import validate_code
 from .safety import lookahead_warnings
@@ -90,6 +91,9 @@ class AutoResearchOutput:
     log: List[ResearchLogEntry] = field(default_factory=list)
     explanation: str = ""
     fact_sheet: dict = field(default_factory=dict)
+    knowledge: Optional[dict] = None  # 领域知识增强层产出的 KnowledgeBrief.to_dict() 或 None
+    #: 方法论知识层判定「无法忠实实现」时非空：列出需要用户补充的信息（非错误，需澄清）。
+    needs_input: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +109,8 @@ class AutoResearchOutput:
             "log": [l.to_dict() for l in self.log],
             "explanation": self.explanation,
             "fact_sheet": self.fact_sheet,
+            "knowledge": self.knowledge,
+            "needs_input": list(self.needs_input),
             "code": self.code[:500],
         }
 
@@ -114,20 +120,54 @@ class AutoResearchAgent:
 
     :param provider: LLM Provider；默认 Mock。
     :param max_steps: 循环最多执行步数。
+    :param use_knowledge: 是否启用领域知识增强层（idea → 因子 前先检索/提炼知识）。
+    :param web_fallback: 库内方法论命中不足时是否联网补充资料。
     """
 
-    def __init__(self, provider: LLMProvider | None = None, max_steps: int = 3) -> None:
+    def __init__(self, provider: LLMProvider | None = None, max_steps: int = 3,
+                 use_knowledge: bool = True, web_fallback: bool = True) -> None:
         self.provider = provider or MockProvider()
         self.max_steps = max_steps
+        self.use_knowledge = use_knowledge
+        self.web_fallback = web_fallback
 
     def _log(self, out: AutoResearchOutput, step: str, action: str,
              input: str = "", output: str = "") -> None:
         out.log.append(ResearchLogEntry(step=step, action=action, input=input, output=output))
 
+    async def _enrich(self, out: AutoResearchOutput, idea: str) -> Optional[dict]:
+        """领域知识增强阶段：检索方法论 + 提炼 KnowledgeBrief，存入 out.knowledge。"""
+        if not self.use_knowledge:
+            out.knowledge = None
+            return None
+        brief: KnowledgeBrief = await enrich_idea(
+            self.provider, idea, web=self.web_fallback,
+        )
+        out.knowledge = brief.to_dict()
+        self._log(out, -1, "enrich_idea", input=idea,
+                  output=f"concept={brief.concept}, sources={len(brief.sources)}, "
+                         f"factors={len(brief.candidate_factors)}, "
+                         f"can_implement={brief.can_implement}")
+        return brief
+
+    async def _guard(self, out: AutoResearchOutput, brief: Optional[KnowledgeBrief]) -> bool:
+        """方法论知识层护栏：无法忠实实现时，短路返回并回问用户，不编造因子。"""
+        if brief is None or brief.can_implement:
+            return False
+        out.needs_input = list(brief.missing) or [
+            "该方法论无法从现有资料忠实实现，请补充其定义与量化实现要点。"
+        ]
+        return True
+
     async def research(self, idea: str, asset_class: str = "") -> AutoResearchOutput:
         out = AutoResearchOutput(
             spec=ResearchSpec(idea=idea, asset_class=asset_class),
         )
+
+        # 领域知识增强阶段：idea → 因子 前先检索/提炼领域知识（可选）
+        brief = await self._enrich(out, idea)
+        if await self._guard(out, brief):
+            return out
 
         # 步骤 0：想法解析
         spec = await parse_idea(self.provider, idea, asset_class)
@@ -147,7 +187,7 @@ class AutoResearchAgent:
         out.hypotheses.append(h0)
 
         # 步骤 1：因子生成（对每个建议因子/生成因子尝试评估）
-        factors = await generate_factors(self.provider, idea)
+        factors = await generate_factors(self.provider, idea, knowledge=brief)
         out.factors = factors
         self._log(out, 1, "generate_factors", input=idea,
                   output=f"[{', '.join(f.name for f in factors)}]")
@@ -202,6 +242,8 @@ class AutoResearchAgent:
         run_search: bool = False,
         max_rounds: int = 2,
         use_cache: bool = False,
+        use_knowledge: Optional[bool] = None,
+        web_fallback: Optional[bool] = None,
     ) -> AutoResearchOutput:
         """闭环研究：用**真实面板截面 IC 证据**验证因子假设（而非离线启发式）。
 
@@ -222,15 +264,28 @@ class AutoResearchAgent:
         :param run_search: 是否额外运行 CoT 迭代搜索改进。
         :param max_rounds: CoT 搜索轮数（``run_search=True`` 时生效）。
         :param use_cache: 评估是否启用 SQLite 持久缓存。
+        :param use_knowledge: 是否启用领域知识增强；None → 用实例默认
+            （``self.use_knowledge``）。
+        :param web_fallback: 库内方法论命中不足时是否联网补充；None → 用实例默认。
         :return: ``AutoResearchOutput``（hypotheses 携带真实 IC 证据，fact_sheet 带 metrics）。
         """
         # 延迟导入，避免 research.search.cot -> ai.agent 的循环依赖
         from ..research import evaluate_expression
         from ..research.search.cot import FactorSearcher
 
+        if use_knowledge is not None:
+            self.use_knowledge = use_knowledge
+        if web_fallback is not None:
+            self.web_fallback = web_fallback
+
         out = AutoResearchOutput(
             spec=ResearchSpec(idea=idea, asset_class=asset_class),
         )
+
+        # 领域知识增强阶段（可选，复用 _enrich）
+        brief = await self._enrich(out, idea)
+        if await self._guard(out, brief):
+            return out
 
         # 步骤 0-2 与 research() 保持一致
         spec = await parse_idea(self.provider, idea, asset_class)
@@ -245,7 +300,7 @@ class AutoResearchAgent:
         )
         out.hypotheses.append(h0)
 
-        factors = await generate_factors(self.provider, idea)
+        factors = await generate_factors(self.provider, idea, knowledge=brief)
         out.factors = factors
         self._log(out, 1, "generate_factors", input=idea,
                   output=f"[{', '.join(f.name for f in factors)}]")
@@ -421,4 +476,6 @@ __all__ = [
     "AutoResearchAgent",
     "generate_explanation",
     "generate_fact_sheet",
+    "KnowledgeBrief",
+    "enrich_idea",
 ]

@@ -52,12 +52,41 @@ def _sanitize(o: Any) -> Any:
     return o
 
 
+def _strip_code_fences(source: str) -> str:
+    """去除源码外围的 Markdown 代码围栏（```python ... ```），使落库/持久化的代码可编译。"""
+    s = (source or "").strip()
+    if s.startswith("```"):
+        lines = s.splitlines()
+        if lines and lines[0].lstrip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        s = "\n".join(lines)
+    return s.strip()
+
+
+def _strategy_class_name(source: str) -> str:
+    """从策略源码提取主类名（优先取以 Strategy 结尾的类）。"""
+    import re as _re
+
+    names = _re.findall(r"class\s+(\w+)", source or "")
+    if not names:
+        return ""
+    for n in names:
+        if n.endswith("Strategy"):
+            return n
+    return names[-1]
+
+
+
 class BacktestService:
     def __init__(self, dm: DataManager, ee: EventEngine):
         self.dm = dm
         self.ee = ee
         # 动态注册的 AI 生成策略（仅实例级，避免全局污染）
         self._extra_strategies: Dict[str, type] = {}
+        # 耐重启：启动时把 knowledge.db 已沉淀/已注册策略载入运行池
+        self._load_persisted_strategies()
 
     def register_generated_strategy(self, name: str, source: str) -> Tuple[bool, str, dict]:
         """注册 AI 生成策略源码 -> 实例级策略池。
@@ -68,6 +97,8 @@ class BacktestService:
         :return: (ok, err, info)；info = {"name", "parameters"}
         """
         from ...ai.sandbox import compile_strategy
+
+        source = _strip_code_fences(source)
 
         ok, err, _ = compile_strategy(source)
         if not ok:
@@ -92,6 +123,87 @@ class BacktestService:
             return False, "未找到策略类", {}
         self._extra_strategies[name] = cls
         return True, "", {"name": name, "parameters": list(getattr(cls, "parameters", []))}
+
+    def _load_persisted_strategies(self) -> None:
+        """启动/重建时把已沉淀策略载入运行池（耐重启）。
+
+        来源分两类：
+        1. 规范适配模块 ``quantmind.strategy.mined`` 的 ``MINED_STRATEGIES``（历史挖掘策略的可运行重写）；
+        2. knowledge.db 中已注册/挖掘的策略（``lifecycle`` 表 + ``strategies`` 表）。
+        历史代码可能因模块路径漂移编译失败 -> 跳过，不影响其它策略加载。
+        """
+        # 1) 规范适配策略：稳定可运行，始终注册（按类名）
+        try:
+            from ...strategy.mined import MINED_STRATEGIES as _mined
+
+            seen = set(self._extra_strategies)
+            for name, cls in _mined.items():
+                if name in seen:
+                    continue
+                self._extra_strategies[name] = cls
+                seen.add(name)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("加载规范适配策略失败(忽略): %s", exc)
+
+        if not self._extra_strategies:
+            return
+        seen = set(self._extra_strategies)
+        try:
+            from ...knowledge.store import KnowledgeStore
+
+            ks = KnowledgeStore()
+            # 2) 已注册生命周期策略（有明确名称）
+            for lc in ks.list_strategy_lifecycles(limit=300):
+                name = (lc.get("strategy_id") or "").strip()
+                code = lc.get("code") or ""
+                if not name or not code or name in seen:
+                    continue
+                ok, _, _ = self.register_generated_strategy(name, code)
+                if ok:
+                    seen.add(name)
+            # 3) 研究挖掘脚本（从类名取名）
+            for rec in ks.list_mined_strategies(limit=300):
+                name = _strategy_class_name(rec.get("code") or "")
+                code = rec.get("code") or ""
+                if not name or name in seen or not code:
+                    continue
+                ok, _, _ = self.register_generated_strategy(name, code)
+                if ok:
+                    seen.add(name)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("加载已沉淀策略失败(忽略): %s", exc)
+
+    def _resolve_strategy_class(self, name: str):
+        """按名解析策略类：内置映射 -> 运行池 -> 知识库惰性加载 -> 规范适配模块。"""
+        cls = _STRATEGY_MAP.get(name) or self._extra_strategies.get(name)
+        if cls is not None:
+            return cls
+        # 惰性：从库中按名载入（例如 list 已展示但尚未进池的挖掘/注册策略）
+        try:
+            from ...knowledge.store import KnowledgeStore
+
+            ks = KnowledgeStore()
+            for lc in ks.list_strategy_lifecycles(limit=300):
+                if (lc.get("strategy_id") or "").strip() == name:
+                    ok, _, _ = self.register_generated_strategy(name, lc.get("code") or "")
+                    return self._extra_strategies.get(name)
+            for rec in ks.list_mined_strategies(limit=300):
+                if _strategy_class_name(rec.get("code") or "") == name:
+                    ok, _, _ = self.register_generated_strategy(name, rec.get("code") or "")
+                    return self._extra_strategies.get(name)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("按名加载策略失败(忽略): %s", exc)
+        # 兜底：规范适配模块
+        try:
+            from ...strategy.mined import MINED_STRATEGIES as _mined
+
+            cls = _mined.get(name)
+            if cls is not None:
+                self._extra_strategies[name] = cls
+                return cls
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     def list_strategies(self) -> List[StrategyInfo]:
         result = [
@@ -123,12 +235,31 @@ class BacktestService:
         ]
         for k in self._extra_strategies:
             result.append(StrategyInfo(name=k, description="AI 生成策略", parameters={"size": 1}))
+        # 追加研究挖掘的策略（即使历史代码当前不可编译，也展示供查看/重建）
+        seen = {s.name for s in result}
+        try:
+            from ...knowledge.store import KnowledgeStore
+
+            ks = KnowledgeStore()
+            for rec in ks.list_mined_strategies(limit=100):
+                name = _strategy_class_name(rec.get("code") or "")
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                result.append(StrategyInfo(
+                    name=name,
+                    description=("AI挖掘:" + str(rec.get("idea") or "")[:40])
+                    if rec.get("idea") else "AI 挖掘策略",
+                    parameters={"size": 1, "source": "mined"},
+                ))
+        except Exception:  # noqa: BLE001
+            pass
         return result
 
     async def run_backtest(self, req: BacktestRequest) -> Dict[str, Any]:
-        strat_class = _STRATEGY_MAP.get(req.strategy) or self._extra_strategies.get(req.strategy) or MultiFactorStrategy
+        strat_class = self._resolve_strategy_class(req.strategy) or MultiFactorStrategy
         vt = f"{req.symbol}.{req.exchange.upper()}"
-        
+
         # 发送开始事件
         await ws_manager.broadcast({
             "type": "backtest_start",
@@ -217,7 +348,7 @@ class BacktestService:
 
     async def run_walkforward(self, req: WalkForwardRequest) -> Dict[str, Any]:
         """Walk-Forward 滚动样本外验证"""
-        strat_class = _STRATEGY_MAP.get(req.strategy) or self._extra_strategies.get(req.strategy) or MultiFactorStrategy
+        strat_class = self._resolve_strategy_class(req.strategy) or MultiFactorStrategy
         vt = f"{req.symbol}.{req.exchange.upper()}"
 
         # 自动计算需要的历史数据长度
@@ -274,7 +405,7 @@ class BacktestService:
         产出与实盘同源的 PaperEngine 回放结果（现金/持仓/成交/权益），
         供生命周期晋升到 PAPER 及前端「模拟盘实跑」闭环使用。
         """
-        strat_class = _STRATEGY_MAP.get(req.strategy) or self._extra_strategies.get(req.strategy)
+        strat_class = self._resolve_strategy_class(req.strategy)
         if strat_class is None:
             return {"error": f"策略不存在或未注册: {req.strategy}"}
         vt = f"{req.symbol}.{req.exchange.upper()}"
@@ -349,6 +480,9 @@ class BacktestService:
             return {"error": f"模拟盘实跑失败: {exc}"}
 
         summary = result.get("summary", {})
+        # 用权益曲线算真实夏普/回撤（参考 validation.py 年化 252 公式）；缺权益则回退纯纸面
+        _eq = _extract_equity_curve(result)
+        _eq_metrics = _metrics_from_equity(_eq) if _eq is not None else {}
         out = {
             "ok": True,
             "strategy": req.strategy,
@@ -361,6 +495,9 @@ class BacktestService:
                 "trade_count": result.get("trades", 0),
                 "final_cash": summary.get("cash"),
                 "open_positions": len(summary.get("positions", {})),
+                "sharpe": _eq_metrics.get("sharpe"),
+                "max_drawdown": _eq_metrics.get("max_drawdown"),
+                "total_return": _eq_metrics.get("total_return"),
             },
         }
         
@@ -400,3 +537,24 @@ def _extract_equity_curve(result: Dict[str, Any]) -> pd.Series:
         if key is not None:
             series = series.apply(lambda d: d.get(key) if isinstance(d, dict) else d)
     return pd.to_numeric(series, errors="coerce")
+
+def _metrics_from_equity(equity_curve):
+    """从权益曲线算出年化夏普(252)/最大回撤/总收益（纯 pandas，无新依赖）。
+
+    参考 backtest/validation.py 年化公式：mean/std * sqrt(252)。
+    权益曲线过短或全为 NaN 时返回空 dict（调用方回退纸面判读）。
+    """
+    if equity_curve is None or getattr(equity_curve, "empty", True):
+        return {}
+    s = pd.Series(equity_curve).dropna()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) < 2 or float(s.iloc[0]) == 0:
+        return {}
+    rets = s.pct_change().dropna()
+    std = rets.std()
+    sharpe = float((rets.mean() / std * (252 ** 0.5))) if std and std > 0 else 0.0
+    running_max = s.cummax()
+    dd = s / running_max - 1.0
+    mdd = float(dd.min())
+    total = float((s.iloc[-1] / s.iloc[0]) - 1.0)
+    return {"sharpe": sharpe, "max_drawdown": mdd, "total_return": total}

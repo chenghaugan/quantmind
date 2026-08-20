@@ -32,12 +32,34 @@ SEARCH_SYSTEM = (
 )
 
 
+def build_kb_block(knowledge_context: dict) -> str:
+    """把知识库上下文（历史已验证因子模式 + 失败避坑 + 历史 brief）拼成可注入搜索 prompt 的文本。
+
+    复用 :func:`quantmind.research.knowledge_loop.format_kb_context` 的格式化逻辑；
+    上下文为空时返回空串（不污染 prompt）。用 try/except 包裹 import，防循环依赖。
+    """
+    if not knowledge_context:
+        return ""
+    try:
+        from ..knowledge_loop import format_kb_context
+        body = format_kb_context(knowledge_context)
+    except Exception as exc:  # noqa: BLE001
+        _logger.debug("knowledge_loop.format_kb_context 不可用，跳过知识库注入: %s", exc)
+        body = ""
+    if not body:
+        return ""
+    return ("Below is historical knowledge distilled from previous mining runs. "
+            "Reference it to avoid repeating known failure patterns and to reuse "
+            "verified factor patterns.\n" + body)
+
+
 def build_chain_prompt(
     seed: str,
     history: List[dict],
     best_expression: str,
     best_rank_ic: Optional[float],
     instruction: str = "",
+    kb_block: str = "",
 ) -> str:
     """构造 CoT 用户消息：把链历史与当前最优呈现给模型。
 
@@ -47,11 +69,19 @@ def build_chain_prompt(
         best_expression: 当前最优表达式。
         best_rank_ic: 当前最优 Rank IC（可为 None）。
         instruction: 附加变体指示（如"更侧重波动率"）。
+        kb_block: 可选的历史知识库上下文文本（由 :func:`build_kb_block` 生成）。
+            非空时插在 seed 之前，引导模型参考历史经验、避免重复失败模式。
 
     Returns:
         User 消息字符串。
     """
-    lines = [
+    lines: List[str] = []
+    if kb_block:
+        lines.append(kb_block)
+        lines.append(
+            "参考以上历史知识，避免重复失败模式，并尽量复用已验证的因子模式。"
+        )
+    lines += [
         f"Seed factor: {seed}",
         "Iterative search history:",
     ]

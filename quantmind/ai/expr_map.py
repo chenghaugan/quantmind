@@ -24,6 +24,9 @@ _KIND_TEMPLATES: dict[str, str] = {
     # 面板无 open_interest 变量，近似用成交量变化表达持仓变化信号
     "open_interest_change": "delta(volume, {w})",
     "term_structure": "mean(close, {w}) - close",
+    # 缠论三买（忠实因子的面板近似）：上行趋势（动量>=0）且收盘站在近 w 高点上沿（中枢 ZG 带）
+    # 上方 → 突破/延续信号。真正的 笔/中枢/回抽 判定在策略层（strategy.mined.ChanThirdBuyStrategy）。
+    "chan_third_buy": "sign(delta(close, {w})) * (close - ts_max(high, {w}))",
 }
 
 _KNOWN_KINDS = set(_KIND_TEMPLATES)

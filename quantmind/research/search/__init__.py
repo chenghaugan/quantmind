@@ -21,7 +21,7 @@ from .base import (
 from .cot import FactorSearcher, map_rank
 from .ea import EASearcher
 from .tot import ToTSearcher
-from .prompts import parse_expression_response, build_chain_prompt, SEARCH_SYSTEM
+from .prompts import parse_expression_response, build_chain_prompt, build_kb_block, SEARCH_SYSTEM
 
 __all__ = [
     "SearchResult",
@@ -37,5 +37,6 @@ __all__ = [
     "map_rank",
     "parse_expression_response",
     "build_chain_prompt",
+    "build_kb_block",
     "SEARCH_SYSTEM",
 ]
