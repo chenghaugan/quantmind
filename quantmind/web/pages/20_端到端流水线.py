@@ -307,7 +307,7 @@ payload = {
     "train_frac": train_frac,
     "val_frac": val_frac,
     "dedup_threshold": dedup_th,
-    "min_abs_ic": 0.0,
+    "min_abs_ic": 0.03,
     "run_composite": run_composite,
     "composite_scheme": composite_scheme,
     "composite_standardize": "zscore",

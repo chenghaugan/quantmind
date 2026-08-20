@@ -156,7 +156,7 @@ def test_paper_loop_generates_brief_and_paper_state(tmp_path):
     store = KnowledgeStore(db_path=str(tmp_path / "pp.db"))
     sid = store.upsert_strategy_lifecycle("pd", run_id="r-pp-1", idea="缠论3买", state="BACKTEST")
 
-    metrics = {"sharpe": 0.9, "max_drawdown": -0.12, "trade_count": 12}
+    metrics = {"sharpe": 1.2, "max_drawdown": -0.10, "calmar": 1.5, "win_rate": 0.52, "paper_days": 45, "trade_count": 12}
     judged, loop = _paper_store_lifecycle(store, sid, metrics, idea="缠论3买")
     assert judged["status"] == "verified"
     assert loop.get("brief")

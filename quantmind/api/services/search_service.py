@@ -340,7 +340,7 @@ class SearchService:
         forward_periods: int = 1,
         market: str = "",
         dedup_threshold: float = 0.7,
-        min_abs_ic: float = 0.0,
+        min_abs_ic: float = 0.03,
         train_frac: float = 0.6,
         val_frac: float = 0.2,
         run_composite: bool = True,

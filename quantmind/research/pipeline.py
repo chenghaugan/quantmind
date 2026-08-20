@@ -70,7 +70,7 @@ class PipelineConfig:
     run_judge: bool = False
     # 去冗余
     dedup_threshold: float = 0.7
-    min_abs_ic: float = 0.0
+    min_abs_ic: float = 0.03              # |rank_ic| 底线（低于 0.03 视为噪声丢弃）
     # 回测
     n_groups: int = 5
     long_short: bool = True

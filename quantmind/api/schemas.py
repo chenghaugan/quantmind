@@ -361,7 +361,7 @@ class FactorPipelineRequest(BaseModel):
     market: str = ""
     # 去冗余
     dedup_threshold: float = 0.7            # 并簇相关阈值 [0,1]
-    min_abs_ic: float = 0.0                 # |rank_ic| 底线（低于视为噪声丢弃）
+    min_abs_ic: float = 0.03                # |rank_ic| 底线（低于 0.03 视为噪声丢弃）
     # 防泄漏切分
     train_frac: float = 0.6
     val_frac: float = 0.2
@@ -399,7 +399,7 @@ class FactorE2ERequest(BaseModel):
     train_frac: float = 0.6
     val_frac: float = 0.2
     dedup_threshold: float = 0.7
-    min_abs_ic: float = 0.0
+    min_abs_ic: float = 0.03
     run_composite: bool = True
     composite_scheme: str = "icir"
     composite_standardize: str = "zscore"

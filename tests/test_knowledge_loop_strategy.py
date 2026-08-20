@@ -28,12 +28,15 @@ def provider() -> MockProvider:
 
 @pytest.mark.asyncio
 async def test_judge_strategy_verified(provider):
-    """sharpe=0.8 ≥ 0.5，state=PAPER → verified。"""
+    """sharpe=1.2 ≥ 1.0，state=PAPER，所有门槛通过 → verified。"""
     strat = {
         "run_id": "strat_001",
         "state": "PAPER",
-        "sharpe": 0.8,
-        "max_drawdown": -0.15,
+        "sharpe": 1.2,
+        "max_drawdown": -0.10,
+        "calmar": 1.5,
+        "win_rate": 0.52,
+        "paper_days": 45,
         "composite_fwd_ic": 0.03,
         "status": "backtested",
     }
@@ -46,8 +49,8 @@ async def test_judge_strategy_verified(provider):
 
 @pytest.mark.asyncio
 async def test_judge_strategy_rejected_low_sharpe(provider):
-    """sharpe=0.3 < 0.5 → rejected，reason 含「夏普」。"""
-    strat = {"run_id": "strat_002", "state": "BACKTEST", "sharpe": 0.3, "max_drawdown": -0.1}
+    """sharpe=0.8 < 1.0 → rejected，reason 含「夏普」。"""
+    strat = {"run_id": "strat_002", "state": "BACKTEST", "sharpe": 0.8, "max_drawdown": -0.1}
     res = await judge_strategy(provider, strat)
     assert res["status"] == "rejected"
     assert "夏普" in res["reason"]
@@ -56,7 +59,7 @@ async def test_judge_strategy_rejected_low_sharpe(provider):
 @pytest.mark.asyncio
 async def test_judge_strategy_rejected_drawdown(provider):
     """max_drawdown 超限（回撤过深）→ rejected，reason 含「回撤」。"""
-    strat = {"run_id": "strat_003", "state": "BACKTEST", "sharpe": 0.8, "max_drawdown": -0.5}
+    strat = {"run_id": "strat_003", "state": "BACKTEST", "sharpe": 1.2, "max_drawdown": -0.5}
     res = await judge_strategy(provider, strat)
     assert res["status"] == "rejected"
     assert "回撤" in res["reason"]
@@ -73,8 +76,16 @@ async def test_judge_strategy_active_no_metrics(provider):
 
 @pytest.mark.asyncio
 async def test_judge_strategy_live_state(provider):
-    """state=LIVE，sharpe 达标 → verified 且 tags 含《live》。"""
-    strat = {"run_id": "strat_005", "state": "LIVE", "sharpe": 1.5}
+    """state=LIVE，sharpe=1.5 达标，所有门槛通过 → verified 且 tags 含《live》。"""
+    strat = {
+        "run_id": "strat_005",
+        "state": "LIVE",
+        "sharpe": 1.5,
+        "max_drawdown": -0.08,
+        "calmar": 2.0,
+        "win_rate": 0.55,
+        "paper_days": 60,
+    }
     res = await judge_strategy(provider, strat)
     assert res["status"] == "verified"
     assert "live" in res["tags"]

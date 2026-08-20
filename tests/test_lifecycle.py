@@ -7,19 +7,19 @@ from quantmind.paper.promotion import LifecycleManager, LifecycleState, Promotio
 
 
 def test_promote_to_live_blocked_without_metrics():
-    mgr = LifecycleManager(PromotionGate(min_sharpe=0.5, max_drawdown=-0.30))
-    ok, reasons = mgr.promote("s1", LifecycleState.LIVE, metrics={"sharpe": 0.1, "max_drawdown": -0.1})
+    mgr = LifecycleManager(PromotionGate(min_sharpe=1.0, max_drawdown=-0.15))
+    ok, reasons = mgr.promote("s1", LifecycleState.LIVE, metrics={"sharpe": 0.5, "max_drawdown": -0.1, "paper_days": 60})
     assert ok is False
     assert len(reasons) > 0
 
 
 def test_promote_to_live_allowed_with_good_metrics():
-    mgr = LifecycleManager(PromotionGate(min_sharpe=0.5, max_drawdown=-0.30))
+    mgr = LifecycleManager(PromotionGate(min_sharpe=1.0, max_drawdown=-0.15, min_paper_days=30))
     # 真实阶梯：IDEA -> PAPER -> LIVE
     ok1, _ = mgr.promote("s1", LifecycleState.PAPER)
     assert ok1 is True
     ok, reasons = mgr.promote("s1", LifecycleState.LIVE,
-                              metrics={"sharpe": 1.2, "max_drawdown": -0.12},
+                              metrics={"sharpe": 1.2, "max_drawdown": -0.12, "paper_days": 45},
                               note="risk_reviewed")
     assert ok is True, reasons
     assert mgr.get_or_create("s1").state == LifecycleState.LIVE
@@ -27,7 +27,7 @@ def test_promote_to_live_allowed_with_good_metrics():
 
 def test_promote_invalid_transition():
     mgr = LifecycleManager()
-    ok, reasons = mgr.promote("s2", LifecycleState.LIVE, metrics={"sharpe": 2.0, "max_drawdown": -0.05},
+    ok, reasons = mgr.promote("s2", LifecycleState.LIVE, metrics={"sharpe": 2.0, "max_drawdown": -0.05, "paper_days": 60},
                               note="risk_reviewed")
     # 从 IDEA 直接到 LIVE 不允许
     assert ok is False

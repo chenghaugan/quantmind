@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 from typing import Any, Dict, List, Optional
 
@@ -150,38 +151,122 @@ def _rule_tags(expression: str) -> List[str]:
     return tags[:6]
 
 
+def _ic_positive_ratio(ic_series: list) -> Optional[float]:
+    """从 ic_series 计算 IC 正值比例（需至少 20 个有效值）。"""
+    valid = [x for x in (ic_series or []) if x is not None and x == x]
+    if len(valid) < 20:
+        return None
+    return sum(1 for x in valid if x > 0) / len(valid)
+
+
+def _ic_half_life(ic_series: list) -> Optional[float]:
+    """从 ic_series 估计信号衰减半衰期（需至少 10 个有效值）。"""
+    valid = [x for x in (ic_series or []) if x is not None and x == x]
+    if len(valid) < 10:
+        return None
+    n = len(valid)
+    half = n // 2
+    if half == 0:
+        return None
+    first_half = sum(valid[:half]) / half
+    second_half = sum(valid[half:]) / (n - half)
+    if first_half <= 0 or second_half <= 0:
+        return None
+    if second_half >= first_half:
+        return float("inf")
+    ratio = first_half / second_half
+    try:
+        return half / math.log2(ratio)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
 def _rule_judge(trial: dict) -> dict:
-    """规则判读：OOS 稳定正 IC 且 train 同正 → verified；OOS 缺失/非正 → rejected；否则 active。"""
+    """规则判读：严格版——OOS IC≥0.03 且 Sharpe≥0.5 且 train 同向 → verified。
+
+    新增检查：IC 正比例≥0.52、IC 衰减半衰期≥2、年化换手<30。
+    """
     expression = str(trial.get("expression") or "")
     train_ic = _num(trial.get("train_ic"))
     test_ic = _num(trial.get("test_ic"))
     test_sharpe = _num(trial.get("test_sharpe"))
     test_mdd = _num(trial.get("test_mdd"))
+    turnover = _num(trial.get("turnover_annual"))
     tags = _rule_tags(expression)
 
-    oos_ok = test_ic is not None and test_ic > 0 and test_sharpe is not None and test_sharpe > 0
-    if oos_ok and train_ic is not None and train_ic > 0:
-        reason = (
-            f"样本外稳定正IC(test_ic={test_ic:.4f})且多空夏普为正"
-            f"(sharpe={test_sharpe:.3f})，train期同向为正，判定为可靠因子。"
-        )
-        return {"status": "verified", "reason": reason, "tags": tags}
+    # 从 ic_series 提取 IC 正比例和半衰期（供质量检查）
+    ic_series = trial.get("ic_series") or []
+    ic_pos_ratio = _ic_positive_ratio(ic_series)
+    half_life = _ic_half_life(ic_series)
 
+    # 1. 无 OOS 数据 → rejected
     if test_ic is None:
-        reason = "无OOS：缺少 test_ic 数据，无法证明样本外有效性，判定为失败候选。"
-    elif test_ic <= 0 or (test_sharpe is not None and test_sharpe <= 0):
-        reason = (
-            f"OOS失效：test_ic={test_ic:.4f} 非正"
-            + (f" 或 sharpe={test_sharpe:.3f}<=0" if test_sharpe is not None else "")
-            + "，样本外无正IC，判定为失败候选。"
-        )
-    else:
-        reason = (
-            f"OOS失效：test_ic={test_ic:.4f} 为正但多空夏普缺失或非正"
-            + (f"(mdd={test_mdd:.3f})" if test_mdd is not None else "")
-            + "，样本外稳定性不足，判定为失败候选。"
-        )
-    return {"status": "rejected", "reason": reason, "tags": tags}
+        return {"status": "rejected",
+                "reason": "无OOS：缺少 test_ic 数据，无法证明样本外有效性，判定为失败候选。",
+                "tags": tags}
+
+    # 2. test_ic 低于最低信号强度 → rejected
+    if test_ic < 0.02:
+        return {"status": "rejected",
+                "reason": f"OOS信号过弱：test_ic={test_ic:.4f}<0.02，低于噪声门槛，判定为失败候选。",
+                "tags": tags}
+
+    # 3. 多空亏钱 → rejected
+    if test_sharpe is not None and test_sharpe < 0:
+        return {"status": "rejected",
+                "reason": f"多空亏损：test_sharpe={test_sharpe:.3f}<0，样本外多空组合亏钱，判定为失败候选。",
+                "tags": tags}
+
+    # 4. IC 正比例检查（需足够数据）
+    if ic_pos_ratio is not None and ic_pos_ratio < 0.52:
+        return {"status": "rejected",
+                "reason": f"IC不稳定：IC正值比例={ic_pos_ratio:.2%}<52%，因子预测力不可靠，判定为失败候选。",
+                "tags": tags}
+
+    # 5. 半衰期检查（信号衰减太快）
+    if half_life is not None and half_life != float("inf") and half_life < 2:
+        return {"status": "rejected",
+                "reason": f"信号衰减过快：半衰期={half_life:.1f}<2期，无法支撑实际交易，判定为失败候选。",
+                "tags": tags}
+
+    # 6. 换手率检查
+    if turnover is not None and turnover > 30:
+        return {"status": "rejected",
+                "reason": f"换手过高：年化换手={turnover:.1f}>30，交易成本将吃掉alpha，判定为失败候选。",
+                "tags": tags}
+
+    # 7. verified：IC + Sharpe + train 全部达标
+    if test_ic >= 0.03 and test_sharpe is not None and test_sharpe >= 0.5:
+        if train_ic is not None and train_ic > 0:
+            reason = (
+                f"样本外稳定正IC(test_ic={test_ic:.4f}≥0.03)且多空夏普达标"
+                f"(sharpe={test_sharpe:.3f}≥0.5)，train期同向为正，判定为可靠因子。"
+            )
+            return {"status": "verified", "reason": reason, "tags": tags}
+        else:
+            reason = (
+                f"OOS达标(test_ic={test_ic:.4f}, sharpe={test_sharpe:.3f})"
+                f"但train_ic={f'{train_ic:.4f}' if train_ic is not None else 'n/a'}非正，"
+                f"训练期信号方向不一致，需进一步验证。"
+            )
+            return {"status": "active", "reason": reason, "tags": tags}
+
+    # 8. active：IC 或 Sharpe 至少有一个存在但未达标
+    if test_ic is not None or test_sharpe is not None:
+        parts = []
+        if test_ic is not None and test_ic < 0.03:
+            parts.append(f"test_ic={test_ic:.4f}<0.03")
+        if test_sharpe is not None and test_sharpe < 0.5:
+            parts.append(f"sharpe={test_sharpe:.3f}<0.5")
+        if test_sharpe is None:
+            parts.append("多空夏普缺失")
+        reason = f"OOS部分达标但未达门槛({', '.join(parts)})，继续研究。"
+        return {"status": "active", "reason": reason, "tags": tags}
+
+    # 9. 兆底 rejected
+    return {"status": "rejected",
+            "reason": "OOS指标均缺失，无法证明样本外有效性，判定为失败候选。",
+            "tags": tags}
 
 
 # ---- 规则兜底：brief --------------------------------------------------------
@@ -575,9 +660,9 @@ def _rule_strategy_tags(strat: dict) -> List[str]:
 
     sharpe = _num(strat.get("sharpe"))
     if sharpe is not None:
-        if sharpe >= 1.0:
+        if sharpe >= 1.5:
             tags.append("high_sharpe")
-        elif sharpe < 0.5:
+        elif sharpe < 1.0:
             tags.append("low_sharpe")
     if strat.get("composite_fwd_ic") is not None or strat.get("composite_fwd_ic") != "":
         tags.append("composite")
@@ -587,12 +672,18 @@ def _rule_strategy_tags(strat: dict) -> List[str]:
 
 
 def _rule_strategy_judge(strat: dict, gate: dict) -> dict:
-    """策略判读规则：按晋升门（min_sharpe / 回撤上限）与 state 阶段判定。"""
+    """策略判读规则：严格版——夏普≥1.0、回撤≤-15%、Calmar≥1.0、胜率≥45%、模拟盘≥30天。"""
     state = str(strat.get("state") or "").upper()
     sharpe = _num(strat.get("sharpe"))
     mdd = _num(strat.get("max_drawdown"))
-    min_sharpe = _num(gate.get("min_sharpe", 0.5))
-    min_drawdown = _num(gate.get("min_drawdown", -0.30))
+    calmar = _num(strat.get("calmar"))
+    win_rate = _num(strat.get("win_rate"))
+    paper_days = _num(strat.get("paper_days"))
+    min_sharpe = _num(gate.get("min_sharpe", 1.0))
+    min_drawdown = _num(gate.get("min_drawdown", -0.15))
+    min_calmar = _num(gate.get("min_calmar", 1.0))
+    min_win_rate = _num(gate.get("min_win_rate", 0.45))
+    min_paper_days = _num(gate.get("min_paper_days", 30))
     tags = _rule_strategy_tags(strat)
 
     # state 处 IDEA/RESEARCH，尚无回测指标 → active
@@ -602,7 +693,7 @@ def _rule_strategy_judge(strat: dict, gate: dict) -> dict:
         )
         return {"status": "active", "reason": reason, "tags": tags}
 
-    # 回撤超限（上限为负值，max_drawdown 小于下限即为回撤过深）→ rejected
+    # 1. 回撤超限 → rejected
     if mdd is not None and min_drawdown is not None and mdd < min_drawdown:
         reason = (
             f"回撤超限：max_drawdown={mdd:.3f} 低于回撤上限 {min_drawdown:.3f}，"
@@ -610,7 +701,7 @@ def _rule_strategy_judge(strat: dict, gate: dict) -> dict:
         )
         return {"status": "rejected", "reason": reason, "tags": tags}
 
-    # 夏普不达标 → rejected
+    # 2. 夏普不达标 → rejected
     if sharpe is not None and min_sharpe is not None and sharpe < min_sharpe:
         reason = (
             f"夏普不达标：sharpe={sharpe:.3f} < 门槛 {min_sharpe:.3f}，"
@@ -618,16 +709,46 @@ def _rule_strategy_judge(strat: dict, gate: dict) -> dict:
         )
         return {"status": "rejected", "reason": reason, "tags": tags}
 
-    # sharpe 有且达标 + (回撤缺省或未超限) + state 达 BACKTEST/PAPER 及以上 → verified
+    # 3. Calmar 比率不达标 → rejected
+    if calmar is not None and min_calmar is not None and calmar < min_calmar:
+        reason = (
+            f"Calmar不达标：calmar={calmar:.3f} < 门槛 {min_calmar:.3f}，"
+            "收益/回撤比不足，判定为失败策略。"
+        )
+        return {"status": "rejected", "reason": reason, "tags": tags}
+
+    # 4. 胜率不达标 → rejected
+    if win_rate is not None and min_win_rate is not None and win_rate < min_win_rate:
+        reason = (
+            f"胜率不达标：win_rate={win_rate:.3f} < 门槛 {min_win_rate:.3f}，"
+            "交易胜率过低，判定为失败策略。"
+        )
+        return {"status": "rejected", "reason": reason, "tags": tags}
+
+    # 5. 模拟盘天数不足 → rejected
+    if paper_days is not None and min_paper_days is not None and paper_days < min_paper_days:
+        reason = (
+            f"模拟盘天数不足：paper_days={paper_days:.0f} < 门槛 {min_paper_days:.0f}，"
+            "统计样本不足，判定为失败策略。"
+        )
+        return {"status": "rejected", "reason": reason, "tags": tags}
+
+    # sharpe 有且达标 + 所有门槛通过 + state 达 BACKTEST/PAPER 及以上 → verified
     if (
         sharpe is not None
         and (min_sharpe is None or sharpe >= min_sharpe)
         and (mdd is None or min_drawdown is None or mdd >= min_drawdown)
+        and (calmar is None or min_calmar is None or calmar >= min_calmar)
+        and (win_rate is None or min_win_rate is None or win_rate >= min_win_rate)
+        and (paper_days is None or min_paper_days is None or paper_days >= min_paper_days)
         and state in ("BACKTEST", "PAPER", "LIVE")
     ):
         reason = (
             f"策略通过晋升门：sharpe={sharpe:.3f}（≥{min_sharpe:.3f}）"
             + (f"，max_drawdown={mdd:.3f} 未超限" if mdd is not None else "，无回撤记录")
+            + (f"，calmar={calmar:.3f}（≥{min_calmar:.3f}）" if calmar is not None else "")
+            + (f"，win_rate={win_rate:.3f}（≥{min_win_rate:.3f}）" if win_rate is not None else "")
+            + (f"，paper_days={paper_days:.0f}（≥{min_paper_days:.0f}）" if paper_days is not None else "")
             + f"，状态达{state}阶段，可晋升/认可。"
         )
         return {"status": "verified", "reason": reason, "tags": tags}
@@ -638,16 +759,19 @@ def _rule_strategy_judge(strat: dict, gate: dict) -> dict:
 
 
 def _build_strategy_judge_user(strat: dict, gate: dict) -> str:
-    """构造策略判读的用户消息（strategy_id/state/sharpe/mdd/composite + 门槛）。"""
+    """构造策略判读的用户消息（strategy_id/state/sharpe/mdd/calmar/win_rate/paper_days + 门槛）。"""
     lines = []
     sid = strat.get("run_id") or strat.get("strategy_id")
     lines.append(f"strategy_id: {sid}")
     lines.append(f"state: {strat.get('state')}")
-    for key in ("sharpe", "max_drawdown", "composite_fwd_ic"):
+    for key in ("sharpe", "max_drawdown", "calmar", "win_rate", "paper_days", "composite_fwd_ic"):
         val = _num(strat.get(key))
         lines.append(f"{key}={f'{val:.4f}' if val is not None else 'n/a'}")
-    lines.append(f"gate min_sharpe={gate.get('min_sharpe', 0.5)} "
-                 f"min_drawdown={gate.get('min_drawdown', -0.30)}")
+    lines.append(f"gate min_sharpe={gate.get('min_sharpe', 1.0)} "
+                 f"min_drawdown={gate.get('min_drawdown', -0.15)} "
+                 f"min_calmar={gate.get('min_calmar', 1.0)} "
+                 f"min_win_rate={gate.get('min_win_rate', 0.45)} "
+                 f"min_paper_days={gate.get('min_paper_days', 30)}")
     lines.append("Decide whether this strategy passes the promotion gate.")
     return "\n".join(lines)
 
@@ -671,8 +795,11 @@ async def judge_strategy(
         ``{"status": "verified"|"active"|"rejected", "reason": str, "tags": [str]}``
     """
     gate = dict(gate or {})
-    gate.setdefault("min_sharpe", 0.5)
-    gate.setdefault("min_drawdown", -0.30)
+    gate.setdefault("min_sharpe", 1.0)
+    gate.setdefault("min_drawdown", -0.15)
+    gate.setdefault("min_calmar", 1.0)
+    gate.setdefault("min_win_rate", 0.45)
+    gate.setdefault("min_paper_days", 30)
 
     use_llm = (not fallback_rules) and (not _is_mock_provider(provider))
     if use_llm:

@@ -40,9 +40,11 @@ _PROMOTION_ORDER = [
 class PromotionGate:
     """晋升校验门配置。"""
 
-    min_sharpe: float = 0.5
-    max_drawdown: float = -0.30   # 最大回撤下限（负值）
-    min_paper_days: int = 1
+    min_sharpe: float = 1.0          # 年化夏普 ≥ 1.0（量化行业基本门槛）
+    max_drawdown: float = -0.15      # 最大回撤下限 -15%（更严格的风控）
+    min_paper_days: int = 30         # 模拟盘至少跑 30 天
+    min_calmar: float = 1.0          # Calmar 比率 = 年化收益 / |最大回撤| ≥ 1.0
+    min_win_rate: float = 0.45       # 交易胜率 ≥ 45%
     require_risk_review: bool = True
 
 
@@ -157,10 +159,25 @@ class LifecycleManager:
             reasons.append(f"当前状态 {cur.value} 不允许直接进入 LIVE")
         if to == LifecycleState.LIVE:
             m = rec.metrics
+            # 1. 夏普门槛
             if m.get("sharpe", 0.0) < self.gate.min_sharpe:
                 reasons.append(f"夏普 {m.get('sharpe')} < {self.gate.min_sharpe}")
+            # 2. 最大回撤门槛
             if m.get("max_drawdown", 0.0) < self.gate.max_drawdown:
                 reasons.append(f"最大回撤 {m.get('max_drawdown')} 超过阈值 {self.gate.max_drawdown}")
+            # 3. 模拟盘天数门槛
+            paper_days = m.get("paper_days", 0)
+            if paper_days < self.gate.min_paper_days:
+                reasons.append(f"模拟盘天数 {paper_days} < {self.gate.min_paper_days}")
+            # 4. Calmar 比率门槛
+            calmar = m.get("calmar")
+            if calmar is not None and calmar < self.gate.min_calmar:
+                reasons.append(f"Calmar 比率 {calmar} < {self.gate.min_calmar}")
+            # 5. 胜率门槛
+            win_rate = m.get("win_rate")
+            if win_rate is not None and win_rate < self.gate.min_win_rate:
+                reasons.append(f"胜率 {win_rate} < {self.gate.min_win_rate}")
+            # 6. 风控复核
             if self.gate.require_risk_review and "risk_reviewed" not in rec.notes:
                 reasons.append("未完成风控复核")
         return (len(reasons) == 0, reasons)

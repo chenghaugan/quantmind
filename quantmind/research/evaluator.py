@@ -209,7 +209,7 @@ class FactorEvaluator:
 
         # 综合主分
         composite = self._composite(
-            ic_mean=ic_mean, ls_return=ls_total, ls_sharpe=ls_sharpe,
+            ic_mean=ic_mean, ir=ir, ls_return=ls_total, ls_sharpe=ls_sharpe,
             ls_mdd=ls_mdd, monotonicity=max(mono5, mono10), turnover=turnover_annual,
         )
 
@@ -357,10 +357,10 @@ class FactorEvaluator:
         hi = float(np.nanpercentile(means, 100 * (1 - alpha / 2)))
         return lo, hi
 
-    # ---- 综合主分（v2 归一加权）----
+    # ---- 综合主分（v3 归一加权）----
     @staticmethod
-    def _composite(ic_mean, ls_return, ls_sharpe, ls_mdd, monotonicity, turnover) -> float:
-        """v2 权重：IC 0.2 + Sharpe 0.3 + 收益 0.3 + MDD 0.2 + 单调性 0.1 + 换手惩罚 0.1。
+    def _composite(ic_mean, ir, ls_return, ls_sharpe, ls_mdd, monotonicity, turnover) -> float:
+        """v3 权重：IC 0.30 + IR 0.15 + Sharpe 0.20 + 收益 0.15 + MDD 0.10 + 单调性 0.05 + 换手惩罚 0.05。
 
         各子分归一到 [0,1]（绝对值衡量预测力，方向由策略翻转处理）。
         """
@@ -374,7 +374,10 @@ class FactorEvaluator:
         mon = num(monotonicity)
         to = num(turnover)
 
+        ir_val = num(ir)
+
         ic_s = _sigmoid(ic / 0.05) if pd.notna(ic) else 0.5
+        ir_s = _sigmoid(ir_val / 0.5) if pd.notna(ir_val) else 0.5
         shp_s = _sigmoid(shp / 1.0) if pd.notna(shp) else 0.5
         ret_s = _sigmoid(ret / 0.30) if pd.notna(ret) else 0.5
         mdd_s = (1.0 - _sigmoid(abs(mdd) / 0.20)) if pd.notna(mdd) else 0.5
@@ -382,7 +385,8 @@ class FactorEvaluator:
         to_s = (1.0 - _sigmoid(to / 10.0)) if pd.notna(to) else 0.5
 
         return float(
-            0.2 * ic_s + 0.3 * shp_s + 0.3 * ret_s + 0.2 * mdd_s + 0.1 * mon_s + 0.1 * to_s
+            0.30 * ic_s + 0.15 * ir_s + 0.20 * shp_s + 0.15 * ret_s
+            + 0.10 * mdd_s + 0.05 * mon_s + 0.05 * to_s
         )
 
     # ---- 多标的截面评估 ----
@@ -452,7 +456,7 @@ class FactorEvaluator:
         ls_series = pd.Series(ls_ret_list)
         ls_total, ls_sharpe, ls_mdd = self._portfolio_stats(ls_series, periods_per_year)
         composite = self._composite(
-            ic_mean=ic_mean, ls_return=ls_total, ls_sharpe=ls_sharpe,
+            ic_mean=ic_mean, ir=ir, ls_return=ls_total, ls_sharpe=ls_sharpe,
             ls_mdd=ls_mdd, monotonicity=float("nan"), turnover=float("nan"),
         )
         return FactorReport(
@@ -648,7 +652,7 @@ class FactorEvaluator:
         ls_series = pd.Series(ls_ret_list)
         ls_total, ls_sharpe, ls_mdd = self._portfolio_stats(ls_series, periods_per_year)
         composite = self._composite(
-            ic_mean=ic_mean, ls_return=ls_total, ls_sharpe=ls_sharpe,
+            ic_mean=ic_mean, ir=ir, ls_return=ls_total, ls_sharpe=ls_sharpe,
             ls_mdd=ls_mdd, monotonicity=(max(mono5, mono10) if pd.notna(mono5) else float("nan")),
             turnover=turn,
         )

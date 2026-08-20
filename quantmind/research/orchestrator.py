@@ -67,7 +67,7 @@ class E2EConfig:
     train_frac: float = 0.6
     val_frac: float = 0.2
     dedup_threshold: float = 0.7
-    min_abs_ic: float = 0.0
+    min_abs_ic: float = 0.03
     run_composite: bool = True
     composite_scheme: str = "icir"        # equal | icir | inv_var | min_var
     composite_standardize: str = "zscore"
