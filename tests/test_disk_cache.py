@@ -73,6 +73,31 @@ def test_roundtrip_real_source_populates_cache(tmp_path):
     assert sink2["rb0"] == "disk_cache"
 
 
+def test_roundtrip_full_symbol_notation_matches_legacy_file(tmp_path):
+    """回归：完整 symbol 带交易所后缀（如 cu0.SHFE）时，_path 须剥去后缀取裸 code，
+    使读/写命中同一文件（{code}.{exchange}.{interval}.parquet，单一交易所段）。
+    旧实现用完整 symbol 拼路径得到 cu0.SHFE.SHFE.1d，导致真实缓存永不命中→回退 mock。
+    """
+    feed = _FakeRealFeed()
+    dm = _make_dm(str(tmp_path), feed)
+
+    req = HistoryRequest(symbol="cu0.SHFE", exchange=Exchange.SHFE, interval=Interval.DAILY)
+    bars1 = asyncio.run(dm.get_bar_data(req, source_sink={}))
+    assert len(bars1) == feed.n  # 首拉真实源
+    assert feed.calls == 1
+
+    # 文件名须为 cu0.SHFE.1d.parquet（仅一个交易所段），而非 cu0.SHFE.SHFE.1d.parquet
+    files = list(tmp_path.glob("*.parquet"))
+    assert [f.name for f in files] == ["cu0.SHFE.1d.parquet"]
+
+    # 二次查询直接命中磁盘缓存（真实源不再调用）→ 否则即为由路径错位导致的回退
+    sink: dict = {}
+    bars2 = asyncio.run(dm.get_bar_data(req, source_sink=sink))
+    assert feed.calls == 1
+    assert sink.get("cu0.SHFE") == "disk_cache"
+    assert len(bars2) == feed.n
+
+
 def test_window_filter_from_cache(tmp_path):
     feed = _FakeRealFeed(n=60)
     dm = _make_dm(str(tmp_path), feed)
