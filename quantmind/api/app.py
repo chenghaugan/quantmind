@@ -844,6 +844,58 @@ async def factor_e2e(req: FactorE2ERequest):
 # --------------------------------------------------------------------------
 # 因子衰减监控（对标 Vibe-Trading strategy-dev-manager）
 # --------------------------------------------------------------------------
+_FUTURES_CODE_EXCHANGE = {
+    # CFFEX 金融期货
+    "IF": "CFFEX", "IH": "CFFEX", "IC": "CFFEX", "IM": "CFFEX",
+    "TS": "CFFEX", "TF": "CFFEX", "T": "CFFEX",
+    # SHFE 上期所
+    "RB": "SHFE", "HC": "SHFE", "SS": "SHFE", "WR": "SHFE", "AG": "SHFE",
+    "AU": "SHFE", "BU": "SHFE", "CU": "SHFE", "AL": "SHFE", "ZN": "SHFE",
+    "PB": "SHFE", "NI": "SHFE", "SN": "SHFE", "SP": "SHFE", "AO": "SHFE",
+    "FU": "SHFE", "RU": "SHFE",
+    # INE 能源中心
+    "SC": "INE", "NR": "INE", "LU": "INE", "EC": "INE", "BC": "INE",
+    # DCE 大商所
+    "I": "DCE", "J": "DCE", "JM": "DCE", "M": "DCE", "Y": "DCE", "P": "DCE",
+    "L": "DCE", "V": "DCE", "PP": "DCE", "EG": "DCE", "EB": "DCE", "PG": "DCE",
+    "LH": "DCE", "RR": "DCE", "BB": "DCE", "FB": "DCE", "A": "DCE", "C": "DCE",
+    "CS": "DCE", "JD": "DCE",
+    # CZCE 郑商所
+    "MA": "CZCE", "TA": "CZCE", "FG": "CZCE", "SA": "CZCE", "UR": "CZCE",
+    "OI": "CZCE", "PK": "CZCE", "CF": "CZCE", "SR": "CZCE", "RM": "CZCE",
+    "AP": "CZCE", "SF": "CZCE", "SM": "CZCE", "CY": "CZCE", "ZC": "CZCE",
+    "SH": "CZCE", "PF": "CZCE", "PX": "CZCE", "WH": "CZCE", "RS": "CZCE",
+    # GFEX 广期所
+    "SI": "GFEX", "LC": "GFEX",
+}
+
+
+def _resolve_symbol_exchange(symbol: str, dm) -> Tuple[str, str]:
+    """把裸代码解析为 (code, exchange)。
+
+    优先读 ``code.EX`` 自带后缀 → 其次在本地行情仓库探测 ``{code}.{EXCH}.1d.parquet``
+    → 最后按期货代码映射兑底。
+    """
+    s = (symbol or "").strip()
+    if not s:
+        return s, "SHFE"
+    if "." in s:
+        head, _, exch = s.rpartition(".")
+        if head and exch:
+            return head.strip(), exch.strip().upper()
+    # 探测本地行情仓库（真实可用数据为准）
+    heads = [s, s.upper()]
+    if dm is not None and dm.disk_cache is not None:
+        for h in heads:
+            for exch in ("CFFEX", "SHFE", "DCE", "CZCE", "INE", "GFEX", "SSE", "SZSE", "HKEX"):
+                if (dm.disk_cache.root / f"{h}.{exch}.1d.parquet").exists():
+                    return h, exch
+    # 期货代码映射兑底
+    code = s.upper().rstrip("0123456789")
+    exch = _FUTURES_CODE_EXCHANGE.get(code) or _FUTURES_CODE_EXCHANGE.get(s.upper())
+    return s, (exch or "SHFE")
+
+
 @app.get("/factors/decay")
 async def factors_decay_list():
     """列出所有已扫描因子的衰减状态。"""
@@ -853,38 +905,89 @@ async def factors_decay_list():
 
 @app.post("/factors/decay/scan")
 async def factors_decay_scan():
-    """触发全量因子衰减扫描（基于知识库中已沉淀因子的 IC 时序）。
+    """触发全量因子衰减扫描（基于知识库中已沉淀因子的**真实 IC 时序**）。
 
-    简化实现：对知识库中 status=active 的因子，用其历史 IC 做衰减检测。
-    实际生产中应接入真实面板数据。
+    对每个 active 因子：用其 expression 在真实行情面板上逐日截面 rank IC
+    （无 expression/标的或真实数据不足时标记为无法评估，不伪造时序）。
     """
+    import pandas as pd
+
+    from ..data.feed.base import HistoryRequest
+    from ..research.factors.alpha_cs import Panel
+    from ..research.pipeline import _daily_ic_series
+
     scanner: FactorDecayScanner = app.state.decay_scanner
     ks = app.state.knowledge_service.store
-    # 获取所有 active 因子
+    dm = app.state.dm
     items = ks.list_items(kind="factor", limit=500)
     active_factors = [it for it in items if it.get("metadata", {}).get("status") == "active"]
 
-    import pandas as pd
-    import numpy as np
-
-    # 简化：为每个因子生成模拟 IC 时序（实际应调用 evaluate_expression）
-    # 这里仅演示状态机逻辑
     factor_ic_map: Dict[str, pd.Series] = {}
     current_states: Dict[str, FactorState] = {}
-    for it in active_factors[:20]:  # 限制数量避免超时
+    for it in active_factors[:30]:  # 限制数量避免超时
         fid = it["kb_id"]
         meta = it.get("metadata", {})
-        # 模拟 IC 时序：基于历史 IC 生成带衰减趋势的序列
-        ic_history = meta.get("ic") or 0.03
-        dates = pd.date_range(end=datetime.now(), periods=252, freq="D")
-        # 前 192 天正常，后 60 天衰减
-        ic_values = np.random.normal(ic_history, 0.02, 192).tolist()
-        decay_values = np.random.normal(ic_history * 0.4, 0.02, 60).tolist()
-        ic_values.extend(decay_values)
-        factor_ic_map[fid] = pd.Series(ic_values, index=dates)
+        expr = str(meta.get("expression") or "").strip()
+        symbols = [s for s in (meta.get("symbols") or []) if s]
+
+        empty = pd.Series(dtype=float)
+        factor_ic_map[fid] = empty
         current_states[fid] = FactorState.ACTIVE
+        if not expr or len(symbols) < 2:
+            continue  # 无表达式/标的 → 无法评估，compute_metrics 会给出"数据不足"
+
+        # 仅使用本地行情仓库真实落盘数据（不上网、不 fallback 到 mock），
+        # 保证衰减判定全部基于真实行情，且避免网络超时拖慢整仓扫描。
+        cached = []
+        for s in symbols:
+            if dm is not None and dm.disk_cache is not None:
+                _code, exch = _resolve_symbol_exchange(s, dm)
+                if (dm.disk_cache.root / f"{_code}.{exch}.1d.parquet").exists():
+                    cached.append((s, exch))
+        if len(cached) < 2:
+            continue  # 真实仓库中不足 2 个可评估标的
+
+        tasks = [dm.get_bar_data(
+            HistoryRequest(symbol=s, exchange=Exchange(exch), interval=Interval.DAILY),
+        ) for s, exch in cached]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception:  # noqa: BLE001
+            continue
+        bars_by_symbol: Dict[str, list] = {}
+        for (s, _exch), res in zip(cached, results):
+            if isinstance(res, Exception) or not res:
+                continue
+            bars_by_symbol[s] = res
+        if len(bars_by_symbol) < 2:
+            continue  # 真实数据不足以构面面板
+        try:
+            panel = Panel.from_bars(bars_by_symbol)
+            # 衰减检测只需近端窗口（history 252 / recent 60），裁到最近 ~300 个交易日，
+            # 避免对全历史（数千日）逐日 spearman 计算导致接口卡死。
+            _n = min(300, len(panel.dates))
+            if _n < 20:
+                continue
+            panel = dataclasses.replace(
+                panel,
+                close=panel.close.iloc[-_n:], open=panel.open.iloc[-_n:],
+                high=panel.high.iloc[-_n:], low=panel.low.iloc[-_n:],
+                volume=panel.volume.iloc[-_n:], amount=panel.amount.iloc[-_n:],
+            )
+            ic_list = _daily_ic_series(expr, panel, forward_periods=1)
+        except Exception:  # noqa: BLE001
+            continue
+        valid = [x for x in (ic_list or []) if x is not None and x == x]
+        if len(valid) < 20:
+            continue  # 真实 IC 样本过少，不做衰减判定
+        if ic_list and len(ic_list) == len(panel.dates):
+            factor_ic_map[fid] = pd.Series(ic_list, index=panel.dates)
 
     results = scanner.scan_all(factor_ic_map, current_states)
+    # 未评估（空/不足）的因子打上明确标记，避免与正常扫描混淆
+    for m in results:
+        if m.n_samples_history == 0:
+            m.notes = ["无真实 IC 时序（缺表达式/标的或真实数据不足），未做衰减评估"]
     return {
         "scanned": len(results),
         "factors": [m.to_dict() for m in results],

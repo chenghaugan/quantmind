@@ -64,7 +64,8 @@ if not factors:
     note("暂无因子衰减记录，点击「全量扫描」开始监控。", "info")
 else:
     from collections import Counter
-    counts = Counter(f.get("state", "ACTIVE") for f in factors)
+    # 状态值为小写（active/monitoring/...），统一转为大写再统计
+    counts = Counter(str(f.get("state", "ACTIVE")).upper() for f in factors)
     STATE_META = {
         "ACTIVE": ("active", "success"),
         "MONITORING": ("monitoring", "warning"),
