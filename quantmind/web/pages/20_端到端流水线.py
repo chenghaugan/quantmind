@@ -144,6 +144,11 @@ def _render_history():
     if not trials:
         note("该次运行暂无因子试验明细。", "info")
         return
+    has_metric = any(
+        (t.get("metadata") or {}).get("test_ic") is not None for t in trials)
+    if not has_metric:
+        note("ℹ️ 该记录为**历史回填**：仅含因子状态与判读，无逐因子试验指标"
+             "（train/val/test IC、Sharpe 等）。跑一次新的端到端流水线即可获得完整指标表。", "info")
     rows = []
     for t in trials:
         m = t.get("metadata") or {}
