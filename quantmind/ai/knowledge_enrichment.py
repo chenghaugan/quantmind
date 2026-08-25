@@ -87,10 +87,12 @@ async def enrich_idea(
     """
     kb = kb or KnowledgeStore()
 
-    # 1) 库内方法论检索
+    # 1) 库内方法论检索（优先 BM25，降级到关键词子串）
     kb_hits: List[dict] = []
     try:
-        kb_hits = kb.search(idea, top_k=top_k, kind="methodology") or []
+        kb_hits = kb.bm25_search(idea, top_k=top_k, kind="methodology") or []
+        if not kb_hits:
+            kb_hits = kb.search(idea, top_k=top_k, kind="methodology") or []
     except Exception as exc:  # noqa: BLE001
         _logger.debug("知识库方法论检索失败: %s", exc)
         kb_hits = []

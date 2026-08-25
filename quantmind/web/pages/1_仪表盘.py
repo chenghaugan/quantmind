@@ -8,6 +8,7 @@ import streamlit as st  # noqa: E402
 
 from utils.theme import (  # noqa: E402
     setup_page, page_header, section, kpi_row, badge, note, item_card, guard_error,
+    status_cards, divider,
 )
 from utils.api_client import APIClient  # noqa: E402
 from utils.charts import create_event_timeline  # noqa: E402
@@ -61,26 +62,25 @@ kpi_row([
     {"label": "可用策略", "value": len(strategies), "tone": "accent", "hint": "回测/模拟/实盘通用"},
 ])
 
+# ---------------------------------------------------------------- 组件状态（带脉冲指示灯）
 st.write("")
-c1, c2, c3 = st.columns(3, gap="small")
-labels = {
-    "data_manager": ("数据管理器", "💾"),
-    "event_engine": ("事件引擎", "⚡"),
-    "lifecycle": ("生命周期管理", "🔄"),
-}
-for col, (key, (label, icon)) in zip((c1, c2, c3), labels.items()):
-    val = comps.get(key, "unknown")
-    ok = val in ("active", "running")
-    with col:
-        with st.container(border=True):
-            st.markdown(
-                f"<div class='qm-mod'><span class='qm-mod-icon'>{icon}</span>"
-                f"<span class='qm-mod-name'>{label}</span></div>"
-                f"<div style='margin-top:.45rem'>"
-                + badge("正常" if ok else val, "success" if ok else "danger")
-                + "</div>",
-                unsafe_allow_html=True,
-            )
+status_cards([
+    {
+        "label": "数据管理器",
+        "value": "正常" if comps.get("data_manager") in ("active", "running") else comps.get("data_manager", "unknown"),
+        "tone": "ok" if comps.get("data_manager") in ("active", "running") else "err",
+    },
+    {
+        "label": "事件引擎",
+        "value": "运行中" if comps.get("event_engine") == "running" else "已停止",
+        "tone": "ok" if comps.get("event_engine") == "running" else "warn",
+    },
+    {
+        "label": "生命周期管理",
+        "value": "已激活" if comps.get("lifecycle") == "active" else "未激活",
+        "tone": "ok" if comps.get("lifecycle") == "active" else "warn",
+    },
+])
 
 # ---------------------------------------------------------------- 数据源
 section("数据源", f"共 {len(feeds)} 个已注册 Feed")

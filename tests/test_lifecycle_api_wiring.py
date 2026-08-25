@@ -108,7 +108,7 @@ def test_persist_paper_verified_with_brief(tmp_path, monkeypatch):
     store.upsert_strategy_lifecycle("p1", state="PAPER", source="AI生成")
     _wire_app_state(monkeypatch, knowledge_store=store)
 
-    metrics = {"sharpe": 0.9, "max_drawdown": -0.12, "trade_count": 12}
+    metrics = {"sharpe": 1.2, "max_drawdown": -0.12, "trade_count": 12}
     judged = asyncio.run(_persist_paper_lifecycle("p1", metrics, idea="螺纹钢动量"))
     assert judged["status"] == "verified"
 

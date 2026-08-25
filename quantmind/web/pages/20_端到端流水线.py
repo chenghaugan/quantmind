@@ -106,67 +106,191 @@ def _history_sources():
 
 
 def _render_history():
-    """端到端运行历史报告：列出历史 run（idea/时间/复合统计/AI brief），选中可看因子试验明细。"""
+    """端到端运行历史报告：双栏布局（左侧列表 + 右侧详情）+ 完整指标 + 可视化。"""
     st.markdown("#### 📜 历史运行报告")
     runs, detail_fun = _history_sources()
     if not runs:
         note("暂无历史运行记录。跑完一次「端到端流水线」即会留存（含复合 alpha 统计与 AI 经验简报）。"
              "<br>提示：若刚跑完仍看不到，请重启后端（旧后端无 /runs 接口），再重跑一次。", "info")
         return
+    
     source_hint = "（本地知识库直读）" if detail_fun is not APIClient.run_detail else ""
-    labels = {}
+    st.caption(f"数据源：后端 /runs{source_hint} · 共 {len(runs)} 条记录")
+    
+    # 顶部筛选区
+    filter_cols = st.columns([2, 1, 1])
+    with filter_cols[0]:
+        search_text = st.text_input("🔎 搜索想法", placeholder="输入关键词过滤...", key="hist_search")
+    with filter_cols[1]:
+        status_filter = st.selectbox("状态筛选", ["全部", "completed", "failed", "running"], key="hist_status")
+    with filter_cols[2]:
+        sort_by = st.selectbox("排序", ["时间倒序", "时间正序", "Sharpe 降序"], key="hist_sort")
+    
+    # 过滤和排序
+    filtered_runs = []
     for r in runs:
         md = r.get("metadata") or {}
-        idea = str(md.get("idea") or "—")
-        created = str(r.get("created_at") or "")[:19]
+        idea = str(md.get("idea") or "")
         status = str(md.get("status") or "")
-        labels[r["run_id"]] = f"{created} ｜ {idea} ｜ {status}"
-    st.caption(f"数据源：后端 /runs{source_hint}")
-    page = st.selectbox("选择运行记录", list(labels),
-                        format_func=lambda k: labels.get(k, k))
-    if page != st.session_state.get("hist_sel") or st.button("🔄 加载该次报告"):
-        st.session_state["hist_sel"] = page
-        st.session_state["hist_detail"] = detail_fun(page, timeout=20)
-    det = st.session_state.get("hist_detail") or {}
-    if guard_error(det, "运行详情"):
+        
+        # 应用筛选
+        if search_text and search_text.lower() not in idea.lower():
+            continue
+        if status_filter != "全部" and status != status_filter:
+            continue
+        
+        filtered_runs.append(r)
+    
+    # 排序
+    if sort_by == "时间倒序":
+        filtered_runs.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    elif sort_by == "时间正序":
+        filtered_runs.sort(key=lambda x: x.get("created_at") or "")
+    elif sort_by == "Sharpe 降序":
+        filtered_runs.sort(key=lambda x: (x.get("metadata") or {}).get("composite_sharpe") or 0, reverse=True)
+    
+    st.caption(f"显示 {len(filtered_runs)} / {len(runs)} 条")
+    
+    if not filtered_runs:
+        note("无匹配记录，请调整筛选条件。", "info")
         return
-    md = det.get("metadata") or {}
-    kpi_row([
-        {"label": "复合前向IC", "value": fmt_num(md.get("composite_fwd_ic"), 4)},
-        {"label": "复合Sharpe", "value": fmt_num(md.get("composite_sharpe"), 3)},
-        {"label": "代表因子", "value": str(md.get("n_representative") or 0)},
-        {"label": "已验证假设", "value": str(md.get("n_verified_hypotheses") or 0)},
-        {"label": "算法", "value": str(md.get("algo") or "—")},
-    ])
-    with st.expander("📝 AI 经验简报", expanded=False):
-        st.write(str(md.get("brief") or "（无简报）"))
-    trials = det.get("trials") or []
-    if not trials:
-        note("该次运行暂无因子试验明细。", "info")
-        return
-    has_metric = any(
-        (t.get("metadata") or {}).get("test_ic") is not None for t in trials)
-    if not has_metric:
-        note("ℹ️ 该记录为**历史回填**：仅含因子状态与判读，无逐因子试验指标"
-             "（train/val/test IC、Sharpe 等）。跑一次新的端到端流水线即可获得完整指标表。", "info")
-    rows = []
-    for t in trials:
-        m = t.get("metadata") or {}
-        is_rep = bool(m.get("is_representative"))
-        rows.append({
-            "表达式": (str(m.get("expression") or ""))[:42],
-            "判定": m.get("status") or "",
-            "代表": "★" if is_rep else "",
-            "trainIC": fmt_num(m.get("train_ic"), 4),
-            "valIC": fmt_num(m.get("val_ic"), 4),
-            "testIC": fmt_num(m.get("test_ic"), 4),
-            "testSharpe": fmt_num(m.get("test_sharpe"), 3),
-            "收益%": fmt_num(m.get("test_return"), 2),
-            "回撤%": fmt_num(m.get("test_mdd"), 2),
-            "判读理由": str(m.get("reason") or ""),
-        })
-    st.caption(f"共 {len(rows)} 条因子试验（★=去冗余后的代表因子）")
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    
+    # 双栏布局
+    list_col, detail_col = st.columns([1, 2])
+    
+    with list_col:
+        st.markdown("**运行列表**")
+        for idx, r in enumerate(filtered_runs):
+            md = r.get("metadata") or {}
+            idea = str(md.get("idea") or "—")[:50]
+            created = str(r.get("created_at") or "")[:16]
+            status = str(md.get("status") or "")
+            sharpe = md.get("composite_sharpe")
+            
+            # 状态徽章
+            status_badge = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
+            
+            # 列表项
+            btn_label = f"{status_badge} {created}\n{idea}"
+            if sharpe is not None:
+                btn_label += f"\nSharpe: {sharpe:.2f}"
+            
+            btn_key = f"hist_run_{r.get('run_id')}"
+            if st.button(btn_label, key=btn_key, use_container_width=True):
+                st.session_state["hist_selected"] = r.get("run_id")
+    
+    with detail_col:
+        selected_id = st.session_state.get("hist_selected")
+        if not selected_id:
+            note("点击左侧运行记录查看详情", "info")
+            return
+        
+        # 加载详情
+        det = detail_fun(selected_id, timeout=20)
+        if guard_error(det, "运行详情"):
+            return
+        
+        md = det.get("metadata") or {}
+        
+        # 概览 KPI
+        st.markdown("### 📊 运行概览")
+        # 投资想法独立展示（长文本）
+        idea_text = str(md.get("idea") or "—")
+        st.info(f"💡 **投资想法**：{idea_text}")
+        # 其他短指标放 KPI 行
+        kpi_row([
+            {"label": "运行时间", "value": str(det.get("created_at") or "")[:19], "tone": "neutral"},
+            {"label": "状态", "value": str(md.get("status") or "—"), "tone": "up" if md.get("status") == "completed" else "down"},
+            {"label": "算法", "value": str(md.get("algo") or "—").upper(), "tone": "neutral"},
+            {"label": "标的数", "value": str(md.get("n_symbols") or 0), "tone": "neutral"},
+        ])
+        
+        # 复合 Alpha 指标
+        st.markdown("### 🎯 复合 Alpha 表现")
+        kpi_row([
+            {"label": "复合前向 IC", "value": fmt_num(md.get("composite_fwd_ic"), 4),
+             "tone": "up" if (md.get("composite_fwd_ic") or 0) > 0 else "neutral"},
+            {"label": "复合 Sharpe", "value": fmt_num(md.get("composite_sharpe"), 3),
+             "tone": "up" if (md.get("composite_sharpe") or 0) > 0 else "neutral"},
+            {"label": "代表因子", "value": str(md.get("n_representative") or 0), "tone": "accent"},
+            {"label": "已验证假设", "value": str(md.get("n_verified_hypotheses") or 0), "tone": "accent"},
+            {"label": "总收益", "value": fmt_pct(md.get("composite_return")),
+             "tone": "up" if (md.get("composite_return") or 0) > 0 else "neutral"},
+            {"label": "最大回撤", "value": fmt_pct(md.get("composite_max_drawdown")),
+             "tone": "down" if (md.get("composite_max_drawdown") or 0) < -0.1 else "neutral"},
+        ])
+        
+        # AI 经验简报
+        brief = md.get("brief") or ""
+        if brief:
+            with st.expander("📝 AI 经验简报", expanded=True):
+                st.markdown(brief)
+        
+        # 因子试验明细
+        trials = det.get("trials") or []
+        if not trials:
+            note("该次运行暂无因子试验明细。", "info")
+            return
+        
+        has_metric = any((t.get("metadata") or {}).get("test_ic") is not None for t in trials)
+        if not has_metric:
+            note("ℹ️ 该记录为**历史回填**：仅含因子状态与判读，无逐因子试验指标。", "info")
+        
+        st.markdown("### 🔬 因子试验明细")
+        
+        # 因子统计概览
+        n_verified = sum(1 for t in trials if (t.get("metadata") or {}).get("status") in ("verified", "pass", "passed"))
+        n_rejected = sum(1 for t in trials if (t.get("metadata") or {}).get("status") in ("rejected", "fail", "failed"))
+        n_representative = sum(1 for t in trials if (t.get("metadata") or {}).get("is_representative"))
+        
+        kpi_row([
+            {"label": "总因子数", "value": str(len(trials)), "tone": "accent"},
+            {"label": "已验证", "value": str(n_verified), "tone": "up"},
+            {"label": "被拒绝", "value": str(n_rejected), "tone": "down"},
+            {"label": "代表因子", "value": str(n_representative), "tone": "accent"},
+        ])
+        
+        # 因子明细表
+        rows = []
+        for t in trials:
+            m = t.get("metadata") or {}
+            is_rep = bool(m.get("is_representative"))
+            rows.append({
+                "表达式": (str(m.get("expression") or ""))[:50],
+                "状态": m.get("status") or "",
+                "代表": "★" if is_rep else "",
+                "Train IC": fmt_num(m.get("train_ic"), 4),
+                "Val IC": fmt_num(m.get("val_ic"), 4),
+                "Test IC": fmt_num(m.get("test_ic"), 4),
+                "Test Sharpe": fmt_num(m.get("test_sharpe"), 3),
+                "Test 收益": fmt_pct(m.get("test_return")),
+                "Test 回撤": fmt_pct(m.get("test_mdd")),
+                "判读理由": str(m.get("reason") or "")[:80],
+            })
+        
+        st.dataframe(rows, use_container_width=True, hide_index=True, height=min(60 + 35 * len(rows), 500))
+        
+        # IC 对比图（代表因子）
+        rep_trials = [t for t in trials if (t.get("metadata") or {}).get("is_representative")]
+        if rep_trials and has_metric:
+            st.markdown("### 📈 代表因子 Test IC 对比")
+            ic_data = []
+            for t in rep_trials:
+                m = t.get("metadata") or {}
+                expr = str(m.get("expression") or "")[:30]
+                ic_data.append({"因子": expr, "Test IC": m.get("test_ic") or 0})
+            
+            if ic_data:
+                import plotly.express as px
+                fig = px.bar(pd.DataFrame(ic_data), x="因子", y="Test IC", 
+                            title="代表因子样本外 IC 对比",
+                            color="Test IC", color_continuous_scale="RdYlGn")
+                fig.update_layout(height=300, xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # 原始数据（折叠）
+        with st.expander("🔎 原始数据", expanded=False):
+            st.json(det)
 
 
 
@@ -272,8 +396,34 @@ with r:
         train_frac = st.slider("训练期占比", 0.3, 0.9, 0.6, 0.05)
     with c6:
         val_frac = st.slider("验证期占比", 0.1, 0.4, 0.2, 0.05)
+    # 日期范围选择
+    st.markdown("**数据区间**（可选，留空使用全部数据）")
+    e2e_dc1, e2e_dc2 = st.columns(2)
+    with e2e_dc1:
+        e2e_start_date = st.date_input("开始日期", value=None, format="YYYY-MM-DD", key="e2e_start")
+    with e2e_dc2:
+        e2e_end_date = st.date_input("结束日期", value=None, format="YYYY-MM-DD", key="e2e_end")
     verify_threshold = st.slider("代码校验阈值", 0.0, 0.2, 0.02, 0.01)
     ingest_knowledge = st.checkbox("研究结果写入知识库", value=True)
+
+    # ---- 门槛判定与自动入库（端到端策略挖掘闭环，默认关闭）----
+    with st.expander("🎯 门槛判定与有效策略库（可选）", expanded=False):
+        gate_enable = st.checkbox(
+            "启用门槛判定（Sharpe/回撤达标才标记有效）", value=False,
+            help="开启后，端到端结果会用规则门槛判定 verified/active/rejected；"
+                 "不开启则完全保持原有行为。")
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            gate_sharpe = st.number_input("最低 Sharpe", value=1.0, step=0.1,
+                                          format="%.2f", key="e2e_gate_sharpe")
+        with gc2:
+            gate_mdd = st.number_input("最大回撤下限", value=-0.15, step=0.05,
+                                       format="%.2f", key="e2e_gate_mdd")
+        gate_promote = st.checkbox(
+            "达标自动注册到有效策略库（生命周期页可见）", value=True,
+            help="判定为 verified 的策略自动写入 lifecycle 表（IDEA→BACKTEST），"
+                 "可在「生命周期」页面继续晋升模拟盘/实盘。")
+
     run_btn = st.button("🚀 运行端到端流水线", type="primary", width="stretch")
 
 if not run_btn and not st.session_state.get("e2e_task_id") and not st.session_state.get("e2e_result"):
@@ -298,8 +448,8 @@ payload = {
     "symbols": final_symbols,
     "exchange": exchange,
     "interval": interval,
-    "start": None,
-    "end": None,
+    "start": e2e_start_date.isoformat() if e2e_start_date else None,
+    "end": e2e_end_date.isoformat() if e2e_end_date else None,
     "algo": algo,
     "rounds": rounds,
     "forward_periods": forward_periods,
@@ -319,6 +469,9 @@ payload = {
     "run_search": False,
     "max_rounds": 2,
     "ingest_knowledge": ingest_knowledge,
+    "gate": ({"min_sharpe": gate_sharpe, "min_drawdown": gate_mdd}
+             if gate_enable else None),
+    "promote": bool(gate_enable and gate_promote),
 }
 
 # ---- 异步启动 + 非阻塞轮询（st.fragment run_every 自动刷新，规避长跑超时/会话卡死）----
@@ -432,6 +585,41 @@ tab_overview, tab_ev, tab_pipe, tab_comp, tab_code, tab_kb = st.tabs([
 with tab_overview:
     if result.get("cached"):
         note("♻️ 结果来自 20 分钟内的缓存（相同想法/标的/参数），未重新计算。", "info")
+
+    # ---- 门槛判定与入库结果（新增，gate 开启时展示）----
+    _gate = result.get("gate") or {}
+    if _gate.get("enabled"):
+        _g_status = _gate.get("status")
+        _g_ok = _g_status == "verified"
+        st.markdown("---")
+        st.markdown("### 🎯 门槛判定")
+        _g_metrics = _gate.get("metrics") or {}
+        kpi_row([
+            {"label": "复合 Sharpe",
+             "value": fmt_num(_g_metrics.get("sharpe"), 3),
+             "tone": "up" if (_g_metrics.get("sharpe") or 0) >= (gate_sharpe if gate_enable else 1.0) else "down"},
+            {"label": "最大回撤",
+             "value": fmt_num(_g_metrics.get("max_drawdown"), 3),
+             "tone": "up" if (_g_metrics.get("max_drawdown") or 0) >= (gate_mdd if gate_enable else -0.15) else "down"},
+            {"label": "前向 IC",
+             "value": fmt_num(_g_metrics.get("fwd_ic"), 4),
+             "tone": "neutral"},
+            {"label": "判定", "value": str(_g_status or "?").upper(),
+             "tone": "up" if _g_ok else ("down" if _g_status == "rejected" else "neutral")},
+        ])
+        if _gate.get("reason"):
+            st.caption(_gate.get("reason"))
+        if _g_ok and _gate.get("promoted"):
+            st.success(f"✅ 策略已自动注册到有效策略库（生命周期）：`{_gate.get('strategy_id')}`")
+            st.caption("可在「生命周期」页面查看并继续晋升模拟盘/实盘。")
+        elif _g_ok and not _gate.get("promoted"):
+            st.info("✅ 门槛达标（verified）。未勾选自动入库，未写入有效策略库。")
+        elif _g_status == "rejected":
+            st.warning("❌ 未通过门槛，不进入有效策略库。可调整参数或换想法重跑。")
+        elif _gate.get("promote_error"):
+            st.warning(f"⚠️ 判定通过但自动入库失败：{_gate.get('promote_error')}")
+        st.markdown("---")
+
     _code_safe = strategy.get("code_safe")
     kpi_row([
         {"label": "代表因子", "value": str(summary.get("representative_count", 0)),

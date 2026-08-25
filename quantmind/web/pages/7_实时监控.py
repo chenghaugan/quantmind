@@ -18,6 +18,7 @@ import streamlit as st  # noqa: E402
 
 from utils.theme import (  # noqa: E402
     setup_page, page_header, section, note, badge, guard_error, kpi_row,
+    conn_bar, order_preview, divider,
 )
 from utils.api_client import APIClient  # noqa: E402
 from utils.ws_client import WSClient, WS_URL  # noqa: E402
@@ -116,14 +117,13 @@ if st.session_state.ws_connected and client is not None:
     if client.error:
         st.session_state.ws_error = client.error
     if client.connected:
-        st.markdown(badge("已连接", "success"), unsafe_allow_html=True)
-        st.caption(WS_URL)
+        conn_bar("WebSocket 已连接", WS_URL, "ok")
     else:
-        st.markdown(badge("重连中…", "warning"), unsafe_allow_html=True)
-        st.caption("连接中断，正在自动重连")
+        conn_bar("连接中断，正在自动重连…", "退避重连中", "warn")
 elif st.session_state.ws_error:
-    st.markdown(badge("连接错误", "danger"), unsafe_allow_html=True)
-    st.caption(st.session_state.ws_error)
+    conn_bar("连接错误", st.session_state.ws_error, "err")
+else:
+    conn_bar("未连接", "点击上方按钮开始接收实时事件", "warn")
 
 st.markdown("---")
 
@@ -296,14 +296,13 @@ with cl:
     volume = st.number_input("手数", value=1, min_value=1, step=1)
     price = st.number_input("价格", value=0.0, step=0.01, help="0 表示市价单")
 with cr:
-    st.markdown("**订单预览**")
-    st.markdown(
-        f"- **合约**：`{vt_symbol}`\n"
-        f"- **方向**：{'🔴 做多' if direction == '多' else '🟢 做空'}\n"
-        f"- **开平**：{offset}\n"
-        f"- **手数**：{volume}\n"
-        f"- **价格**：{'市价' if price == 0 else f'限价 {price}'}"
-    )
+    order_preview([
+        f"<b>合约</b>：<code>{vt_symbol}</code>",
+        f"<b>方向</b>：{'🔴 做多' if direction == '多' else '🟢 做空'}",
+        f"<b>开平</b>：{offset}",
+        f"<b>手数</b>：{volume}",
+        f"<b>价格</b>：{'市价' if price == 0 else f'限价 {price}'}",
+    ])
 
 if st.button("🚀 提交订单", type="primary", width="stretch"):
     with st.spinner("正在提交订单…"):

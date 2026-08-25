@@ -1,4 +1,4 @@
-"""LLM 策略挖掘：因子 → 策略规格 → 自动回测 → 生命周期注册。"""
+"""因子组合策略：因子 → 策略规格 → 自动回测 → 生命周期注册。"""
 from __future__ import annotations
 
 import sys
@@ -13,9 +13,9 @@ import streamlit as st
 from utils.api_client import APIClient
 from utils.theme import kpi_row, note, page_header, section, setup_page, verdict
 
-setup_page("LLM策略挖掘", "🧠")
+setup_page("因子组合策略", "🧠")
 page_header(
-    "LLM策略挖掘",
+    "因子组合策略",
     "从因子库选择因子，LLM 设计策略规格，自动回测验证，一键注册到生命周期",
     "🧠",
 )

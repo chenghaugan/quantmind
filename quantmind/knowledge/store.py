@@ -873,6 +873,73 @@ class KnowledgeStore:
         scored.sort(key=lambda r: r["score"], reverse=True)
         return scored[: max(1, top_k)]
 
+    def bm25_search(
+        self,
+        query: str,
+        top_k: int = 10,
+        kind: Optional[str] = None,
+    ) -> List[dict]:
+        """BM25 语义检索（jieba 分词 + rank_bm25）。
+
+        比关键词子串匹配更鲁棒：支持同义词、部分匹配、词频加权。
+        失败时自动降级到 :meth:`search`（关键词子串）。
+
+        依赖：``rank_bm25`` + ``jieba``（可选，缺失则降级）。
+        """
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        try:
+            from rank_bm25 import BM25Okapi
+            import jieba
+        except ImportError:
+            # 依赖缺失，降级到关键词子串
+            return self.search(query, top_k=top_k, kind=kind)
+
+        kinds = [c for c in _ALL_KINDS if kind is None or c == kind]
+        candidates: List[tuple] = []  # (row, kind, text)
+
+        with self._lock, self._closing() as conn:
+            for k in kinds:
+                rows = self._load_all(conn, k)
+                for row in rows:
+                    text = row["text"] or _fallback_text(row)
+                    candidates.append((row, k, text))
+
+        if not candidates:
+            return []
+
+        # 构建语料库（jieba 分词）
+        corpus = [list(jieba.cut(text)) for _, _, text in candidates]
+        bm25 = BM25Okapi(corpus)
+
+        # 查询分词 + 打分
+        query_tokens = list(jieba.cut(query))
+        scores = bm25.get_scores(query_tokens)
+
+        # 取 top_k
+        scored_idx = sorted(
+            range(len(scores)),
+            key=lambda i: scores[i],
+            reverse=True
+        )[:max(1, top_k)]
+
+        results = []
+        for idx in scored_idx:
+            if scores[idx] <= 0:
+                continue
+            row, k, text = candidates[idx]
+            results.append({
+                "kb_id": row[_PK_COLUMN[k]],
+                "kind": k,
+                "text": text,
+                "score": round(float(scores[idx]), 3),
+                "metadata": _row_metadata(row, k),
+            })
+
+        return results
+
     def _load_all(self, conn: sqlite3.Connection, kind: str) -> List[sqlite3.Row]:
         table = _KIND_TABLE[kind]
         return conn.execute(

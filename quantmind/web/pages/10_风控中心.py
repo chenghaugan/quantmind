@@ -10,6 +10,7 @@ import streamlit as st  # noqa: E402
 from utils.theme import (  # noqa: E402
     setup_page, page_header, section, note, verdict, guard_error,
     kpi_row, badge, fmt_num, fmt_pct, fmt_money, tone_of,
+    divider, conn_bar, order_preview,
 )
 from utils.api_client import APIClient  # noqa: E402
 from utils.constants import EXCHANGE_NAMES  # noqa: E402
@@ -38,7 +39,7 @@ limit_labels = profiles.get("labels", {})
 code_labels = profiles.get("codes", {})
 
 def _fmt_limit(v):
-    """把限额值转成可安全展示的字符串（列表/字典/标量统一转 str，避免混类型破坏 DataFrame）。"""
+    """把限额值转成可安全展示的字符串。"""
     if isinstance(v, (list, tuple)):
         if not v:
             return "—"
@@ -70,6 +71,7 @@ st.caption("拒单代码对照：" + " · ".join(
 ))
 
 # ================================================================= 委托预检
+divider("委托预检")
 section("委托预检（试算）")
 cl, cr = st.columns([1, 2], gap="medium")
 with cl:
@@ -146,7 +148,7 @@ if check_btn:
         st.json(res)
 
 # ================================================================= 交易日历
-st.markdown("---")
+divider("交易日历")
 section("交易日历与交易时段")
 cld, clr = st.columns([1, 2], gap="medium")
 with cld:
@@ -174,15 +176,14 @@ if cal_btn:
     is_td = cal.get("is_trading_day", False)
     has_night = cal.get("has_night_session", False)
     trading_now = cal.get("now_is_trading_time", False)
-    verdict(
-        f"{cal.get('date')}　"
-        f"{'是交易日' if is_td else '非交易日'} · "
-        f"{'含夜盘' if has_night else '无夜盘'} · "
-        f"当前{'处于交易时段' if trading_now else '非交易时段'}"
-        + (f"（{cal.get('now_session')}）" if cal.get("now_session") else ""),
-        "ok" if is_td else "warn",
-        icon="✅" if is_td else "⚠️",
-    )
+
+    # 连接状态条风格展示
+    if is_td and trading_now:
+        conn_bar(f"{cal.get('date')} · 交易中", "当前处于交易时段", "ok")
+    elif is_td:
+        conn_bar(f"{cal.get('date')} · 交易日", "当前非交易时段", "warn")
+    else:
+        conn_bar(f"{cal.get('date')} · 非交易日", "休市", "err")
 
     kpi_row([
         {"label": "下一交易日", "value": cal.get("next_trading_day") or "—",

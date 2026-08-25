@@ -65,13 +65,19 @@ class Provenance(BaseModel):
 
 # ---- 因子 ----
 class FactorRequest(BaseModel):
-    symbol: str
+    symbol: str = ""              # 单标的模式的主标的（多标的模式下可忽略）
+    symbols: List[str] = []        # 多标的（截面）模式：标的列表，为空则回落单标的
     exchange: str = "SHFE"
     interval: str = "1d"
     factor: str = "momentum_20"
     expression: Optional[str] = None
     window: int = 20
     forward_periods: int = 1
+    n_groups: int = 5             # 多标的：截面分组数
+    long_short: bool = True        # 多标的：是否多空组合
+    cost_rate: float = 0.0         # 多标的：单边成本率
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 
 class FactorResult(BaseModel):
@@ -111,6 +117,36 @@ class BacktestRequest(BaseModel):
     commission: float = 0.0002
     sizes: Dict[str, float] = {}
     cost: bool = False            # 启用真实成本模型（按品种差异化费率/平今/印花税/保证金）
+    start: Optional[str] = None   # 回测起始日期 YYYY-MM-DD（None=自动）
+    end: Optional[str] = None     # 回测结束日期 YYYY-MM-DD（None=自动）
+
+
+class StrategyValidateRequest(BaseModel):
+    """策略思想测试：策略思路 →（LLM 预编程 或 预置模板）→ 真实数据回测 → 门槛判定 →（可选）入有效策略库。
+
+    两种策略来源：
+      - ``llm_code=True``（默认推荐）：把 ``idea``（策略思想，如布林带回穿规则全文）交给
+        LLM 预编程为 CtaTemplate 策略代码，AST 沙箱校验后回测。
+      - ``llm_code=False``：``strategy`` 指定预置模板（momentum/chan_first_buy/
+        chan_third_buy/bollinger_recover/dual_ma）作为快捷方式。
+
+    支持多品种：``symbols`` 列表逐品种独立回测对比，每个品种各自门槛判定，
+    达标品种自动写入 lifecycle（有效策略库）。
+    """
+
+    idea: str = ""                       # 策略思想/投资想法（llm_code=True 时为主输入）
+    strategy: str = ""                   # 预置模板名（llm_code=False 时用；空则从 idea 识别）
+    llm_code: bool = True                # True → LLM 预编程；False → 预置模板
+    symbols: List[str] = ["IC0"]         # 多品种：逐品种回测对比
+    exchange: str = "CFFEX"              # 默认交易所（单品种快捷用）
+    interval: str = "1d"                 # 1d/1h/30m/15m/5m/1m
+    start: Optional[str] = None           # YYYY-MM-DD；None=全部历史
+    end: Optional[str] = None
+    setting: Dict[str, Any] = {}          # 预置模板参数；空 → 默认参数
+    cost: bool = False                    # 是否启用真实成本模型
+    # 门槛判定与自动入库（默认关闭，向后兼容）
+    gate: Optional[dict] = None           # {min_sharpe, min_drawdown, ...}；None=不判定
+    promote: bool = False                 # 判定 verified 后自动写入 lifecycle（有效策略库）
 
 
 class StrategyRegisterRequest(BaseModel):
@@ -189,21 +225,6 @@ class OptimizeRequest(BaseModel):
     metric: str = "sharpe"        # sharpe | total_return | calmar | max_drawdown
     capital: float = 1_000_000.0
     max_combos: int = 200         # 组合数上限，防止 Web 端跑爆
-
-
-# ---- 截面（多标的面板）因子研究 ----
-class CrossSectionRequest(BaseModel):
-    symbols: List[str] = ["IF0", "rb0", "hc0", "i0", "j0"]
-    exchange: str = "SHFE"
-    interval: str = "1d"
-    start: Optional[str] = None
-    end: Optional[str] = None
-    factor: str = "alpha002"
-    forward_periods: int = 1
-    n_groups: int = 5
-    long_short: bool = True
-    cost_rate: float = 0.0
-    backtest: bool = True         # 是否同时跑多空组合回测
 
 
 # ---- 风控 ----
@@ -418,6 +439,12 @@ class FactorE2ERequest(BaseModel):
     methodology_input: Optional[str] = None
     # 是否把结果沉淀进知识库
     ingest_knowledge: bool = True
+    # 门槛判定与自动入库（升级：端到端策略挖掘闭环）
+    # gate: 门槛配置 {min_sharpe, min_drawdown, min_calmar, min_win_rate, min_paper_days}；
+    #       None → 不启用门槛判定（保持原有行为）。
+    gate: Optional[dict] = None
+    # promote: 门槛判定为 verified 时，自动注册到有效策略库（lifecycle 表，6_生命周期页展示）。
+    promote: bool = False
 
 
 # ---- 知识库（knowledge） ----

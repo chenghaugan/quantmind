@@ -23,6 +23,14 @@ from ...strategy import (
     CtaTemplate,
 )
 from ...strategy.components import ComposableStrategy
+from ...strategy.mined import ChanThirdBuyStrategy
+from ...strategy.validation import (
+    MomentumCtaStrategy,
+    ChanFirstBuyStrategy,
+    BollingerRecoverStrategy,
+    resolve_validate_strategy,
+    DEFAULT_SETTINGS as _VALIDATION_DEFAULTS,
+)
 from ...backtest.walkforward import walk_forward
 from ...research.risk_xray import compute_risk_xray
 from ..schemas import BacktestRequest, WalkForwardRequest, StrategyInfo
@@ -38,7 +46,23 @@ _STRATEGY_MAP = {
     "vol_target": VolTargetStrategy,
     "pair": PairTradingStrategy,
     "composable": ComposableStrategy,
+    # 策略验证（单品种 idea → 回测 → 门槛）确定性模板
+    "momentum": MomentumCtaStrategy,
+    "chan_first_buy": ChanFirstBuyStrategy,
+    "chan_third_buy": ChanThirdBuyStrategy,
+    "bollinger_recover": BollingerRecoverStrategy,
 }
+
+
+def _safe_num(x) -> "float | None":
+    """安全取数值（NaN/None/非法 → None），用于门槛判定指标提取。"""
+    if x is None:
+        return None
+    try:
+        f = float(x)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _sanitize(o: Any) -> Any:
@@ -271,13 +295,19 @@ class BacktestService:
         })
         
         try:
-            bars = await self.dm.get_bar_data(
-                HistoryRequest(
-                    symbol=req.symbol,
-                    exchange=Exchange(req.exchange.upper()),
-                    interval=Interval("1d"),
-                )
-            )
+            # 构造 HistoryRequest，支持可选日期范围
+            history_kwargs = {
+                "symbol": req.symbol,
+                "exchange": Exchange(req.exchange.upper()),
+                "interval": Interval("1d"),
+            }
+            if req.start:
+                from datetime import datetime as _dt
+                history_kwargs["start"] = _dt.fromisoformat(req.start)
+            if req.end:
+                from datetime import datetime as _dt
+                history_kwargs["end"] = _dt.fromisoformat(req.end)
+            bars = await self.dm.get_bar_data(HistoryRequest(**history_kwargs))
             if not bars:
                 _logger.warning(f"回测无数据: {req.symbol}.{req.exchange}")
                 await ws_manager.broadcast({
@@ -346,13 +376,221 @@ class BacktestService:
             })
             return {"error": f"回测失败: {str(e)}"}
 
+
+    async def validate_strategy(self, req, provider=None) -> Dict[str, Any]:
+        """策略思想测试：策略思路 →（LLM 预编程 或 预置模板）→ 多品种真实回测 → 门槛 → 有效策略库。
+
+        流程：
+          1. 策略来源：``req.llm_code=True`` 时把 ``req.idea``（策略思想）交给 LLM
+             预编程为 CtaTemplate 策略代码 → AST 沙箱校验 → 注册；
+             ``llm_code=False`` 时用 ``req.strategy`` 预置模板（或从 idea 关键词识别）。
+          2. ``req.symbols`` 多品种：逐品种独立拉数据、回测（自动带合约乘数）。
+          3. ``req.gate`` 非空时对**每个品种**用 judge_strategy 规则判定；
+             达标品种（verified）且 ``req.promote`` → 自动写入 lifecycle。
+        失败闭合：任何异常只返回带 ``error`` 的 dict，不抛异常。
+        """
+        from ...strategy.validation import resolve_validate_strategy, DEFAULT_SETTINGS
+        from ...research.knowledge_loop import judge_strategy
+
+        # ------------------------------------------------------- 1) 策略来源
+        generated_code: str = ""
+        if getattr(req, "llm_code", False) and (req.idea or "").strip():
+            code, err = await self._llm_generate_strategy(provider, req.idea)
+            if err:
+                return {"error": f"LLM 策略编程失败：{err}"}
+            name = "idea_strategy"
+            ok, err2, _info = self.register_generated_strategy(name, code)
+            if not ok:
+                return {"error": f"策略注册失败：{err2}"}
+            cls = self._extra_strategies.get(name)
+            generated_code = code
+            strategy_desc = "LLM 预编程策略"
+        else:
+            name = (req.strategy or "").strip()
+            if not name:
+                name = resolve_validate_strategy(req.idea or "")
+            if not name:
+                return {"error": "未指定策略：llm_code=False 需提供 strategy 或可从 idea 识别的关键词"}
+            cls = self._resolve_strategy_class(name)
+            if cls is None:
+                return {"error": f"未知策略：{name}"}
+            strategy_desc = getattr(cls, "author", "") or name
+
+        # ------------------------------------------------------- 2) 多品种回测
+        symbols = [x for x in (getattr(req, "symbols", None) or []) if x and x.strip()]
+        if not symbols and getattr(req, "symbol", ""):
+            symbols = [getattr(req, "symbol", "")]
+        if not symbols:
+            return {"error": "未指定标的（symbols 为空）"}
+
+        iv = req.interval if req.interval in ("1d", "1h", "30m", "15m", "5m", "1m") else "1d"
+        setting = dict(req.setting or {}) or dict(DEFAULT_SETTINGS.get(name) or {})
+
+        per_symbol: list = []
+        for sym in symbols:
+            vt = f"{sym}.{req.exchange.upper()}"
+            try:
+                bars = await self.dm.get_bar_data(HistoryRequest(
+                    symbol=sym,
+                    exchange=Exchange(req.exchange.upper()),
+                    interval=Interval(iv),
+                    start=datetime.fromisoformat(req.start) if req.start else None,
+                    end=datetime.fromisoformat(req.end) if req.end else None,
+                ))
+            except Exception as exc:  # noqa: BLE001
+                per_symbol.append({"symbol": sym, "error": f"数据获取失败：{exc}"})
+                continue
+            if not bars:
+                per_symbol.append({"symbol": sym, "error": "无数据（检查 data_cache）"})
+                continue
+            if len(bars) < 200:
+                per_symbol.append({"symbol": sym, "error": f"数据不足（{len(bars)} 根 < 200）"})
+                continue
+
+            sizes = {vt: default_size(vt)}
+            try:
+                result = await asyncio.to_thread(
+                    run_strategy, "backtest", cls, vt, setting, bars,
+                    self.ee, sizes, "ctp", None, req.cost,
+                )
+            except Exception as exc:  # noqa: BLE001
+                per_symbol.append({"symbol": sym, "error": f"回测失败：{exc}"})
+                continue
+            report = _sanitize(result.get("report") or {})
+
+            # --------------------------------------------------- 3) 逐品种门槛
+            item: Dict[str, Any] = {
+                "symbol": sym,
+                "exchange": req.exchange.upper(),
+                "bars": len(bars),
+                "report": report,
+                "equity_curve": _sanitize(result.get("equity_curve") or []),
+                "trades": result.get("trades", 0),
+            }
+            if req.gate:
+                gate = dict(req.gate)
+                sharpe = _safe_num(report.get("sharpe"))
+                mdd = _safe_num(report.get("max_drawdown"))
+                total_ret = _safe_num(report.get("total_return"))
+                judge = await judge_strategy(
+                    None, {"run_id": vt, "state": "BACKTEST", "status": "",
+                           "sharpe": sharpe, "max_drawdown": mdd},
+                    gate=gate, fallback_rules=True)
+                item["gate"] = {
+                    "enabled": True,
+                    "status": judge.get("status"),
+                    "reason": judge.get("reason", ""),
+                    "tags": judge.get("tags") or [],
+                    "metrics": {"sharpe": sharpe, "max_drawdown": mdd,
+                                "total_return": total_ret},
+                }
+            per_symbol.append(item)
+
+        out: Dict[str, Any] = {
+            "idea": req.idea or "",
+            "strategy": name,
+            "strategy_desc": strategy_desc,
+            "llm_code": bool(getattr(req, "llm_code", False)),
+            "code": generated_code,
+            "interval": iv,
+            "per_symbol": per_symbol,
+            "gate_enabled": bool(req.gate),
+        }
+
+        # --------------------------------------------------- 4) 达标品种入库
+        if req.gate and req.promote:
+            verified_syms = [p["symbol"] for p in per_symbol
+                             if (p.get("gate") or {}).get("status") == "verified"]
+            if verified_syms:
+                try:
+                    from ...knowledge import KnowledgeStore
+
+                    kb = KnowledgeStore()
+                    sid = f"val_{datetime.now():%Y%m%d%H%M%S}"
+                    reason = "；".join(
+                        f"{p['symbol']}：{(p.get('gate') or {}).get('reason', '')}"
+                        for p in per_symbol if p.get("gate", {}).get("status") == "verified")
+                    kb.upsert_strategy_lifecycle(
+                        sid, idea=req.idea or "", state="BACKTEST", source="validate",
+                        code=generated_code or "",
+                        code_safe=bool(generated_code),
+                        symbols=verified_syms, status="verified",
+                        reason=reason[:300], brief=reason[:300],
+                    )
+                    try:
+                        kb.push_strategy_transition(
+                            sid, "IDEA", "BACKTEST", "策略思想测试门槛通过")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    out["promoted"] = True
+                    out["strategy_id"] = sid
+                    out["promoted_symbols"] = verified_syms
+                except Exception as exc:  # noqa: BLE001
+                    out["promote_error"] = str(exc)[:200]
+        return out
+
+    async def _llm_generate_strategy(self, provider, idea: str) -> "tuple[str, str]":
+        """LLM 预编程：策略思想 → CtaTemplate 策略代码（AST 沙箱校验后返回）。
+
+        返回 (code, err)；err 非空表示失败（失败闭合，不抛异常）。
+        """
+        if provider is None:
+            return "", "LLM Provider 不可用（请先配置 AI Key）"
+        from ...ai.sandbox import compile_strategy
+
+        system = (
+            "你是资深量化策略程序员。请把用户的「策略思想」实现为一个继承 "
+            "CtaTemplate 的确定性策略类。\n"
+            "硬性约束：\n"
+            "1. 类名以 Strategy 结尾（如 IdeaStrategy）。\n"
+            "2. 只允许 import：from quantmind.strategy.base import CtaTemplate；\n"
+            "   from quantmind.core.utility import ArrayManager；numpy/pandas/math。\n"
+            "3. 用 self.am = ArrayManager(size)；self.am.update_bar(bar)；\n"
+            "   self.am.close / self.am.high / self.am.low 为 list。\n"
+            "4. 用 self.set_target(bar.vt_symbol, target) 下单（target=正多/负空/0空仓）。\n"
+            "5. 参数写在 parameters 列表，并在 __init__ 给默认值，\n"
+            "   形如 self.window = 20（之后 super().__init__(context, setting)）。\n"
+            "6. 禁止：exec/eval/open/网络/文件读写/线程；禁止 import 其他模块。\n"
+            "7. 逻辑必须忠实于用户描述，不要自行发明多余规则。\n"
+            "只输出代码本身，不要任何解释或 markdown 围栏。\n\n"
+            "示例结构：\n"
+            "from quantmind.strategy.base import CtaTemplate\n"
+            "from quantmind.core.utility import ArrayManager\n\n"
+            "class IdeaStrategy(CtaTemplate):\n"
+            "    parameters = ['window', 'size', 'max_pos']\n\n"
+            "    def __init__(self, context, setting=None):\n"
+            "        self.window = 20\n"
+            "        self.size = 1\n"
+            "        self.max_pos = 1.0\n"
+            "        self.am = None\n"
+            "        self.last_target = 0.0\n"
+            "        super().__init__(context, setting)\n\n"
+            "    def on_bar(self, bar):\n"
+            "        if self.am is None:\n"
+            "            self.am = ArrayManager(self.window + 5)\n"
+            "        self.am.update_bar(bar)\n"
+            "        if not self.am.inited:\n"
+            "            return\n"
+            "        closes = self.am.close\n"
+            "        # ... 你的规则，用 self.set_target(bar.vt_symbol, target)\n"
+        )
+        try:
+            code = await provider.chat(system, str(idea))
+        except Exception as exc:  # noqa: BLE001
+            return "", f"LLM 调用失败：{exc}"
+        code = _strip_code_fences(code or "").strip()
+        if not code:
+            return "", "LLM 未返回代码"
+        ok, err, _ = compile_strategy(code)
+        if not ok:
+            return "", f"沙箱校验未通过：{err}"
+        return code, ""
+
     async def run_walkforward(self, req: WalkForwardRequest) -> Dict[str, Any]:
         """Walk-Forward 滚动样本外验证"""
         strat_class = self._resolve_strategy_class(req.strategy) or MultiFactorStrategy
         vt = f"{req.symbol}.{req.exchange.upper()}"
 
-        # 自动计算需要的历史数据长度
-        step = req.step or req.test_window
         min_bars_needed = req.train_window + req.test_window * 2
         days_needed = max(min_bars_needed + 50, 500)
         end_date = datetime.now()

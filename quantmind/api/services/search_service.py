@@ -67,6 +67,35 @@ def _flt(x) -> Optional[float]:
         return None
 
 
+def _num(x) -> Optional[float]:
+    """安全取数值（NaN/None/非法 → None），用于门槛判定指标提取。"""
+    if x is None:
+        return None
+    try:
+        f = float(x)
+        return f if f == f else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _hash_gate(gate) -> str:
+    """把 gate 配置压成可哈希字符串（用于 e2e 缓存 key）。"""
+    if not gate:
+        return ""
+    return "|".join(f"{k}={gate.get(k)}" for k in sorted(gate))
+
+
+def _e2e_strategy_id(idea: str, symbols: list) -> str:
+    """为一次端到端挖掘生成稳定、可读的 strategy_id（同日同 idea 复用同 id）。"""
+    import hashlib
+    import time as _time
+
+    h = hashlib.sha1(
+        f"{idea}|{sorted(s for s in (symbols or []) if s)}".encode("utf-8")
+    ).hexdigest()[:8]
+    return f"e2e_{h}_{_time.strftime('%Y%m%d')}"
+
+
 def _split_vt_symbol(symbol: str, default_exchange: str):
     """把标的拆成 (symbol, exchange)。支持 ``rb0.SHFE`` 形式（跨交易所统一面板）。
 
@@ -428,12 +457,14 @@ class SearchService:
         （``{"ingested": True, "kb_records": n}``）。
         strategy code 保留完整不截断。
         """
-        # 短期结果缓存：同一 (idea, 标的集, 交易所, 算法, 轮数, 前向期, ingest) 在 TTL 内
+        # 短期结果缓存：同一 (idea, 标的集, 交易所, 算法, 轮数, 前向期, ingest, gate, promote) 在 TTL 内
         # 复用上次结果，避免前端重复点击触发 85s+ 长跑；参数/标的/idea 变化即换新 key。
         cache_key = (str(req.idea),
                      tuple(sorted(s for s in (req.symbols or []) if s)),
                      str(req.exchange), str(req.interval), str(req.algo), int(req.rounds),
-                     int(req.forward_periods), bool(ingest))
+                     int(req.forward_periods), bool(ingest),
+                     _hash_gate(getattr(req, "gate", None)),
+                     bool(getattr(req, "promote", False)))
         cached = self._e2e_cache.get(cache_key)
         if cached is not None and (time.time() - cached[0]) < _E2E_CACHE_TTL:
             out = dict(cached[1])
@@ -564,6 +595,12 @@ class SearchService:
                       "effective_themes", "failure_traps", "next_suggestions"):
                 if ingested.get(k):
                     out["knowledge"][k] = ingested[k]
+
+        # 门槛判定 + 达标自动入有效策略库（新增，默认关闭，向后兼容）
+        # 仅当请求携带 ``gate`` 配置时启用；判定/入库全程失败闭合，
+        # 任何异常只记录到返回 dict 的 ``gate`` 字段，绝不影响主报告。
+        if getattr(req, "gate", None):
+            out["gate"] = await self._gate_judge_and_promote(report, req)
 
         return out
 
@@ -751,6 +788,114 @@ class SearchService:
 
         loop_out["kb_records"] = n
         return loop_out
+
+    # ------------------------------------------------------------------
+    # 门槛判定 + 自动入有效策略库（端到端策略挖掘闭环，新增）
+    # ------------------------------------------------------------------
+    async def _gate_judge_and_promote(self, report: dict, req) -> dict:
+        """门槛判定（``judge_strategy`` 规则）+ 达标自动注册有效策略库（lifecycle）。
+
+        仅在请求携带 ``gate`` 配置时被调用；判定/入库全程失败闭合，任何异常
+        只记录到返回 dict 的 ``error`` 字段，绝不影响主报告与既有功能。
+
+        - 用复合 alpha 的 portfolio 指标（Sharpe / 最大回撤 / 前向 IC）构造策略记录；
+        - ``judge_strategy(..., fallback_rules=True)`` 纯规则判定
+          （verified / active / rejected）；
+        - ``status == verified`` 且 ``req.promote`` → 自动注册到 lifecycle
+          （IDEA → BACKTEST），6_生命周期 页面可见，可继续晋升 PAPER/LIVE。
+
+        Returns:
+            ``{"enabled", "status", "reason", "tags", "metrics", "gate",
+              "promoted", "strategy_id", "promote_reasons"?, "error"?}``
+        """
+        from ...research.knowledge_loop import judge_strategy
+        from ...paper.promotion import LifecycleManager, LifecycleState, PromotionGate
+        from ...knowledge import KnowledgeStore
+
+        gate = dict(req.gate or {})
+        composite = (report.get("pipeline") or {}).get("composite") or {}
+        portfolio = composite.get("portfolio") or {}
+        ic_report = composite.get("ic_report") or {}
+
+        sharpe = _num(portfolio.get("sharpe"))
+        mdd = _num(portfolio.get("max_drawdown"))
+        total_ret = _num(portfolio.get("total_return"))
+        fwd_ic = _num(ic_report.get("ic_mean"))
+
+        strat = {
+            "run_id": req.idea,
+            "state": "BACKTEST",
+            "status": "",
+            "sharpe": sharpe,
+            "max_drawdown": mdd,
+            "composite_fwd_ic": fwd_ic,
+        }
+        judge = await judge_strategy(self.provider, strat, gate=gate, fallback_rules=True)
+
+        out: Dict[str, object] = {
+            "enabled": True,
+            "status": judge.get("status"),
+            "reason": judge.get("reason", ""),
+            "tags": judge.get("tags") or [],
+            "metrics": {
+                "sharpe": sharpe,
+                "max_drawdown": mdd,
+                "total_return": total_ret,
+                "fwd_ic": fwd_ic,
+            },
+            "gate": gate,
+            "promoted": False,
+            "strategy_id": "",
+        }
+
+        # 达标 → 自动注册到有效策略库（lifecycle 表）
+        if judge.get("status") == "verified" and getattr(req, "promote", False):
+            try:
+                kb = KnowledgeStore()
+                strategy_id = _e2e_strategy_id(req.idea, req.symbols or [])
+                code = (report.get("strategy") or {}).get("code") or ""
+                code_safe = bool((report.get("strategy") or {}).get("code_safe"))
+                symbols = [s for s in (req.symbols or []) if s]
+                reason = judge.get("reason", "")
+
+                # 1) 建行（整行语义）：策略本体 + 标的信息 + 判定原因
+                kb.upsert_strategy_lifecycle(
+                    strategy_id,
+                    idea=req.idea,
+                    state="BACKTEST",
+                    source="e2e",
+                    code=code,
+                    code_safe=code_safe,
+                    symbols=symbols,
+                    status="verified",
+                    reason=reason,
+                    brief=reason,
+                )
+                # 2) 补真实回测指标（部分更新，避免整行覆盖清空 sharpe）
+                kb.update_strategy_state(
+                    strategy_id,
+                    state="BACKTEST",
+                    sharpe=sharpe,
+                    max_drawdown=mdd,
+                    composite_fwd_ic=fwd_ic,
+                    status="verified",
+                    reason=reason,
+                    brief=reason,
+                )
+                # 3) 记录晋升轨迹（IDEA → BACKTEST）
+                try:
+                    kb.push_strategy_transition(
+                        strategy_id, "IDEA", "BACKTEST",
+                        f"端到端挖掘门槛通过：{reason[:80]}")
+                except Exception as exc:  # noqa: BLE001 轨迹缺失不影响入库结果
+                    _logger.debug("lifecycle transition 记录失败（忽略）: %s", exc)
+                out["promoted"] = True
+                out["strategy_id"] = strategy_id
+            except Exception as exc:  # noqa: BLE001 失败闭合：不影响主报告
+                _logger.warning("端到端策略自动入库失败（不影响主报告）: %s", exc)
+                out["promote_error"] = str(exc)[:200]
+
+        return out
 
     @staticmethod
     def _kb_context_seeds(idea: str, user_seeds: List[str], top_k: int = 6) -> List[str]:

@@ -25,7 +25,10 @@ from ..backtest.analyzer import PerformanceAnalyzer
 def _factor_scores(panel: Panel, factor_name: str, expression: str | None) -> pd.DataFrame:
     """按给定因子名或 DSL 表达式计算因子面板（date×symbol）。"""
     if expression:
-        return panel_eval_expression(expression, panel)
+        # 兼容别名：面板语法用 delay()，单标的时序语法常用 ref()，此处归一化（失败闭合）。
+        import re as _re
+        _expr = _re.sub(r"\bref\(([^()]*)\)", r"delay(\1)", expression)
+        return panel_eval_expression(_expr, panel)
     if factor_name not in _ALPHA_CS_FUNCS:
         raise KeyError(f"未知截面 Alpha 因子: {factor_name}")
     return compute_alpha_cross_sectional([factor_name], panel)[factor_name]

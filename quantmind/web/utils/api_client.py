@@ -101,7 +101,8 @@ class APIClient:
     @staticmethod
     def factor(symbol: str, exchange: str, factor: str,
                expression: Optional[str] = None, window: int = 20,
-               forward_periods: int = 1) -> Dict:
+               forward_periods: int = 1,
+               start: Optional[str] = None, end: Optional[str] = None) -> Dict:
         json = {
             "symbol": symbol,
             "exchange": exchange,
@@ -111,13 +112,18 @@ class APIClient:
         }
         if expression:
             json["expression"] = expression
+        if start:
+            json["start"] = start
+        if end:
+            json["end"] = end
         return APIClient.post("/factor", json=json, timeout=60)
 
     @staticmethod
     def backtest(strategy: str, symbol: str, exchange: str,
                  mode: str = "backtest", setting: Optional[Dict] = None,
                  capital: float = 1e6, commission: float = 2e-4,
-                 cost: bool = False) -> Dict:
+                 cost: bool = False,
+                 start: Optional[str] = None, end: Optional[str] = None) -> Dict:
         json = {
             "strategy": strategy,
             "symbol": symbol,
@@ -129,6 +135,10 @@ class APIClient:
         }
         if setting:
             json["setting"] = setting
+        if start:
+            json["start"] = start
+        if end:
+            json["end"] = end
         return APIClient.post("/backtest", json=json, timeout=120)
 
     @staticmethod
@@ -292,11 +302,16 @@ class APIClient:
     # ------------------------------------------------------------------
     @staticmethod
     def cs_factors(timeout: int = 10) -> Dict:
-        return APIClient.get("/cross-section/factors", timeout=timeout)
+        return APIClient.get("/factor/cs-factors", timeout=timeout)
+
+    @staticmethod
+    def factor_evaluate(payload: Dict[str, Any], timeout: int = 300) -> Dict:
+        """因子研究统一评估（POST /factor/evaluate）：多标→截面、单标→时序。"""
+        return APIClient.post("/factor/evaluate", json=payload, timeout=timeout)
 
     @staticmethod
     def cross_section(payload: Dict[str, Any], timeout: int = 300) -> Dict:
-        return APIClient.post("/cross-section", json=payload, timeout=timeout)
+        return APIClient.post("/factor/evaluate", json=payload, timeout=timeout)
 
     # ------------------------------------------------------------------
     # 因子搜索（co / ea / tot）

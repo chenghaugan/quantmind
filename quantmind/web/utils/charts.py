@@ -1,4 +1,4 @@
-"""Plotly 图表组件（统一 QuantMind 深色模板）。
+"""Plotly 图表组件 v2 — Precision Terminal 深色模板。
 
 所有图表共用 :data:`QM_TEMPLATE` 模板，保证与 Streamlit 主题一致；
 输入为空或缺列时返回「空状态」图而不是抛异常。
@@ -17,7 +17,7 @@ from .theme import COLORS, PLOTLY_COLORWAY
 QM_TEMPLATE = "quantmind"
 
 # --------------------------------------------------------------------------
-# 注册统一模板
+# 注册统一模板 v2
 # --------------------------------------------------------------------------
 if QM_TEMPLATE not in pio.templates:
     _tpl = go.layout.Template()
@@ -25,19 +25,34 @@ if QM_TEMPLATE not in pio.templates:
         colorway=PLOTLY_COLORWAY,
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color=COLORS["text_muted"], size=12,
-                  family='Inter, "PingFang SC", "Microsoft YaHei", sans-serif'),
-        title=dict(font=dict(color=COLORS["text"], size=14), x=0.01, xanchor="left"),
+        font=dict(
+            color=COLORS["text_muted"], size=12,
+            family='Inter, "PingFang SC", "Microsoft YaHei", sans-serif',
+        ),
+        title=dict(
+            font=dict(color=COLORS["text"], size=14, family="Space Grotesk, Inter, sans-serif"),
+            x=0.01, xanchor="left",
+        ),
         margin=dict(l=48, r=24, t=44, b=40),
         hovermode="x unified",
-        hoverlabel=dict(bgcolor=COLORS["surface_alt"], bordercolor=COLORS["border"],
-                        font=dict(color=COLORS["text"], size=12)),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
-        xaxis=dict(gridcolor=COLORS["border_soft"], zerolinecolor=COLORS["border"],
-                   linecolor=COLORS["border"], showspikes=False),
-        yaxis=dict(gridcolor=COLORS["border_soft"], zerolinecolor=COLORS["border"],
-                   linecolor=COLORS["border"]),
+        hoverlabel=dict(
+            bgcolor="rgba(14,22,40,0.92)", bordercolor=COLORS["border"],
+            font=dict(color=COLORS["text"], size=12),
+        ),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
+            bgcolor="rgba(0,0,0,0)", font=dict(size=11),
+        ),
+        xaxis=dict(
+            gridcolor=COLORS["border_soft"], zerolinecolor=COLORS["border"],
+            linecolor=COLORS["border"], showspikes=False,
+            tickfont=dict(size=11),
+        ),
+        yaxis=dict(
+            gridcolor=COLORS["border_soft"], zerolinecolor=COLORS["border"],
+            linecolor=COLORS["border"],
+            tickfont=dict(size=11),
+        ),
     )
     pio.templates[QM_TEMPLATE] = _tpl
 
@@ -50,9 +65,11 @@ def _base_layout(fig: go.Figure, title: str = "", height: int = 400, **kw) -> go
 def empty_figure(msg: str = "暂无数据", height: int = 300) -> go.Figure:
     """空状态占位图。"""
     fig = go.Figure()
-    fig.add_annotation(text=msg, showarrow=False,
-                       font=dict(size=14, color=COLORS["text_dim"]),
-                       xref="paper", yref="paper", x=0.5, y=0.5)
+    fig.add_annotation(
+        text=f"<b>{msg}</b>", showarrow=False,
+        font=dict(size=14, color=COLORS["text_dim"], family="Space Grotesk, sans-serif"),
+        xref="paper", yref="paper", x=0.5, y=0.5,
+    )
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
     return _base_layout(fig, height=height)
@@ -93,8 +110,8 @@ def create_price_chart(bars: list, title: str = "", ma: Sequence[int] = (5, 20, 
         go.Candlestick(
             x=df["datetime"], open=df["open"], high=df["high"],
             low=df["low"], close=df["close"], name="K线",
-            increasing=dict(line=dict(color=COLORS["up"], width=1), fillcolor=COLORS["up"]),
-            decreasing=dict(line=dict(color=COLORS["down"], width=1), fillcolor=COLORS["down"]),
+            increasing=dict(line=dict(color=COLORS["up"], width=1.2), fillcolor=COLORS["up"]),
+            decreasing=dict(line=dict(color=COLORS["down"], width=1.2), fillcolor=COLORS["down"]),
         ),
         row=1, col=1,
     )
@@ -103,9 +120,12 @@ def create_price_chart(bars: list, title: str = "", ma: Sequence[int] = (5, 20, 
     for i, w in enumerate(ma or []):
         if len(df) > w:
             fig.add_trace(
-                go.Scatter(x=df["datetime"], y=df["close"].rolling(w).mean(),
-                           name=f"MA{w}", mode="lines",
-                           line=dict(color=ma_colors[i % len(ma_colors)], width=1.3)),
+                go.Scatter(
+                    x=df["datetime"], y=df["close"].rolling(w).mean(),
+                    name=f"MA{w}", mode="lines",
+                    line=dict(color=ma_colors[i % len(ma_colors)], width=1.4),
+                    opacity=0.85,
+                ),
                 row=1, col=1,
             )
 
@@ -113,8 +133,10 @@ def create_price_chart(bars: list, title: str = "", ma: Sequence[int] = (5, 20, 
         colors = [COLORS["up"] if c >= o else COLORS["down"]
                   for c, o in zip(df["close"], df["open"])]
         fig.add_trace(
-            go.Bar(x=df["datetime"], y=df["volume"], name="成交量",
-                   marker_color=colors, marker_line_width=0, opacity=0.75),
+            go.Bar(
+                x=df["datetime"], y=df["volume"], name="成交量",
+                marker_color=colors, marker_line_width=0, opacity=0.7,
+            ),
             row=2, col=1,
         )
         fig.update_yaxes(title_text="量", row=2, col=1)
@@ -143,9 +165,9 @@ def create_equity_curve(equity_curve: list, title: str = "净值曲线",
     # 策略净值 — 渐变填充
     fig.add_trace(go.Scatter(
         x=x, y=nav, mode="lines", name="策略净值",
-        line=dict(color=COLORS["primary"], width=2.4, shape="spline", smoothing=0.8),
+        line=dict(color=COLORS["primary"], width=2.5, shape="spline", smoothing=0.8),
         fill="tozeroy",
-        fillcolor="rgba(59,130,246,.08)",
+        fillcolor="rgba(79,143,247,.06)",
         hovertemplate="日期: %%{x|%%Y-%%m-%%d}<br>净值: %%{y:.4f}<extra></extra>",
     ))
 
@@ -164,25 +186,26 @@ def create_equity_curve(equity_curve: list, title: str = "净值曲线",
     # 起点参考线
     fig.add_hline(y=1.0, line=dict(color=COLORS["border"], width=1, dash="dash"))
 
-    # 标注最高点与最终点
+    # 标注最高点
     peak_idx = nav.idxmax()
     peak_x = x[peak_idx] if not isinstance(x, pd.RangeIndex) else peak_idx
     peak_y = nav.iloc[peak_idx]
     fig.add_trace(go.Scatter(
         x=[peak_x], y=[peak_y], mode="markers+text",
-        marker=dict(size=8, color=COLORS["up"], symbol="diamond",
-                    line=dict(color="white", width=1.2)),
+        marker=dict(size=9, color=COLORS["up"], symbol="diamond",
+                    line=dict(color="white", width=1.3)),
         text=[f"峰值 {peak_y:.2f}"], textposition="top center",
         textfont=dict(size=10, color=COLORS["text"]),
         showlegend=False, hoverinfo="skip",
     ))
 
+    # 标注最终点
     final_x = x.iloc[-1] if not isinstance(x, pd.RangeIndex) else len(nav) - 1
     final_y = nav.iloc[-1]
     fig.add_trace(go.Scatter(
         x=[final_x], y=[final_y], mode="markers+text",
-        marker=dict(size=8, color=COLORS["primary"], symbol="circle",
-                    line=dict(color="white", width=1.2)),
+        marker=dict(size=9, color=COLORS["primary"], symbol="circle",
+                    line=dict(color="white", width=1.3)),
         text=[f"终值 {final_y:.2f}"], textposition="top right",
         textfont=dict(size=10, color=COLORS["text"]),
         showlegend=False, hoverinfo="skip",
@@ -206,25 +229,22 @@ def create_drawdown_chart(equity_curve: list, title: str = "回撤",
 
     fig = go.Figure()
 
-    # 回撤填充区域 — 更柔和的渐变
     fig.add_trace(go.Scatter(
         x=x, y=dd, fill="tozeroy", name="回撤",
         line=dict(color=COLORS["danger"], width=1.6, shape="spline", smoothing=0.6),
-        fillcolor="rgba(242,72,62,.15)",
+        fillcolor="rgba(239,68,68,.12)",
         hovertemplate="回撤: %{y:.2%}<extra></extra>",
     ))
 
-    # 零线 — 加粗高亮
     fig.add_hline(y=0, line=dict(color=COLORS["text_muted"], width=1.2, dash="solid"))
 
-    # 标注最大回撤点
     trough_idx = dd.idxmin()
-    if dd.iloc[trough_idx] < -0.01:  # 只在回撤超过1%时标注
+    if dd.iloc[trough_idx] < -0.01:
         trough_x = x[trough_idx] if not isinstance(x, pd.RangeIndex) else trough_idx
         trough_y = dd.iloc[trough_idx]
         fig.add_trace(go.Scatter(
             x=[trough_x], y=[trough_y], mode="markers+text",
-            marker=dict(size=9, color=COLORS["danger"], symbol="diamond",
+            marker=dict(size=10, color=COLORS["danger"], symbol="diamond",
                         line=dict(color="white", width=1.5)),
             text=[f"最大回撤 {trough_y:.1%}"], textposition="bottom center",
             textfont=dict(size=11, color=COLORS["text"]),
@@ -245,8 +265,11 @@ def create_returns_histogram(returns: Sequence[float], title: str = "收益分�
     if not vals:
         return empty_figure("无收益序列", height=height)
     fig = go.Figure()
-    fig.add_trace(go.Histogram(x=vals, nbinsx=40, marker_color=COLORS["violet"],
-                               opacity=0.85, name="日收益"))
+    fig.add_trace(go.Histogram(
+        x=vals, nbinsx=40, marker_color=COLORS["violet"],
+        opacity=0.85, name="日收益",
+        marker_line=dict(color="rgba(139,92,246,0.3)", width=1),
+    ))
     fig.add_vline(x=0, line=dict(color=COLORS["border"], width=1, dash="dash"))
     return _base_layout(fig, title, height, showlegend=False,
                         xaxis_tickformat=".2%", hovermode="closest")
@@ -272,7 +295,7 @@ def create_monthly_heatmap(equity_curve: list, title: str = "月度收益",
         z=pivot.values * 100,
         x=[f"{m}月" for m in pivot.columns],
         y=[str(y) for y in pivot.index],
-        colorscale=[[0, COLORS["down"]], [0.5, "#111b2e"], [1, COLORS["up"]]],
+        colorscale=[[0, COLORS["down"]], [0.5, COLORS["surface"]], [1, COLORS["up"]]],
         zmid=0, texttemplate="%{z:.1f}", textfont=dict(size=10),
         colorbar=dict(title="%", thickness=10),
     ))
@@ -289,10 +312,12 @@ def create_ic_chart(ic_decay: list, title: str = "IC 衰减", height: int = 280)
         return empty_figure("无 IC 衰减数据", height=height)
     periods = [f"T+{i}" for i in range(1, len(vals) + 1)]
     colors = [COLORS["up"] if v >= 0 else COLORS["down"] for v in vals]
-    fig = go.Figure(go.Bar(x=periods, y=vals, marker_color=colors,
-                           marker_line_width=0, name="IC",
-                           text=[f"{v:.3f}" for v in vals], textposition="outside",
-                           textfont=dict(size=10)))
+    fig = go.Figure(go.Bar(
+        x=periods, y=vals, marker_color=colors,
+        marker_line_width=0, name="IC",
+        text=[f"{v:.3f}" for v in vals], textposition="outside",
+        textfont=dict(size=10),
+    ))
     fig.add_hline(y=0, line=dict(color=COLORS["border"], width=1))
     return _base_layout(fig, title, height, yaxis_title="IC",
                         showlegend=False, hovermode="closest")
@@ -321,8 +346,9 @@ def create_factor_radar(scores: Dict[str, float], title: str = "因子画像",
     vals = [max(0.0, min(1.0, float(scores[k]))) for k in labels]
     fig = go.Figure(go.Scatterpolar(
         r=vals + [vals[0]], theta=labels + [labels[0]], fill="toself",
-        line=dict(color=COLORS["primary"], width=2),
-        fillcolor="rgba(59,130,246,.22)", name="评分",
+        line=dict(color=COLORS["primary"], width=2.2),
+        fillcolor="rgba(79,143,247,.18)", name="评分",
+        marker=dict(size=6, color=COLORS["primary"]),
     ))
     fig.update_polars(
         bgcolor="rgba(0,0,0,0)",
@@ -344,9 +370,11 @@ def create_fold_chart(folds: List[dict], metric: str = "sharpe",
     x = [f"F{f.get('fold', i)}" for i, f in enumerate(folds)]
     y = [f.get(metric) or 0 for f in folds]
     colors = [COLORS["up"] if v >= 0 else COLORS["down"] for v in y]
-    fig = go.Figure(go.Bar(x=x, y=y, marker_color=colors, marker_line_width=0,
-                           text=[f"{v:.2f}" for v in y], textposition="outside",
-                           textfont=dict(size=10)))
+    fig = go.Figure(go.Bar(
+        x=x, y=y, marker_color=colors, marker_line_width=0,
+        text=[f"{v:.2f}" for v in y], textposition="outside",
+        textfont=dict(size=10),
+    ))
     fig.add_hline(y=0, line=dict(color=COLORS["border"], width=1))
     return _base_layout(fig, title, height, yaxis_title=metric,
                         showlegend=False, hovermode="closest")
@@ -367,9 +395,11 @@ def create_optimize_scatter(results: List[dict], metric: str = "sharpe",
                     colorbar=dict(thickness=10), line=dict(width=0)),
     ))
     best = max(range(len(y)), key=lambda i: y[i])
-    fig.add_trace(go.Scatter(x=[best], y=[y[best]], mode="markers", name="最优",
-                             marker=dict(size=16, color=COLORS["amber"],
-                                         symbol="star", line=dict(width=0))))
+    fig.add_trace(go.Scatter(
+        x=[best], y=[y[best]], mode="markers", name="最优",
+        marker=dict(size=16, color=COLORS["amber"],
+                    symbol="star", line=dict(width=0)),
+    ))
     return _base_layout(fig, title, height, xaxis_title="参数组合序号",
                         yaxis_title=metric, hovermode="closest", showlegend=False)
 
@@ -379,7 +409,6 @@ def create_gauge(value: float, title: str, vmin: float = -1.0, vmax: float = 3.0
     """绩效仪表盘 — 精致版，带渐变阈值色阶与状态标签。"""
     v = 0.0 if value is None or value != value else float(value)
 
-    # 根据值动态选择颜色与状态
     if v >= good:
         color = COLORS["up"]
         status_text = "✓ 达标"
@@ -394,7 +423,7 @@ def create_gauge(value: float, title: str, vmin: float = -1.0, vmax: float = 3.0
         mode="gauge+number",
         value=v,
         number=dict(
-            font=dict(size=30, color=COLORS["text"], family="Inter, sans-serif"),
+            font=dict(size=30, color=COLORS["text"], family="Space Grotesk, sans-serif"),
             valueformat=".2f",
         ),
         title=dict(
@@ -411,15 +440,15 @@ def create_gauge(value: float, title: str, vmin: float = -1.0, vmax: float = 3.0
             bar=dict(
                 color=color,
                 thickness=0.75,
-                line=dict(color="rgba(255,255,255,0.25)", width=2),
+                line=dict(color="rgba(255,255,255,0.2)", width=2),
             ),
             bgcolor="rgba(0,0,0,0)",
             borderwidth=0,
             bordercolor="rgba(0,0,0,0)",
             steps=[
-                dict(range=[vmin, 0], color="rgba(242,72,62,.20)"),
-                dict(range=[0, good], color="rgba(245,158,11,.16)"),
-                dict(range=[good, vmax], color="rgba(18,184,134,.20)"),
+                dict(range=[vmin, 0], color="rgba(239,68,68,.16)"),
+                dict(range=[0, good], color="rgba(245,158,11,.12)"),
+                dict(range=[good, vmax], color="rgba(16,185,129,.16)"),
             ],
             threshold=dict(
                 line=dict(color=color, width=4),
@@ -441,9 +470,10 @@ def create_multi_line(series: Dict[str, Sequence[float]], x: Optional[Sequence] 
     fig = go.Figure()
     for i, (name, ys) in enumerate(series.items()):
         xs = x if x is not None else list(range(len(ys)))
-        fig.add_trace(go.Scatter(x=xs, y=list(ys), mode="lines", name=name,
-                                 line=dict(width=1.8,
-                                           color=PLOTLY_COLORWAY[i % len(PLOTLY_COLORWAY)])))
+        fig.add_trace(go.Scatter(
+            x=xs, y=list(ys), mode="lines", name=name,
+            line=dict(width=2, color=PLOTLY_COLORWAY[i % len(PLOTLY_COLORWAY)]),
+        ))
     return _base_layout(fig, title, height, yaxis_title=yaxis_title, showlegend=True)
 
 

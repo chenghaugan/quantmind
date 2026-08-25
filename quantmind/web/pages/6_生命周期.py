@@ -9,29 +9,26 @@ import streamlit as st  # noqa: E402
 
 from utils.theme import (  # noqa: E402
     setup_page, page_header, section, note, verdict, guard_error, badge, kpi_row,
+    pipeline, divider, conn_bar,
 )
 from utils.api_client import APIClient  # noqa: E402
 from utils.constants import LIFECYCLE_STATES, LIFECYCLE_DESC  # noqa: E402
 
 
 def _kb_conn_note():
-    """页面顶部显示当前知识库连接状态：真实 DB 路径 + 各类条数。
-
-    直读本地 KnowledgeStore。任何异常都降级为温和提示，绝不抛异常阻断页面；
-    某类目读取慢/异常时仅该类显示 '—'。
-    """
+    """页面顶部显示当前知识库连接状态。"""
     try:
         from quantmind.knowledge import KnowledgeStore
         ks = KnowledgeStore()
         dbp = str(getattr(ks, "db_path", "") or "—")
-    except Exception:  # noqa: BLE001 包/库不可用则降级提示
+    except Exception:  # noqa: BLE001
         st.caption("📚 知识库：后端/本地库不可用（页面仍可正常使用，从项目根启动可连到 db/knowledge.db）")
         return
     counts = {}
     for kind in ("factor", "strategy", "methodology", "research_log"):
         try:
             counts[kind] = len(ks.list_items(kind=kind, limit=500))
-        except Exception:  # noqa: BLE001 单类读取失败仅该类降级
+        except Exception:  # noqa: BLE001
             counts[kind] = "—"
     try:
         counts["lifecycle"] = len(ks.list_strategy_lifecycles())
@@ -54,6 +51,19 @@ page_header(
 
 _kb_conn_note()
 
+# ----------------------------------------------------------------- 可视化流水线
+pipeline(
+    [
+        {"label": "IDEA", "desc": "想法登记"},
+        {"label": "RESEARCH", "desc": "因子研究"},
+        {"label": "BACKTEST", "desc": "历史回测"},
+        {"label": "PAPER", "desc": "模拟交易"},
+        {"label": "APPROVED", "desc": "风控评审"},
+        {"label": "LIVE", "desc": "实盘运行"},
+    ],
+    active="PAPER",  # 默认展示到 PAPER 阶段
+)
+
 note(
     "流程：**IDEA → RESEARCH → BACKTEST → PAPER → APPROVED → LIVE**。"
     "晋升只能按顺序、不可跳级；到达 LIVE 前需满足 Sharpe、回撤、模拟天数与风险审查等闸门。",
@@ -63,13 +73,13 @@ note(
 # ----------------------------------------------------------------- 生命周期一览（已落库）
 section("📊 生命周期一览（已落库）")
 try:
-    from quantmind.knowledge import KnowledgeStore  # 本地包，随页加载，降级不阻断
-except Exception:  # noqa: BLE001 包不可用则降级
+    from quantmind.knowledge import KnowledgeStore
+except Exception:  # noqa: BLE001
     KnowledgeStore = None
 if KnowledgeStore is not None:
     try:
         _lc_recs = KnowledgeStore().list_strategy_lifecycles(limit=200)
-    except Exception:  # noqa: BLE001 库未初始化/不可读则降级
+    except Exception:  # noqa: BLE001
         _lc_recs = []
 else:
     _lc_recs = []
@@ -109,6 +119,8 @@ with st.expander("📋 晋升闸门要求", expanded=False):
         "- ✅ 风险审查标记（备注需包含 `risk_reviewed`）\n\n"
         "其他阶段由 `PromotionGate` 配置控制。"
     )
+
+divider("执行晋升")
 
 # ----------------------------------------------------------------- 输入区
 col_left, col_right = st.columns([1, 2], gap="medium")

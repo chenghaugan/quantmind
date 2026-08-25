@@ -10,7 +10,6 @@ from .lifecycle_service import LifecycleService
 from .research_service import ResearchService
 from .risk_service import RiskService
 from .optimize_service import OptimizeService
-from .cross_section_service import CrossSectionService
 from .settings_service import SettingsService
 from .seat_service import SeatService
 from .data_settings_service import DataSettingsService
@@ -28,7 +27,6 @@ __all__ = [
     "ResearchService",
     "RiskService",
     "OptimizeService",
-    "CrossSectionService",
     "SettingsService",
     "SeatService",
     "DataSettingsService",

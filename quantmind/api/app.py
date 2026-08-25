@@ -45,18 +45,18 @@ from ..research.decay import FactorDecayScanner, DecayConfig, FactorState
 from .schemas import (
     ResearchRequest, ResearchResult, FactorRequest, FactorResult,
     BacktestRequest, WalkForwardRequest, StrategyInfo, OrderRequestSchema, LifecycleRequest,
-    OptimizeRequest, CrossSectionRequest, RiskCheckRequest,
+    OptimizeRequest, RiskCheckRequest,
     SeatFactorRequest, SeatFactorResult, DataDownloadRequest,
     ExprEvalRequest, ExprEvalBatchRequest, FactorSearchRequest,
     FactorDedupRequest, ExpressionBacktestRequest, FactorPipelineRequest,
     FactorE2ERequest, KnowledgeIngestRequest, KnowledgeSearchRequest,
-    StrategyRegisterRequest, PaperRunRequest,
+    StrategyRegisterRequest, StrategyValidateRequest, PaperRunRequest,
     StrategyMiningRequest, AutoBacktestRequest,
 )
 from .ws import manager
 from .services import (
     DataService, FactorService, BacktestService, LifecycleService, ResearchService,
-    RiskService, OptimizeService, CrossSectionService, SettingsService, SeatService,
+    RiskService, OptimizeService, SettingsService, SeatService,
     DataSettingsService, DataAdminService, AlertSettingsService, SearchService,
     KnowledgeService, StrategyMiningService,
 )
@@ -269,7 +269,6 @@ async def lifespan(app: FastAPI):
     app.state.optimize_service = OptimizeService(
         dm, resolver=lambda n: app.state.backtest_service._resolve_strategy_class(n)
     )
-    app.state.cross_section_service = CrossSectionService(dm)
     app.state.settings_service = settings_service
     app.state.search_service = SearchService(dm, provider)
     app.state.knowledge_service = KnowledgeService()
@@ -668,6 +667,23 @@ async def factor(req: FactorRequest):
     return await service.evaluate(req)
 
 
+@app.post("/factor/evaluate")
+async def factor_evaluate(req: FactorRequest):
+    """因子研究统一评估：多标的（symbols≥2）→ 截面契约；单个 → 单标时序契约。
+
+    替代旧 ``/cross-section``（香除独立 CrossSectionService）。
+    """
+    service: FactorService = app.state.factor_service
+    return await service.evaluate_dict(req)
+
+
+@app.get("/factor/cs-factors")
+async def factor_cs_factors():
+    """多标（截面）模式可用的截面 Alpha 因子清单（原 /cross-section/factors）。"""
+    return {"factors": FactorService.cs_factors()}
+
+
+
 @app.post("/factor/expr-eval")
 async def factor_expr_eval(req: ExprEvalRequest):
     """表达式截面评估（多标的面板 → IC/RankIC/衰减…）。"""
@@ -733,6 +749,27 @@ async def factor_dedup(req: FactorDedupRequest):
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:  # noqa: BLE001
         _logger.exception("因子去冗余失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+
+@app.post("/strategy/validate")
+async def strategy_validate(req: StrategyValidateRequest):
+    """策略思想测试：策略思路 →（LLM 预编程 或 预置模板）→ 多品种真实回测 → 门槛 → 有效策略库。
+
+    ``llm_code=True``（默认）：把 ``idea``（策略思想，如布林带回穿规则全文）交给 LLM
+    预编程为 CtaTemplate 策略代码，AST 沙箱校验后逐品种回测；
+    ``llm_code=False``：用 ``strategy`` 预置模板（momentum/chan_*/bollinger_recover/dual_ma）。
+    返回：LLM 生成的代码 + 每品种回测报告 + 净值曲线 + gate 判定 +（promote 时）入库结果。
+    """
+    service: BacktestService = app.state.backtest_service
+    try:
+        provider = _llm_provider()
+        return await service.validate_strategy(req, provider=provider)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("策略验证失败")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
@@ -1299,25 +1336,6 @@ async def optimize_optuna(req: OptimizeRequest):
     try:
         return await service.optimize(req)
     except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-
-# --------------------------------------------------------------------------
-# 截面研究
-# --------------------------------------------------------------------------
-@app.get("/cross-section/factors")
-async def cross_section_factors():
-    """可用截面 Alpha 因子清单。"""
-    return {"factors": CrossSectionService.factors()}
-
-
-@app.post("/cross-section")
-async def cross_section(req: CrossSectionRequest):
-    """多标的截面因子 IC 评估 + 多空组合回测。"""
-    service: CrossSectionService = app.state.cross_section_service
-    try:
-        return await service.run(req)
-    except (ValueError, KeyError) as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 

@@ -32,11 +32,15 @@ if online:
     comps = health.get("components", {})
     feeds = health.get("feeds", [])
     kpi_row([
-        {"label": "后端服务", "value": "在线", "tone": "up", "hint": health.get("timestamp", "")[:19].replace("T", " ")},
-        {"label": "数据源", "value": len(feeds), "tone": "accent", "hint": "、".join(feeds[:3]) or "无"},
-        {"label": "事件引擎", "value": "运行中" if comps.get("event_engine") == "running" else "已停止",
+        {"label": "后端服务", "value": "在线", "tone": "up",
+         "hint": health.get("timestamp", "")[:19].replace("T", " ")},
+        {"label": "数据源", "value": len(feeds), "tone": "accent",
+         "hint": "、".join(feeds[:3]) or "无"},
+        {"label": "事件引擎",
+         "value": "运行中" if comps.get("event_engine") == "running" else "已停止",
          "tone": "up" if comps.get("event_engine") == "running" else "down"},
-        {"label": "生命周期", "value": "已激活" if comps.get("lifecycle") == "active" else "未激活",
+        {"label": "生命周期",
+         "value": "已激活" if comps.get("lifecycle") == "active" else "未激活",
          "tone": "up" if comps.get("lifecycle") == "active" else "neutral"},
     ])
 else:
@@ -55,11 +59,9 @@ MODULES = [
     ("📈", "行情数据", "多市场 K 线查询、技术指标与导出", "pages/2_行情数据.py"),
     ("🧪", "数据质量", "间隙 / 异常尖峰 / 换月跳变 / 新鲜度体检", "pages/13_数据质量.py"),
     ("🗄️", "行情仓库总览", "本地 Parquet 缓存运维、覆盖区间可视化", "pages/19_行情仓库总览.py"),
-    ("🔬", "因子研究", "单标的因子 IC / IR / 衰减 / 分位收益评估", "pages/3_因子研究.py"),
-    ("🧬", "截面研究", "多标的面板 Alpha 因子与多空组合回测", "pages/12_截面研究.py"),
+    ("🔬", "因子研究", "单标的时序 / 多标的截面 IC、IR、衰减、多空组合", "pages/3_因子研究.py"),
     ("🚀", "端到端流水线", "Idea→证据→挖掘→OOS→代码→知识库一键跑通", "pages/20_端到端流水线.py"),
     ("📚", "因子库", "内置 Alpha101 / Alpha191 因子检索", "pages/9_FactorLibrary.py"),
-    ("🤖", "AI 研究", "自然语言想法 → 假设 / 因子 / 策略代码", "pages/5_AI_研究.py"),
     ("⚙️", "策略回测", "回测 / 模拟 / 实盘三路线同一套策略代码", "pages/4_策略回测.py"),
     ("🎛️", "参数优化", "网格搜索寻优，附带过拟合提示", "pages/11_参数优化.py"),
     ("🔁", "Walk-Forward", "滚动窗口样本外验证与过拟合诊断", "pages/8_WalkForward.py"),
@@ -67,22 +69,38 @@ MODULES = [
     ("🔄", "生命周期", "IDEA → RESEARCH → … → LIVE 晋升闸门", "pages/6_生命周期.py"),
     ("📡", "实时监控", "WebSocket 事件流与手动下单", "pages/7_实时监控.py"),
     ("⚙️", "设置", "配置 AI 模型 API Key / Base URL / 模型", "pages/14_设置.py"),
-    ("🧠", "LLM 策略挖掘", "选因子 → LLM 设计策略 → 自动回测 → 注册生命周期", "pages/22_LLM策略挖掘.py"),
+    ("🧠", "因子组合策略", "选因子 → LLM 设计策略 → 自动回测 → 注册生命周期", "pages/22_因子组合策略.py"),
+    ("🎯", "LLM策略挖掘", "输入策略思想 → LLM 预编程 → 多品种回测验证", "pages/24_LLM策略挖掘.py"),
 ]
 
-cols = st.columns(3, gap="small")
-for i, (icon, name, desc, target) in enumerate(MODULES):
-    # Streamlit 多页路由：页面标题 = 去数字前缀的文件名（不含 .py）
-    page_slug = re.sub(r"^\d+_", "", Path(target).stem)
-    with cols[i % 3]:
-        st.markdown(
-            f"<a class='qm-card' href='/{page_slug}' target='_self'>"
-            f"<span class='qm-mod-head'><span class='qm-mod-icon'>{icon}</span>"
-            f"<span class='qm-mod-name'>{name}</span></span>"
-            f"<span class='qm-mod-desc'>{desc}</span>"
-            f"</a>",
-            unsafe_allow_html=True,
-        )
+# 分组展示，更有层次感
+MODULE_GROUPS = [
+    ("数据层", MODULES[0:4]),
+    ("研究引擎", MODULES[4:7]),
+    ("回测验证", MODULES[7:10]),
+    ("交易运营", MODULES[10:14]),
+    ("策略", MODULES[14:16]),
+]
+
+for group_name, modules in MODULE_GROUPS:
+    st.markdown(
+        f'<div style="font-family: IBM Plex Mono, monospace; font-size:.68rem; '
+        f'font-weight:600; color:#4a5e82; letter-spacing:1.5px; text-transform:uppercase; '
+        f'margin: 1rem 0 .4rem 0;">{group_name}</div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(min(len(modules), 4), gap="small")
+    for i, (icon, name, desc, target) in enumerate(modules):
+        page_slug = re.sub(r"^\d+_", "", Path(target).stem)
+        with cols[i % len(cols)]:
+            st.markdown(
+                f"<a class='qm-card' href='/{page_slug}' target='_self'>"
+                f"<span class='qm-mod-head'><span class='qm-mod-icon'>{icon}</span>"
+                f"<span class='qm-mod-name'>{name}</span></span>"
+                f"<span class='qm-mod-desc'>{desc}</span>"
+                f"</a>",
+                unsafe_allow_html=True,
+            )
 
 # ---------------------------------------------------------------- 快速上手
 section("快速上手")

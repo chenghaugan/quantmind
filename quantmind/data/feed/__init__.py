@@ -2,6 +2,7 @@
 from .base import BaseDataFeed, HistoryRequest
 from .registry import DataFeedRegistry, DataUnavailable
 from .akshare_future import AkShareFuturesFeed
+from .efinance_feed import EfinanceFeed
 from .mootdx_astock import MootdxAStockFeed
 from .em_hk import EmHkFeed
 from .akshare_option import AkShareOptionFeed
@@ -21,6 +22,7 @@ __all__ = [
     "DataFeedRegistry",
     "DataUnavailable",
     "AkShareFuturesFeed",
+    "EfinanceFeed",
     "MootdxAStockFeed",
     "EmHkFeed",
     "AkShareOptionFeed",
@@ -71,6 +73,7 @@ def build_default_registry(
         else:
             _logger.warning("local_data_root 不存在，跳过本地源: %s", local_data_root)
     reg.register(AkShareFuturesFeed(), priority=10)
+    reg.register(EfinanceFeed(), priority=11)  # efinance 作为期货数据备选源
     if local_stock_root:
         if Path(local_stock_root).exists():
             reg.register(ChinaAStockParquetFeed(local_stock_root), priority=15)

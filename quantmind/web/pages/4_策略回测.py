@@ -132,6 +132,14 @@ with st.form("bt_form"):
         use_cost = st.checkbox("启用真实成本模型", value=True,
                                help="按品种差异化费率 / 平今 / 印花税 / 保证金计算")
 
+    # 日期范围选择
+    st.markdown("**回测区间**（可选，留空使用全部可用数据）")
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        bt_start_date = st.date_input("开始日期", value=None, format="YYYY-MM-DD")
+    with dc2:
+        bt_end_date = st.date_input("结束日期", value=None, format="YYYY-MM-DD")
+
     section("策略参数")
     defaults = meta.get("parameters") or STRATEGIES.get(strategy, {}).get("params", {})
     # 若用户加载了匹配当前策略的模板，则用模板参数覆盖默认值
@@ -168,8 +176,11 @@ if not submitted:
     st.stop()
 
 with st.spinner(f"正在以「{mode}」模式运行 {strategy} …"):
+    bt_start_str = bt_start_date.isoformat() if bt_start_date else None
+    bt_end_str = bt_end_date.isoformat() if bt_end_date else None
     res = APIClient.backtest(strategy, symbol, exchange, mode=mode, setting=setting,
-                             capital=capital, commission=commission, cost=use_cost)
+                             capital=capital, commission=commission, cost=use_cost,
+                             start=bt_start_str, end=bt_end_str)
 
 if guard_error(res, "运行"):
     st.stop()

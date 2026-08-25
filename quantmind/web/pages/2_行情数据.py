@@ -24,15 +24,20 @@ if "md_symbol" not in st.session_state:
 if "md_exchange" not in st.session_state:
     st.session_state.md_exchange = "CFFEX"
 
-# ---------------------------------------------------------------- 速选
+# ---------------------------------------------------------------- 速选（迷你卡片按钮）
 section("常用标的", "点击即可填入查询条件")
 tabs = st.tabs(list(SYMBOL_PRESETS.keys()))
 for tab, (cls, items) in zip(tabs, SYMBOL_PRESETS.items()):
     with tab:
-        cols = st.columns(5, gap="small")
+        cols = st.columns(min(len(items), 6), gap="small")
         for i, (sym, exch, name) in enumerate(items):
-            with cols[i % 5]:
-                if st.button(f"{name}\n{sym}", key=f"preset_{cls}_{sym}", width="stretch"):
+            with cols[i % len(cols)]:
+                if st.button(
+                    f"**{name}**\n`{sym}`",
+                    key=f"preset_{cls}_{sym}",
+                    width="stretch",
+                    help=f"{name} ({sym}.{exch})",
+                ):
                     st.session_state.md_symbol = sym
                     st.session_state.md_exchange = exch
                     st.rerun()
@@ -70,7 +75,7 @@ with st.form("md_query"):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch(symbol, exchange, interval, start, end, limit):
-    # 先取第 1 页拿到总条数，再请求最后一页，确保展示的是“最新” limit 根，
+    # 先取第 1 页拿到总条数，再请求最后一页，确保展示的是"最新" limit 根，
     # 而不是最旧的 limit 根（page=1 对长历史序列会倒退到多年前的旧数据）。
     first = APIClient.data(symbol, exchange, interval, start=start, end=end,
                            page=1, page_size=limit, timeout=60)
