@@ -13,9 +13,17 @@
 设计原则
 --------
   - 默认零成本假设不成立：期货平今（close-today）手续费与开仓差异巨大
-    （如股指期货 2019 年后平今免收，此前曾高达万分之数十）；A 股卖出收千一印花税。
+    （如股指期货 2019 年后平今免收，此前曾高达万分之数十）；A 股卖出收印花税
+    （2023-08-28 起为 0.05%，此前为 0.1%）。
   - 滑点按「最小变动价位(tick)倍数」或「成交价比例」建模，比固定点数更贴近实盘。
   - 保证金仅作占用记录与可选容量约束，不影响权益曲线数值（权益 = 余额 + 浮动盈亏）。
+
+校准提示
+--------
+  本表数值为常见近似，且费率随交易所公告/税收政策变化，**回测前请按当期公告校准**：
+  - A 股印花税：2023-08-28 后 0.05%（卖出）；2023-08-28 前 0.1%。
+  - 港股印花税：2023-11-17 后 0.1%；此前曾多次调整。
+  - 股指期货平今：2019 年后免收，此前极高——长周期回测应分段处理。
 """
 from __future__ import annotations
 
@@ -209,10 +217,16 @@ CONTRACT_COST_TABLE: Dict[str, CostModel] = {
     "LC": CostModel(asset_class="future", commission_rate=0.0001,
                     tick_size=50.0, margin_rate=0.1, multiplier=1, note="碳酸锂"),
     # A 股（按品种前缀兜底到交易所默认，这里给通用股票成本）
+    # 印花税按 2023-08-28 起现行税率 0.05%（卖出）校准；过户费已并入 note 供参考。
     "EQUITY": CostModel(asset_class="equity", commission_rate=0.00025,
-                        min_commission=5.0, stamp_tax_rate=0.001,
+                        min_commission=5.0, stamp_tax_rate=0.0005,
                         tick_size=0.01, margin_rate=1.0, multiplier=1,
-                        note="A股：万2.5佣金+卖出千1印花税+最低5元"),
+                        note="A股：万2.5佣金+卖出万5印花税+最低5元(+过户费双向万0.1)"),
+    # 美股：免佣金趋势 + 交易规费极低，成本以滑点为主（约 0.05%-0.1%）
+    "US_EQUITY": CostModel(asset_class="equity", commission_rate=0.0,
+                            stamp_tax_rate=0.0, slippage_rate=0.0005,
+                            tick_size=0.01, margin_rate=0.5, multiplier=1,
+                            note="美股：免佣+SEC规费可忽略，用 0.05% 滑点近似"),
     # 期权
     "OPTION": CostModel(asset_class="option", commission_per_lot=1.5,
                         tick_size=0.0001, margin_rate=0.1, multiplier=1,
@@ -229,9 +243,14 @@ _EXCHANGE_DEFAULT: Dict[str, CostModel] = {
     "GFEX": _FUTURE_COMMON,
     "SSE": CONTRACT_COST_TABLE["EQUITY"],
     "SZSE": CONTRACT_COST_TABLE["EQUITY"],
+    # 港股印花税按 2023-11-17 起现行税率 0.1% 校准（另有交易征费/交收费等并入 note）
     "HKEX": CostModel(asset_class="equity", commission_rate=0.0005,
-                      stamp_tax_rate=0.0013, tick_size=0.01, margin_rate=1.0,
-                      note="港股：约万5佣金+印花税(近似)"),
+                      stamp_tax_rate=0.001, tick_size=0.01, margin_rate=1.0,
+                      note="港股：约万5佣金+0.1%印花税(+征费/交收费≈万0.0565)"),
+    # 美股（NASDAQ/NYSE/AMEX）
+    "NASDAQ": CONTRACT_COST_TABLE["US_EQUITY"],
+    "NYSE": CONTRACT_COST_TABLE["US_EQUITY"],
+    "AMEX": CONTRACT_COST_TABLE["US_EQUITY"],
 }
 
 
@@ -251,8 +270,9 @@ def default_cost_table() -> Dict[str, CostModel]:
 def lookup_cost(vt_symbol: str, table: Optional[Dict[str, CostModel]] = None) -> CostModel:
     """按 vt_symbol 解析成本模型。
 
-    解析顺序：精确 symbol -> 品种前缀（如 RB）-> 交易所默认 -> 商品期货通用。
-    纯数字 symbol 视为 A 股。
+    解析顺序：精确 symbol -> 品种前缀（如 RB，非数字代码）-> 交易所默认 -> 商品期货通用。
+    纯数字 symbol（股票代码，如 600519/00700）跳过品种前缀，直接按交易所兜底，
+    这样港股数字代码（如 00700.HKEX）能命中港股成本，而非被误判为 A 股。
     """
     table = table or CONTRACT_COST_TABLE
     if "." not in vt_symbol:
@@ -262,10 +282,11 @@ def lookup_cost(vt_symbol: str, table: Optional[Dict[str, CostModel]] = None) ->
     # 1) 精确 symbol（如 'rb0' 已被预设表收录则直接用，否则走前缀）
     if sym in table:
         return table[sym]
-    # 2) 品种前缀
-    root = _symbol_root(sym)
-    if root in table:
-        return table[root]
+    # 2) 品种前缀（股票数字代码跳过，避免误判为 A 股 EQUITY）
+    if not sym.isdigit():
+        root = _symbol_root(sym)
+        if root in table:
+            return table[root]
     # 3) 交易所默认
     if exch and exch in _EXCHANGE_DEFAULT:
         return _EXCHANGE_DEFAULT[exch]

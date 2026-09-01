@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
 import math
 from contextlib import asynccontextmanager
@@ -46,19 +47,20 @@ from .schemas import (
     ResearchRequest, ResearchResult, FactorRequest, FactorResult,
     BacktestRequest, WalkForwardRequest, StrategyInfo, OrderRequestSchema, LifecycleRequest,
     OptimizeRequest, RiskCheckRequest,
-    SeatFactorRequest, SeatFactorResult, DataDownloadRequest,
+    SeatFactorRequest, SeatFactorResult,
     ExprEvalRequest, ExprEvalBatchRequest, FactorSearchRequest,
     FactorDedupRequest, ExpressionBacktestRequest, FactorPipelineRequest,
     FactorE2ERequest, KnowledgeIngestRequest, KnowledgeSearchRequest,
     StrategyRegisterRequest, StrategyValidateRequest, PaperRunRequest,
-    StrategyMiningRequest, AutoBacktestRequest,
+    StrategyDraftRequest, StrategyMiningRequest, AutoBacktestRequest,
 )
 from .ws import manager
 from .services import (
     DataService, FactorService, BacktestService, LifecycleService, ResearchService,
     RiskService, OptimizeService, SettingsService, SeatService,
     DataSettingsService, DataAdminService, AlertSettingsService, SearchService,
-    KnowledgeService, StrategyMiningService,
+    KnowledgeService, StrategyMiningService, FuturesDownloadSettingsService,
+    MarketUpdateSettingsService,
 )
 from .logging_config import setup_api_logger
 from .routes_auth import router as auth_router
@@ -80,18 +82,39 @@ _AI_ALLOWED = {"provider", "api_key", "base_url", "model", "temperature"}
 # 端到端流水线等长耗时任务用「启动 + 轮询」模式，避免单次 HTTP 请求超时。
 # 内存态 task_id -> {task, status, message, result}
 _E2E_TASKS: Dict[str, Dict[str, Any]] = {}
+_FUTURES_DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
+_STOCK_DOWNLOAD_TASKS: Dict[str, Dict[str, Any]] = {}
+_MARKET_WARM_TASKS: Dict[str, Dict[str, Any]] = {}
 
 
-def _submit_task(coro) -> str:
-    """把协程提交为后台任务，返回 task_id。"""
+def _prune_tasks(store: Dict[str, Dict[str, Any]], max_items: int = 100) -> None:
+    """裁剪已完成的后台任务记录（最早已完成者先删），防止常驻进程内存无限增长。"""
+    if len(store) <= max_items:
+        return
+    for k in list(store):
+        if len(store) <= max_items:
+            break
+        if store[k].get("status") != "running":
+            store.pop(k, None)
+
+
+def _submit_task(coro, progress: Optional[Dict[str, Any]] = None) -> str:
+    """把协程提交为后台任务，返回 task_id。
+
+    ``progress`` 可选：任务内部可变字典（current/total/message），
+    由任务自身更新，状态接口原样返回供前端展示真实进度。
+    """
     task_id = uuid.uuid4().hex
     record: Dict[str, Any] = {
         "task": None,
         "status": "running",
         "message": "任务已提交，正在初始化…",
         "result": None,
+        "progress": progress if progress is not None
+        else {"current": 0, "total": 0, "message": ""},
     }
     _E2E_TASKS[task_id] = record
+    _prune_tasks(_E2E_TASKS)
 
     async def _run() -> None:
         try:
@@ -111,6 +134,11 @@ def _submit_task(coro) -> str:
 
     record["task"] = asyncio.create_task(_run())
     return task_id
+
+
+def get_ml_service() -> MLService:
+    """供 routes_ml 等模块延迟获取 ML 服务（app 实例化后才可用）。"""
+    return app.state.ml_service
 
 
 def _jsonable(o: Any) -> Any:
@@ -133,12 +161,18 @@ def _jsonable(o: Any) -> Any:
     return o
 
 
+_BROADCAST_TASKS: set = set()
+
+
 def _broadcast(e: Event) -> None:
     if _ee is None:
         return
     msg = {"type": e.type.value, "data": _jsonable(e.data)}
     try:
-        asyncio.ensure_future(manager.broadcast(msg))
+        t = asyncio.ensure_future(manager.broadcast(msg))
+        # 保留强引用避免 task 被 GC；完成后自动移除
+        _BROADCAST_TASKS.add(t)
+        t.add_done_callback(_BROADCAST_TASKS.discard)
     except RuntimeError:
         pass
 
@@ -278,6 +312,8 @@ async def lifespan(app: FastAPI):
     app.state.data_settings_service = data_settings
     app.state.data_admin_service = DataAdminService(dm, data_settings)
     app.state.alert_settings_service = AlertSettingsService()
+    app.state.futures_download_settings_service = FuturesDownloadSettingsService()
+    app.state.market_update_settings_service = MarketUpdateSettingsService()
 
     # 初始化 ML 服务和 Profile 服务
     app.state.ml_service = MLService()
@@ -291,7 +327,19 @@ async def lifespan(app: FastAPI):
     app.state.lifecycle = lifecycle_mgr
 
     # ---- 任务调度器（APScheduler）----
-    sys_state = {"dm": dm, "ee": _ee, "lifecycle": lifecycle_mgr, "settings": settings}
+    # 读取期货下载配置 + 股票市场自动更新配置（A股/港股/美股）
+    futures_dl_settings = FuturesDownloadSettingsService()
+    futures_dl_config = futures_dl_settings.get()
+    market_update_settings = app.state.market_update_settings_service
+    sys_state = {
+        "dm": dm,
+        "ee": _ee,
+        "lifecycle": lifecycle_mgr,
+        "settings": settings,
+        "futures_download_settings": futures_dl_settings,
+        "futures_download_cron": futures_dl_config.get("schedule_cron", "30 16 * * 1-5"),
+        "market_update_settings": market_update_settings,
+    }
     scheduler = build_scheduler(sys_state, register_defaults=True)
     scheduler.start()
     app.state.scheduler = scheduler
@@ -338,12 +386,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         status_code=500,
         content={"error": "服务器内部错误", "detail": str(exc) if _logger.level <= logging.DEBUG else "请联系管理员"}
     )
-
-
-@app.exception_handler(404)
-async def not_found_handler(request: Request, exc):
-    """404 处理"""
-    return JSONResponse(status_code=404, content={"error": "接口不存在"})
 
 
 @app.exception_handler(RequestValidationError)
@@ -416,16 +458,48 @@ async def get_data(
 
 @app.get("/data/cache")
 async def get_data_cache_stats():
-    """本地行情仓库（Parquet 写缓存）概览：文件数 / 行数 / 最新交易日 / 根目录。"""
+    """本地行情仓库（Parquet 写缓存）概览：文件数 / 行数 / 最新交易日 / 根目录 + 聚合桶。
+
+    几千只标的下逐标的明细不再全量下发；这里只返回：总览 KPI + 聚合桶
+    （``agg.by_exchange / by_interval / freshness / top_rows / stale_top``）。
+    逐标的明细走 ``GET /data/cache/symbols``（过滤 + 分页）。
+    """
     dm: DataManager = app.state.dm
     if dm is None or dm.disk_cache is None:
         return {"enabled": False}
     try:
-        stats = dm.disk_cache.stats()
+        # 扫描几千个 parquet 较重，放线程池避免阻塞事件循环（否则全站接口都会被卡住）
+        stats = await asyncio.to_thread(
+            dm.disk_cache.stats, include_symbols=False, aggregate=True)
         return {"enabled": True, **stats}
     except Exception as exc:  # noqa: BLE001
         _logger.warning("读取行情仓库统计失败: %s", exc)
         return {"enabled": True, "error": str(exc)}
+
+
+@app.get("/data/cache/symbols")
+async def get_data_cache_symbols(
+    exchange: str = Query(""),
+    market: str = Query(""),
+    interval: str = Query(""),
+    freshness: str = Query("", description="fresh | stale"),
+    q: str = Query("", description="标的模糊搜索"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+):
+    """行情仓库逐标的明细分页（总览页下钻用），按交易所/市场/周期/新鲜度/关键词过滤。"""
+    dm: DataManager = app.state.dm
+    if dm is None or dm.disk_cache is None:
+        return {"enabled": False}
+    try:
+        return await asyncio.to_thread(
+            dm.disk_cache.symbol_page,
+            exchange=exchange, market=market, interval=interval,
+            freshness=freshness, q=q, page=page, page_size=page_size,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("读取行情仓库标的分页失败: %s", exc)
+        return {"error": str(exc)}
 
 
 @app.delete("/data/cache")
@@ -562,12 +636,19 @@ async def refresh_data_cache():
 
 
 @app.post("/data/cache/market-warm")
-async def warm_market_cache():
-    """手动触发全市场（A股+港股）预热：复用调度器 ``market_warm`` job，跑一趟增量。
+async def warm_market_cache(payload: Dict[str, Any] = None):
+    """手动触发全市场预热：逐市场（A股/港股）增量建库，可指定覆盖哪些市场。
 
     与调度任务共用 ``_job_market_warm``，便于点按手动推进与后台自动维护共用单一路径。
+    可选参数：
+        - markets: 市场列表（"A"=A股, "HK"=港股）；缺省=取配置（默认两者都预热）
+
+    返回聚合统计 + ``by_market`` 分市场明细。
     """
     from .scheduler import _job_market_warm
+
+    payload = payload or {}
+    markets = payload.get("markets")
 
     sys_state = {
         "dm": app.state.dm,
@@ -575,7 +656,284 @@ async def warm_market_cache():
         "lifecycle": app.state.lifecycle,
         "settings": get_settings(),
     }
-    return await _job_market_warm(sys_state)
+    return await _job_market_warm(sys_state, markets=markets)
+
+
+@app.post("/data/cache/market-warm/start")
+async def warm_market_start(payload: Dict[str, Any] = None):
+    """异步启动全市场预热任务，立即返回 task_id，后台逐市场增量建库。
+
+    与期货/A股下载一致：页面可通过 ``GET /data/cache/market-warm/status/{task_id}``
+    轮询实时进度（current/total/message），避免预热期间页面卡死/无进度。
+    可选参数 markets："A"/"HK" 列表，缺省取配置（默认两者）。
+    """
+    from .scheduler import _job_market_warm
+
+    payload = payload or {}
+    markets = payload.get("markets")
+    full = bool(payload.get("full", False))
+
+    task_id = uuid.uuid4().hex
+    record: Dict[str, Any] = {
+        "task": None,
+        "status": "running",
+        "message": "任务已提交，正在初始化…",
+        "result": None,
+        "progress": {"current": 0, "total": 0, "message": "准备中"},
+    }
+    _MARKET_WARM_TASKS[task_id] = record
+    _prune_tasks(_MARKET_WARM_TASKS)
+
+    def progress_callback(current: int, total: int, message: str):
+        record["progress"]["current"] = current
+        record["progress"]["total"] = total
+        record["progress"]["message"] = message
+        record["message"] = message
+
+    async def _run():
+        try:
+            sys_state = {
+                "dm": app.state.dm,
+                "ee": app.state.ee,
+                "lifecycle": app.state.lifecycle,
+                "settings": get_settings(),
+            }
+            record["result"] = await _job_market_warm(
+                sys_state, markets=markets, progress_callback=progress_callback, full=full
+            )
+            record["status"] = "success"
+            record["message"] = "全市场预热完成"
+        except asyncio.CancelledError:
+            record["status"] = "cancelled"
+            record["message"] = "任务已取消"
+            raise
+        except Exception as exc:
+            _logger.exception("全市场预热任务失败: %s", exc)
+            record["status"] = "error"
+            record["message"] = str(exc)
+        finally:
+            record["task"] = None
+
+    record["task"] = asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/data/cache/market-warm/status/{task_id}")
+async def warm_market_status(task_id: str):
+    """查询全市场预热任务状态（running / success / error / cancelled / not_found）。
+
+    任务成功后 ``result`` 携带完整结果（含分市场 ``by_market`` 明细）。
+    """
+    rec = _MARKET_WARM_TASKS.get(task_id)
+    if rec is None:
+        return JSONResponse(
+            status_code=404,
+            content={"task_id": task_id, "status": "not_found",
+                     "message": "任务不存在（可能后端已重启）"},
+        )
+    done = rec["status"] in ("success", "error", "cancelled")
+    return {
+        "task_id": task_id,
+        "status": rec["status"],
+        "message": rec["message"],
+        "progress": rec["progress"],
+        "result": rec["result"] if done else None,
+    }
+
+
+@app.post("/data/futures/download")
+async def download_futures_data():
+    """手动触发期货数据下载（同步，向后兼容）。
+
+    注意：同步模式受单次请求超时限制，长跑请改用
+    ``POST /data/futures/download/start`` + ``GET /data/futures/download/status/{task_id}``。
+    """
+    from .futures_download import _job_futures_auto_download
+
+    sys_state = {
+        "dm": app.state.dm,
+        "ee": app.state.ee,
+        "lifecycle": app.state.lifecycle,
+        "settings": get_settings(),
+        "futures_download_settings": app.state.futures_download_settings_service,
+    }
+    return await _job_futures_auto_download(sys_state)
+
+
+@app.post("/data/futures/download/start")
+async def download_futures_data_start(payload: Dict[str, Any] = None):
+    """异步启动期货数据下载任务。
+
+    立即返回 ``{"task_id": ...}``，任务在后台执行，客户端通过
+    ``GET /data/futures/download/status/{task_id}`` 轮询进度/结果。
+    避免页面切换导致下载中断。
+
+    可选参数：
+        - symbols: 品种列表（如 ["IF0", "IC0", "rb0"]）
+        - intervals: 周期列表（如 ["1d", "60m", "15m"]）
+    """
+    from .futures_download import _job_futures_auto_download
+
+    payload = payload or {}
+    symbols = payload.get("symbols")
+    intervals = payload.get("intervals")
+
+    task_id = uuid.uuid4().hex
+    record: Dict[str, Any] = {
+        "task": None,
+        "status": "running",
+        "message": "任务已提交，正在初始化…",
+        "result": None,
+        "progress": {
+            "current": 0,
+            "total": 0,
+            "message": "准备中",
+        },
+    }
+    _FUTURES_DOWNLOAD_TASKS[task_id] = record
+    _prune_tasks(_FUTURES_DOWNLOAD_TASKS)
+
+    def progress_callback(current: int, total: int, message: str):
+        record["progress"]["current"] = current
+        record["progress"]["total"] = total
+        record["progress"]["message"] = message
+        record["message"] = message
+
+    async def _run():
+        try:
+            sys_state = {
+                "dm": app.state.dm,
+                "ee": app.state.ee,
+                "lifecycle": app.state.lifecycle,
+                "settings": get_settings(),
+                "futures_download_settings": app.state.futures_download_settings_service,
+            }
+            record["result"] = await _job_futures_auto_download(
+                sys_state,
+                symbols=symbols,
+                intervals=intervals,
+                progress_callback=progress_callback,
+            )
+            record["status"] = "success"
+            record["message"] = "下载完成"
+        except asyncio.CancelledError:
+            record["status"] = "cancelled"
+            record["message"] = "任务已取消"
+            raise
+        except Exception as exc:
+            _logger.exception("期货下载任务失败: %s", exc)
+            record["status"] = "error"
+            record["message"] = str(exc)
+        finally:
+            record["task"] = None
+
+    record["task"] = asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/data/futures/download/status/{task_id}")
+async def download_futures_data_status(task_id: str):
+    """查询期货数据下载任务状态。
+
+    ``status``: running / success / error / cancelled / not_found。
+    任务成功后 ``result`` 携带完整结果。
+    ``progress`` 包含实时进度信息。
+    """
+    rec = _FUTURES_DOWNLOAD_TASKS.get(task_id)
+    if rec is None:
+        return JSONResponse(
+            status_code=404,
+            content={"task_id": task_id, "status": "not_found", "message": "任务不存在（可能后端已重启）"},
+        )
+    done = rec["status"] in ("success", "error", "cancelled")
+    return {
+        "task_id": task_id,
+        "status": rec["status"],
+        "message": rec["message"],
+        "progress": rec["progress"],
+        "result": rec["result"] if done else None,
+    }
+
+
+@app.post("/data/stock/download/start")
+async def download_stock_data_start(payload: Dict[str, Any] = None):
+    """异步启动 A股数据更新任务（日线/60m/30m）。
+
+    立即返回 task_id，后台执行，可安全切换页面。
+    可选参数：
+        - symbols: 标的列表（如 ["600000.SSE"]），缺省=更新仓库内全部 A股
+        - intervals: 周期列表（"1d"/"1h"/"30m"），缺省=三档
+        - manual: 是否手动触发（跳过启用开关检查，默认 True）
+    """
+    from .stock_download import _job_stock_auto_download
+
+    payload = payload or {}
+    task_id = uuid.uuid4().hex
+    record: Dict[str, Any] = {
+        "task": None,
+        "status": "running",
+        "message": "任务已提交，正在初始化…",
+        "result": None,
+        "progress": {"current": 0, "total": 0, "message": "准备中"},
+    }
+    _STOCK_DOWNLOAD_TASKS[task_id] = record
+    _prune_tasks(_STOCK_DOWNLOAD_TASKS)
+
+    def progress_callback(current: int, total: int, message: str):
+        record["progress"]["current"] = current
+        record["progress"]["total"] = total
+        record["progress"]["message"] = message
+        record["message"] = message
+
+    async def _run():
+        try:
+            sys_state = {
+                "dm": app.state.dm,
+                "ee": app.state.ee,
+                "lifecycle": app.state.lifecycle,
+                "settings": get_settings(),
+            }
+            record["result"] = await _job_stock_auto_download(
+                sys_state,
+                symbols=payload.get("symbols"),
+                intervals=payload.get("intervals"),
+                manual=payload.get("manual", True),
+                progress_callback=progress_callback,
+            )
+            record["status"] = "success"
+            record["message"] = "A股数据更新完成"
+        except asyncio.CancelledError:
+            record["status"] = "cancelled"
+            record["message"] = "任务已取消"
+            raise
+        except Exception as exc:
+            _logger.exception("A股数据更新任务失败: %s", exc)
+            record["status"] = "error"
+            record["message"] = str(exc)
+        finally:
+            record["task"] = None
+
+    record["task"] = asyncio.create_task(_run())
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/data/stock/download/status/{task_id}")
+async def download_stock_data_status(task_id: str):
+    """查询 A股数据更新任务状态。"""
+    rec = _STOCK_DOWNLOAD_TASKS.get(task_id)
+    if rec is None:
+        return JSONResponse(
+            status_code=404,
+            content={"task_id": task_id, "status": "not_found", "message": "任务不存在（可能后端已重启）"},
+        )
+    done = rec["status"] in ("success", "error", "cancelled")
+    return {
+        "task_id": task_id,
+        "status": rec["status"],
+        "message": rec["message"],
+        "progress": rec["progress"],
+        "result": rec["result"] if done else None,
+    }
 
 
 @app.post("/research", response_model=ResearchResult)
@@ -598,7 +956,9 @@ async def put_ai_settings(payload: Dict[str, Any]):
     """保存 AI 模型配置并即时重建 Provider，无需重启。"""
     data = app.state.settings_service.save(payload)
     provider = app.state.settings_service.rebuild_provider()
+    # 同步更新所有持有 provider 引用的 service
     app.state.research_service.provider = provider
+    app.state.search_service.provider = provider
     synced = data.pop("synced_env", False)
     return {"ok": True, "settings": data, "provider": provider.name, "synced_env": synced}
 
@@ -635,17 +995,6 @@ async def data_files():
     return app.state.data_admin_service.list_files()
 
 
-@app.post("/data/download")
-async def data_download(req: DataDownloadRequest):
-    """下载指定标的数据并入库（拉取 + 回写持久存储）。"""
-    try:
-        return await app.state.data_admin_service.download(
-            req.symbol, req.exchange, req.interval, req.start or "", req.end or ""
-        )
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={"error": str(e)})
-
-
 # --------------------------------------------------------------------------
 # 告警通知配置
 # --------------------------------------------------------------------------
@@ -659,6 +1008,71 @@ async def get_alert_settings():
 async def put_alert_settings(payload: Dict[str, Any]):
     """保存告警通知配置。"""
     return app.state.alert_settings_service.save(payload)
+
+
+@app.get("/settings/futures-download")
+async def get_futures_download_settings():
+    """读取期货数据自动下载配置。"""
+    return app.state.futures_download_settings_service.get()
+
+
+@app.put("/settings/futures-download")
+async def put_futures_download_settings(payload: Dict[str, Any]):
+    """保存期货数据自动下载配置。"""
+    result = app.state.futures_download_settings_service.save(payload)
+    # 如果调度时间变更，需要更新调度器
+    if "schedule_cron" in payload and app.state.scheduler:
+        from .futures_download import _job_futures_auto_download
+        sched: QuantMindScheduler = app.state.scheduler
+        sched.remove("futures_download")
+        sched.register(
+            "futures_download",
+            _job_futures_auto_download,
+            cron=result.get("schedule_cron"),
+            timezone="Asia/Shanghai",
+            kwargs={"sys_state": {
+                "dm": app.state.dm,
+                "ee": app.state.ee,
+                "lifecycle": app.state.lifecycle,
+                "settings": get_settings(),
+            }},
+        )
+    return result
+
+
+@app.get("/settings/market-update")
+async def get_market_update_settings():
+    """读取股票市场（A股/港股/美股）自动更新配置。"""
+    return app.state.market_update_settings_service.get()
+
+
+@app.put("/settings/market-update")
+async def put_market_update_settings(payload: Dict[str, Any]):
+    """保存股票市场自动更新配置，并按需重新注册对应调度任务。"""
+    result = app.state.market_update_settings_service.save(payload)
+    # 涉及调度时间变更的市场重新注册对应任务
+    job_by_key = {"a_stock": "stock_download", "hk_stock": "hk_download", "us_stock": "us_download"}
+    market_by_key = {"a_stock": "A", "hk_stock": "HK", "us_stock": "US"}
+    if app.state.scheduler:
+        from .stock_download import _job_stock_auto_download
+        sched: QuantMindScheduler = app.state.scheduler
+        for key, job_name in job_by_key.items():
+            if key in payload:
+                sched.remove(job_name)
+                sched.register(
+                    job_name,
+                    _job_stock_auto_download,
+                    cron=result.get(key, {}).get("schedule_cron"),
+                    timezone="Asia/Shanghai",
+                    kwargs={"sys_state": {
+                        "dm": app.state.dm,
+                        "ee": app.state.ee,
+                        "lifecycle": app.state.lifecycle,
+                        "settings": get_settings(),
+                        "market_update_settings": app.state.market_update_settings_service,
+                    }, "market": market_by_key[key]},
+                )
+    return result
 
 
 @app.post("/factor", response_model=FactorResult)
@@ -773,6 +1187,172 @@ async def strategy_validate(req: StrategyValidateRequest):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
+_DRAFT_STATE_FILE = Path("data_cache") / "strategy_workflow_state.json"
+
+
+@app.get("/strategy/draft/state")
+async def get_draft_state():
+    """读取 LLM 策略挖掘工作流状态（服务器端持久化，跨会话/刷新/重连不丢失）。"""
+    if _DRAFT_STATE_FILE.exists():
+        try:
+            return json.loads(_DRAFT_STATE_FILE.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            _logger.warning("读取工作流状态失败: %s", e)
+    return {}
+
+
+@app.put("/strategy/draft/state")
+async def save_draft_state(payload: Dict[str, Any]):
+    """保存 LLM 策略挖掘工作流状态（策略思想/代码/品种/周期等）。"""
+    try:
+        _DRAFT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        payload["saved_at"] = datetime.now().isoformat(timespec="seconds")
+        _DRAFT_STATE_FILE.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("保存工作流状态失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.delete("/strategy/draft/state")
+async def clear_draft_state():
+    """清除 LLM 策略挖掘工作流状态（配合前端“清空重新开始”）。"""
+    try:
+        if _DRAFT_STATE_FILE.exists():
+            _DRAFT_STATE_FILE.unlink()
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("清除工作流状态失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/strategy/draft/start")
+async def strategy_draft_start(req: StrategyDraftRequest):
+    """对话式 LLM 策略编程：生成/修改代码草稿（**只出码不回测**）。
+
+    无状态多轮：前端每次携带完整 history（user=思想/修改意见，assistant=上轮代码），
+    服务端不存会话。后台任务跑（LLM 调用 10~60s），前端轮询 status。
+    """
+    service: BacktestService = app.state.backtest_service
+    try:
+        provider = _llm_provider()
+        progress: Dict[str, Any] = {"current": 0, "total": 1,
+                                    "message": "LLM 编程中…"}
+        task_id = _submit_task(
+            service.draft_strategy_code(
+                provider, req.idea,
+                [m.model_dump() for m in req.history]),
+            progress=progress)
+        return {"task_id": task_id, "status": "running"}
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("策略代码草稿启动失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/strategy/draft/status/{task_id}")
+async def strategy_draft_status(task_id: str):
+    """查询对话式策略编程草稿任务状态（running / success / error / not_found）。"""
+    rec = _E2E_TASKS.get(task_id)
+    if rec is None:
+        return JSONResponse(status_code=404, content={
+            "task_id": task_id, "status": "not_found",
+            "message": "任务不存在（后端可能已重启），请重新生成。",
+        })
+    return {
+        "task_id": task_id,
+        "status": rec["status"],
+        "message": rec["message"],
+        "progress": rec.get("progress"),
+        "result": rec.get("result") if rec["status"] == "success" else None,
+    }
+
+
+@app.post("/strategy/validate/start")
+async def strategy_validate_start(req: StrategyValidateRequest):
+    """策略验证的**后台非阻塞**入口：立即返回 task_id，长任务不占同步请求。
+
+    与 :func:`strategy_validate` 等价，但跑在后台任务（客户端离开/切页不中断），
+    前端通过 ``GET /strategy/validate/status/{task_id}`` 轮询进度。
+    用于 LLM 策略挖掘页：几十个品种回测可能跑几分钟，避免同步请求被切页打断。
+    """
+    service: BacktestService = app.state.backtest_service
+    try:
+        provider = _llm_provider()
+        progress: Dict[str, Any] = {"current": 0, "total": 0,
+                                    "message": "任务已提交，正在初始化…"}
+
+        def _prog_cb(msg: str, cur: int = 0, tot: int = 0) -> None:
+            progress["message"] = msg
+            progress["current"] = int(cur)
+            progress["total"] = int(tot)
+
+        task_id = _submit_task(
+            service.validate_strategy(req, provider=provider, progress=_prog_cb),
+            progress=progress)
+        return {"task_id": task_id, "status": "running"}
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("策略验证后台启动失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/strategy/validate/status/{task_id}")
+async def strategy_validate_status(task_id: str):
+    """查询后台策略验证任务状态（running / success / error / cancelled / not_found）。"""
+    rec = _E2E_TASKS.get(task_id)
+    if rec is None:
+        return JSONResponse(status_code=404, content={
+            "task_id": task_id, "status": "not_found",
+            "message": "任务不存在（后端可能已重启），请重新运行。",
+        })
+    return {
+        "task_id": task_id,
+        "status": rec["status"],
+        "message": rec["message"],
+        "result": rec["result"],
+        "progress": rec.get("progress") or {"current": 0, "total": 0, "message": ""},
+    }
+
+
+@app.delete("/strategy/validate/history/{run_id}")
+async def strategy_validate_history_delete(run_id: str):
+    """删除一条策略验证历史记录，并尝试删除对应的 lifecycle 入库记录。
+
+    用于清理错误运行（如周期与策略不匹配导致的误入库）。
+    """
+    service: BacktestService = app.state.backtest_service
+    try:
+        result = service.delete_validation_history(run_id)
+        return result
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("删除策略验证历史失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/strategy/draft/validate")
+async def strategy_draft_validate(payload: Dict[str, Any]):
+    """沙箱校验策略代码（用于前端编辑后重新检验）。
+
+    请求体：
+        {"code": "策略代码字符串"}
+
+    返回：
+        {"ok": bool, "error": str, "errors": list}
+    """
+    code = payload.get("code", "")
+    if not code.strip():
+        return {"ok": False, "error": "代码为空", "errors": ["代码为空"]}
+    try:
+        from ..ai.sandbox import compile_strategy
+        ok, err, errors = compile_strategy(code, require_base="CtaTemplate")
+        return {"ok": ok, "error": err, "errors": errors}
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("沙箱校验失败")
+        return {"ok": False, "error": str(e), "errors": [str(e)]}
+
+
 @app.post("/factor/backtest")
 async def expression_backtest(req: ExpressionBacktestRequest):
     """对挖掘出的 DSL 因子表达式直接做截面多空组合回测（研究→组合闭环）。"""
@@ -806,6 +1386,8 @@ async def factor_pipeline(req: FactorPipelineRequest):
             composite_scheme=req.composite_scheme,
             n_groups=req.n_groups, long_short=req.long_short,
             cost_rate=req.cost_rate, max_candidates=req.max_candidates,
+            net_gate=req.net_gate, max_turnover=req.max_turnover,
+            min_net_sharpe=req.min_net_sharpe,
         )
         return result
     except ValueError as e:
@@ -831,7 +1413,11 @@ async def factor_e2e_start(req: FactorE2ERequest):
         if len(symbols) < 2:
             return JSONResponse(status_code=400,
                                 content={"error": "端到端流水线至少需要 2 个标的"})
-        task_id = _submit_task(service.e2e(req, ingest=req.ingest_knowledge))
+        _e2e_progress: Dict[str, Any] = {"current": 0, "total": 4, "message": "准备中"}
+        task_id = _submit_task(service.e2e(
+            req, ingest=req.ingest_knowledge,
+            bt_service=app.state.backtest_service,
+            progress=_e2e_progress), progress=_e2e_progress)
         return {"task_id": task_id, "status": "running"}
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
@@ -870,7 +1456,8 @@ async def factor_e2e(req: FactorE2ERequest):
     """
     service: SearchService = app.state.search_service
     try:
-        return await service.e2e(req, ingest=req.ingest_knowledge)
+        return await service.e2e(req, ingest=req.ingest_knowledge,
+                                 bt_service=app.state.backtest_service)
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:  # noqa: BLE001
@@ -1382,4 +1969,10 @@ async def ws_endpoint(ws: WebSocket):
             data = await ws.receive_json()
             await manager.send_personal(ws, {"type": "echo", "data": data})
     except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        # 非法 JSON（JSONDecodeError）/对端异常断开（RuntimeError）等也会跳出循环，
+        # 必须清理，否则死连接永久残留 manager.active 导致 broadcast 逐次变慢
+        _logger.debug("WebSocket 异常断开: %s", exc)
+    finally:
         manager.disconnect(ws)

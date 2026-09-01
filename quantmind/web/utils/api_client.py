@@ -407,9 +407,6 @@ class APIClient:
     def data_roots_save(payload: Dict[str, Any], timeout: int = 15) -> Dict:
         return APIClient.put("/settings/data", json=payload, timeout=timeout)
 
-    @staticmethod
-    def data_download(payload: Dict[str, Any], timeout: int = 600) -> Dict:
-        return APIClient.post("/data/download", json=payload, timeout=timeout)
 
     @staticmethod
     def data_files(timeout: int = 15) -> Dict:
@@ -420,8 +417,26 @@ class APIClient:
     # ------------------------------------------------------------------
     @staticmethod
     def cache_stats(timeout: int = 15) -> Dict:
-        """本地行情仓库概览（含逐标的明细）。GET /data/cache。"""
+        """本地行情仓库概览（含聚合桶 agg，逐标的明细走 cache_symbols）。GET /data/cache。"""
         return APIClient.get("/data/cache", timeout=timeout)
+
+    @staticmethod
+    def cache_symbols(exchange: str = "", market: str = "", interval: str = "",
+                      freshness: str = "", q: str = "", page: int = 1,
+                      page_size: int = 50, timeout: int = 30) -> Dict:
+        """行情仓库逐标的分页明细（总览下钻）。GET /data/cache/symbols。"""
+        params: Dict[str, Any] = {"page": page, "page_size": page_size}
+        if exchange:
+            params["exchange"] = exchange
+        if market:
+            params["market"] = market
+        if interval:
+            params["interval"] = interval
+        if freshness:
+            params["freshness"] = freshness
+        if q:
+            params["q"] = q
+        return APIClient.get("/data/cache/symbols", params=params, timeout=timeout)
 
     @staticmethod
     def cache_purge(timeout: int = 30) -> Dict:
@@ -451,9 +466,25 @@ class APIClient:
         return APIClient.post("/data/cache/refresh", json=None, timeout=timeout)
 
     @staticmethod
-    def cache_warm_market(timeout: int = 900) -> Dict:
-        """全市场（A股+港股）增量预热：未缓存标的分批拉入行情仓库。POST /data/cache/market-warm。"""
-        return APIClient.post("/data/cache/market-warm", json=None, timeout=timeout)
+    def cache_warm_market(timeout: int = 900, markets: Optional[List[str]] = None) -> Dict:
+        """全市场增量预热：未缓存标的分批拉入行情仓库，可指定市场（'A'/'HK'）。
+        POST /data/cache/market-warm。"""
+        payload = {"markets": markets} if markets else None
+        return APIClient.post("/data/cache/market-warm", json=payload, timeout=timeout)
+
+    @staticmethod
+    def cache_warm_market_start(markets: Optional[List[str]] = None, full: bool = False, timeout: int = 30) -> Dict:
+        """异步启动全市场预热。full=True 时一次把所有待建标的分批自动建完（无需多次点击）。
+        POST /data/cache/market-warm/start。"""
+        payload = {"markets": markets}
+        if full:
+            payload["full"] = True
+        return APIClient.post("/data/cache/market-warm/start", json=payload, timeout=timeout)
+
+    @staticmethod
+    def cache_warm_market_status(task_id: str, timeout: int = 10) -> Dict:
+        """查询全市场预热任务进度/结果。GET /data/cache/market-warm/status/{task_id}。"""
+        return APIClient.get(f"/data/cache/market-warm/status/{task_id}", timeout=timeout)
 
 
     # ------------------------------------------------------------------

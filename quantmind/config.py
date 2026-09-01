@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     llm_base_url: str = ""              # AI 模型 Base URL（如 https://api.deepseek.com/v1）
     llm_model: str = ""                 # 模型名称（如 deepseek-chat / gpt-4o-mini）
     llm_temperature: float = 0.7        # 采样温度
+    llm_timeout: float = 120.0          # LLM 请求超时（秒）；策略代码生成耗时较长
+    # 回测/挖掘交易成本策略：auto=启用差异化成本表(默认) / off=零成本对照 / custom=自定义成本表
+    backtest_cost: str = "auto"
     tavily_api_key: str = ""           # Tavily 联网检索 Key（可空；空则不联网），env: QM_TAVILY_API_KEY
     api_url: str = "http://api:8000"
     log_level: str = "INFO"
@@ -31,6 +34,9 @@ class Settings(BaseSettings):
     market_warm_batch: int = 50  # 每趟预热标的上限（防止单趟打爆数据源/阻塞 API）
     market_warm_max_symbols: int = 5000  # 全市场标的池总上限（A股≈5000 + 港股）
     market_warm_interval_minutes: int = 15  # 全市场预热任务触发间隔（分钟）
+    market_warm_markets: list = ["A", "HK"]  # 自动预热覆盖的市场（"A"=A股, "HK"=港股；缺省两者）
+    stock_autoupdate_enabled: bool = False  # 开启A股每日增量更新（需先建库）
+    stock_autoupdate_cron: str = "0 17 * * 1-5"  # A股增量更新调度时间（默认交易日17:00）
 
 
 @lru_cache

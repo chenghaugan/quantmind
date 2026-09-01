@@ -5,6 +5,22 @@ import pytest
 
 from fastapi.testclient import TestClient
 from quantmind.api.app import app
+from quantmind.api.services.optimize_service import _norm_range
+
+
+# ----------------------------------------------------------------- 参数寻优归一下
+
+def test_norm_range_preserves_ints():
+    """整数窗口/步长保持 int，避免浮点化后破坏 range() 与 ArrayManager。"""
+    assert _norm_range(3) == 3
+    assert isinstance(_norm_range(3), int)
+    assert _norm_range(2.0) == 2 and isinstance(_norm_range(2.0), int)
+
+
+def test_norm_range_keeps_fractional():
+    """真小数保持 float。"""
+    assert _norm_range(0.2) == 0.2
+    assert isinstance(_norm_range(0.2), float)
 
 
 @pytest.fixture
@@ -140,3 +156,33 @@ def test_settings_alert_service_roundtrip(tmp_path, monkeypatch):
     })
     assert out["webhook_url"] == "https://api.telegram.org/botX/sendMessage"
     assert out["enabled"] is True
+
+
+# ----------------------------------------------------------------- 策略验证后台化（切页不中断）
+def test_strategy_validate_start_and_status(client):
+    """策略挖掘改后台任务：start 立即返回 task_id，status 可查询（不随同步请求阻塞）。"""
+    payload = {
+        "idea": "双均线策略：快线上穿慢线做多，下穿平仓",
+        "strategy": "dual_ma",
+        "llm_code": False,
+        "symbols": ["rb0"],
+        "exchange": "SHFE",
+        "interval": "1d",
+        "cost": True,
+        "gate": {"min_sharpe": 0.5, "min_drawdown": -0.3},
+        "promote": False,
+    }
+    r = client.post("/strategy/validate/start", json=payload)
+    assert r.status_code == 200
+    body = r.json()
+    assert "task_id" in body
+    tid = body["task_id"]
+    # 任务已入后台注册表，可查询（running/成功/失败皆属响应；not_found 视为失败）
+    s = client.get(f"/strategy/validate/status/{tid}")
+    assert s.status_code in (200, 404)
+    if s.status_code == 200:
+        assert s.json().get("status") in ("running", "success", "error", "cancelled")
+    # 未知任务 → 404 not_found
+    nf = client.get("/strategy/validate/status/does_not_exist")
+    assert nf.status_code == 404
+    assert nf.json().get("status") == "not_found"

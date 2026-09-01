@@ -156,7 +156,11 @@ def create_equity_curve(equity_curve: list, title: str = "净值曲线",
     if df is None:
         return empty_figure("无权益数据", height=height)
 
-    x = pd.to_datetime(df["date"]) if "date" in df.columns else pd.RangeIndex(len(df))
+    if "date" in df.columns and not pd.api.types.is_numeric_dtype(df["date"]):
+        x = pd.to_datetime(df["date"])
+    else:
+        # 整数序号（如截面逐日序号）不能被 to_datetime 解析成 1970 纪元
+        x = pd.RangeIndex(len(df))
     init = float(df["equity"].iloc[0]) or 1.0
     nav = (df["equity"].astype(float) / init).round(6)
 
@@ -405,11 +409,20 @@ def create_optimize_scatter(results: List[dict], metric: str = "sharpe",
 
 
 def create_gauge(value: float, title: str, vmin: float = -1.0, vmax: float = 3.0,
-                 good: float = 1.0, height: int = 220) -> go.Figure:
-    """绩效仪表盘 — 精致版，带渐变阈值色阶与状态标签。"""
+                 good: float = 1.0, height: int = 220,
+                 lower_is_better: bool = False) -> go.Figure:
+    """绩效仪表盘 — 精致版，带渐变阈值色阶与状态标签。
+
+    ``lower_is_better``：值越低越好的指标（如回撤）传 True，
+    达标判定变为 ``v <= good``。
+    """
     v = 0.0 if value is None or value != value else float(value)
 
-    if v >= good:
+    if lower_is_better:
+        ok = v <= good
+    else:
+        ok = v >= good
+    if ok:
         color = COLORS["up"]
         status_text = "✓ 达标"
     elif v >= 0:

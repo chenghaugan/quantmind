@@ -64,13 +64,27 @@ class MLRanker:
         Returns:
             X, y, groups
         """
-        # 滞后处理：避免前视偏差
+        # 滞后处理（避免前视）：长表中多标的交错排列，必须按标的分组位移，
+        # 否则特征会跨标的/跨日错位（学到噪声）。
+        # 先按组键稳定排序：保证 group 数组与行序一致（LambdaRank 要求
+        # group 参数为「按行序连续分组」的长度数组）
+        df = df.sort_values(group_col, kind="stable").reset_index(drop=True)
         lag = self.config.lag_periods
         feature_cols = [c for c in df.columns if c not in [target_col, group_col]]
 
-        X = df[feature_cols].shift(lag).iloc[lag:]
-        y = df[target_col].iloc[lag:]
-        groups = df[group_col].iloc[lag:]
+        if "symbol" in df.columns:
+            shifted = df.groupby("symbol")[feature_cols].shift(lag)
+            X = shifted
+            y = df[target_col]
+            groups = df[group_col]
+            # 每个标的前 lag 行位移后为 NaN：丢弃这些不完整行
+            valid = X.notna().all(axis=1)
+            X, y, groups = X[valid], y[valid], groups[valid]
+        else:
+            # 单序列（无标的列）：退化为全局位移
+            X = df[feature_cols].shift(lag).iloc[lag:]
+            y = df[target_col].iloc[lag:]
+            groups = df[group_col].iloc[lag:]
 
         self.feature_names = feature_cols
         return X, y, groups
@@ -102,6 +116,19 @@ class MLRanker:
             "test": (X[test_mask], y[test_mask], groups[test_mask]),
         }
 
+    @staticmethod
+    def _runlength_groups(groups: pd.Series) -> list:
+        """按行序游程长度计算 LightGBM group 数组。"""
+        sizes: list = []
+        prev = object()
+        for g in groups:
+            if g == prev:
+                sizes[-1] += 1
+            else:
+                sizes.append(1)
+                prev = g
+        return sizes
+
     def train(
         self,
         X_train: pd.DataFrame,
@@ -112,15 +139,17 @@ class MLRanker:
         group_val: Optional[pd.Series] = None,
     ) -> None:
         """训练 LambdaRank 模型"""
-        # 计算 group 大小
-        train_group_sizes = group_train.value_counts().sort_index().values
+        # group 大小必须按「行序相邻同组」的游程长度计算（LightGBM 要求
+        # group 数组与行序一一对应），按标签排序的 value_counts 在行序非
+        # 标签序时会静默错位
+        train_group_sizes = MLRanker._runlength_groups(group_train)
 
         fit_params = {
             "group": train_group_sizes,
         }
 
         if X_val is not None and y_val is not None and group_val is not None:
-            val_group_sizes = group_val.value_counts().sort_index().values
+            val_group_sizes = MLRanker._runlength_groups(group_val)
             fit_params["eval_set"] = [(X_val, y_val)]
             fit_params["eval_group"] = [val_group_sizes]
 

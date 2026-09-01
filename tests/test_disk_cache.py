@@ -237,3 +237,66 @@ def test_cache_warm_refresh_unified_schema(tmp_path):
     # 空 todos 幂等
     r_, f_, res_ = asyncio.run(_warm_cache_symbols(dm, []))
     assert (r_, f_, len(res_)) == (0, 0, 0)
+
+
+# --------------------------------------------------------- 聚合 / 分页（几千只标下不铺开）
+def _write_direct(root, symbol, exchange, n, start, days_step=1):
+    """直接用 DiskBarCache.save 写一个标的的 parquet 到仓库根目录。"""
+    dc = DiskBarCache(str(root))
+    dc.save(_bars(symbol, exchange, n, start))
+    return dc
+
+
+def test_stats_aggregate_buckets(tmp_path):
+    root = str(tmp_path)
+    _write_direct(root, "rb0", Exchange.SHFE, 30, datetime(2023, 1, 1, tzinfo=UTC))
+    _write_direct(root, "IF0", Exchange.CFFEX, 60, datetime(2020, 1, 1, tzinfo=UTC))
+    dc = DiskBarCache(root)
+    st = dc.stats(include_symbols=False, aggregate=True)
+    # 总览不再下发逐标的明细
+    assert "symbols" not in st
+    assert "agg" in st
+    agg = st["agg"]
+    mkt = {b["exchange"]: b for b in agg["by_exchange"]}
+    assert mkt["SHFE"]["market"] == "期货"
+    assert mkt["CFFEX"]["market"] == "期货"
+    assert agg["freshness"]["fresh"] + agg["freshness"]["stale_1_3d"] + agg["freshness"]["stale_gt3d"] == 2
+    assert len(agg["top_rows"]) == 2
+    # top 按行数降序
+    assert agg["top_rows"][0]["symbol"] in ("IF0", "rb0")
+    assert st["files"] == 2
+
+
+def test_symbol_page_filter_and_paginate(tmp_path):
+    root = str(tmp_path)
+    _write_direct(root, "600000", Exchange.SSE, 30, datetime(2023, 1, 1, tzinfo=UTC))
+    _write_direct(root, "600519", Exchange.SSE, 30, datetime(2023, 1, 1, tzinfo=UTC))
+    _write_direct(root, "rb0", Exchange.SHFE, 30, datetime(2023, 1, 1, tzinfo=UTC))
+    dc = DiskBarCache(root)
+    assert dc._market_of("SSE") == "A股"
+    # 按市场过滤
+    a = dc.symbol_page(market="A股", page_size=10)
+    assert a["total"] == 2
+    assert all(s["exchange"] == "SSE" for s in a["symbols"])
+    # 关键词过滤
+    q = dc.symbol_page(q="600519", page_size=10)
+    assert q["total"] == 1 and q["symbols"][0]["symbol"] == "600519"
+    # 分页
+    allp = dc.symbol_page(page_size=2)
+    assert allp["total"] == 3
+    assert len(allp["symbols"]) == 2
+    page2 = dc.symbol_page(page=2, page_size=2)
+    assert len(page2["symbols"]) == 1
+    # 附带可选维度
+    assert "A股" in allp["markets"] and "期货" in allp["markets"]
+
+
+def test_scan_ttl_cache_shared(tmp_path):
+    """总览与明细共享同一次扫描（短 TTL 缓存），不重复读盘。"""
+    root = str(tmp_path)
+    _write_direct(root, "rb0", Exchange.SHFE, 30, datetime(2023, 1, 1, tzinfo=UTC))
+    dc = DiskBarCache(root)
+    dc.stats(include_symbols=False, aggregate=True)
+    dc.symbol_page(page_size=5)
+    dc.stats(include_symbols=False, aggregate=True)
+    assert dc._scan_cache and len(dc._scan_cache["per"]) == 1

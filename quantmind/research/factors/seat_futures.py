@@ -113,8 +113,8 @@ def compute_seat_factors(
             "F4_concentration": f4, "F5_net_change_rate": f5, "F6_net_accel": f6,
             "F7_net_zscore": f7, "F8_seat_sentiment": f8,
         })
-    # 统一填 0 避免 NaN 干扰评估
-    return {k: v.fillna(0.0) for k, v in out.items()}
+    # 统一填 0 避免 NaN 干扰评估；先清 ±inf（净持仓穿 0 时 pct_change 会产生）
+    return {k: v.replace([np.inf, -np.inf], np.nan).fillna(0.0) for k, v in out.items()}
 
 
 # ----------------------------- Factor 封装 -----------------------------

@@ -124,9 +124,15 @@ class ChinaFuturesCSVFeed(LocalFileFeed):
         if req.interval != Interval.MINUTE_5:
             combined = self._resample_daily(combined)
         if req.start is not None:
-            combined = combined[combined["datetime"] >= pd.Timestamp(req.start)]
+            _s = pd.Timestamp(req.start)
+            if _s.tzinfo is not None:
+                _s = _s.tz_localize(None)  # 本表为 naive UTC，aware 比较会抛 TypeError
+            combined = combined[combined["datetime"] >= _s]
         if req.end is not None:
-            combined = combined[combined["datetime"] <= pd.Timestamp(req.end)]
+            _e = pd.Timestamp(req.end)
+            if _e.tzinfo is not None:
+                _e = _e.tz_localize(None)
+            combined = combined[combined["datetime"] <= _e]
         combined = combined.dropna(subset=["close"])
         if combined.empty:
             return []
@@ -174,11 +180,22 @@ class ChinaFuturesCSVFeed(LocalFileFeed):
         # 4) 向后复权（最新价不变，历史平移消除换月跳变）
         closes = raw["close"].to_numpy(dtype=float)
         mains = raw["main"].to_numpy()
+        # 同时刻全合约收盘价：取换月时新旧主力的**同timestamp价差**（纯基差）
+        close_wide = long.pivot_table(index="datetime", columns="contract",
+                                      values="close", aggfunc="last")
         n = len(raw)
         adj = pd.Series(0.0, index=range(n))
         for t in range(n - 2, -1, -1):
             if mains[t] != mains[t + 1]:
+                # 换月跳变 = 新旧主力的同刻价差（纯基差）。优先用 t+1 时刻旧主力报价；
+                # 不重叠换月（旧主力在 t+1 无报价）时退回旧口径 closes[t+1]-closes[t]。
+                # 不能无脑用 closes[t+1]-closes[t]：那把 t→t+1 的真实行情涨跌也一并“复权”掉，
+                # 换月 bar 的收益被强制清零。
                 jump = closes[t + 1] - closes[t]
+                if mains[t] in close_wide.columns:
+                    prev_close = close_wide.at[wide.index[t + 1], mains[t]]
+                    if pd.notna(prev_close):
+                        jump = closes[t + 1] - float(prev_close)
                 adj[t] = adj[t + 1] - jump
             else:
                 adj[t] = adj[t + 1]

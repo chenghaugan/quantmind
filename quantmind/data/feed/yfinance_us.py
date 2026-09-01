@@ -5,12 +5,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import List, Optional
 
-from .base import BarData, DataFeed, HistoryRequest
-from ..core.constant import Exchange, Interval
+from .base import BarData, BaseDataFeed, HistoryRequest
+from ...core.constant import Exchange, Interval
 
 _logger = logging.getLogger("quantmind.data.feed.yfinance_us")
 
@@ -22,7 +23,7 @@ except ImportError:
     yf = None  # type: ignore
 
 
-class YFinanceUSFeed(DataFeed):
+class YFinanceUSFeed(BaseDataFeed):
     """美股数据源（yfinance）。
 
     支持标的格式：
@@ -36,7 +37,6 @@ class YFinanceUSFeed(DataFeed):
     """
 
     def __init__(self) -> None:
-        super().__init__()
         if not _YFINANCE_AVAILABLE:
             _logger.warning("yfinance 未安装，美股数据源不可用。请运行: pip install yfinance")
 
@@ -52,7 +52,11 @@ class YFinanceUSFeed(DataFeed):
             Interval.DAILY, Interval.HOUR,
         )
 
-    async def query_history(self, req: HistoryRequest) -> List[BarData]:
+    async def fetch_bar_data(self, req: HistoryRequest) -> List[BarData]:
+        """统一入口（BaseDataFeed 契约）：转给同步 query_history。"""
+        return await asyncio.to_thread(self.query_history, req)
+
+    def query_history(self, req: HistoryRequest) -> List[BarData]:
         """查询美股历史数据。"""
         if not _YFINANCE_AVAILABLE:
             _logger.error("yfinance 未安装")
@@ -85,13 +89,14 @@ class YFinanceUSFeed(DataFeed):
                 _logger.warning("yfinance 返回空数据: %s", req.symbol)
                 return []
 
-            # 转换为 BarData
+            # 转换为 BarData（yfinance 返回交易所本地时区，统一归一为 naive UTC）
+            df.index = df.index.tz_convert("UTC").tz_localize(None)
             bars: List[BarData] = []
             for idx, row in df.iterrows():
                 bar = BarData(
                     symbol=req.symbol,
                     exchange=req.exchange,
-                    datetime=idx.to_pydatetime(),
+                    datetime=idx.to_pydatetime() if hasattr(idx, "to_pydatetime") else idx,
                     interval=req.interval,
                     volume=float(row.get("Volume", 0)),
                     open_price=float(row.get("Open", 0)),
@@ -110,11 +115,7 @@ class YFinanceUSFeed(DataFeed):
             return []
 
 
-# 注册到数据源注册表
-if _YFINANCE_AVAILABLE:
-    from .registry import DATA_FEED_REGISTRY
-    DATA_FEED_REGISTRY["yfinance_us"] = YFinanceUSFeed
-    _logger.info("美股数据源已注册: yfinance_us")
-
+# 注册：本模块只提供数据源类，由 build_default_registry（data/feed/__init__.py）
+# 按优先级统一注册；此处不做模块级注册，避免与全局注册表实例脱节。
 
 __all__ = ["YFinanceUSFeed"]

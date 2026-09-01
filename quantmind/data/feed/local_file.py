@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Tuple
 
@@ -122,13 +122,17 @@ class LocalFileFeed(BaseDataFeed):
         return pd.concat(out_frames).sort_values("datetime").reset_index(drop=True)
 
     def _resample_daily(self, df: pd.DataFrame) -> pd.DataFrame:
-        """任意分钟频 -> 日频。按 UTC 自然日聚合（等价于中国交易日）。"""
+        """任意分钟频 -> 日频。按交易日聚合，时间戳归一为交易日 00:00（UTC）。
+
+        夜盘归属：UTC 12:00 之后（北京时间 20:00 之后）的 bar 属于下一交易日，
+        与交易所官方日线口径一致（此前按 UTC 自然日聚合会把夜盘并入当日）。
+        """
         df = df.sort_values("datetime").copy()
-        df["_date"] = df["datetime"].dt.date
+        df["_date"] = df["datetime"].apply(self._trading_day)
         rows = []
         for _d, sub in df.groupby("_date"):
             rows.append({
-                "datetime": sub["datetime"].iloc[-1],
+                "datetime": pd.Timestamp(_d),
                 "open": float(sub["open"].iloc[0]),
                 "high": float(sub["high"].max()),
                 "low": float(sub["low"].min()),
@@ -138,6 +142,27 @@ class LocalFileFeed(BaseDataFeed):
                 "turnover": float(sub["turnover"].sum()) if "turnover" in sub else 0.0,
             })
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _trading_day(dt) -> "date":
+        """UTC bar 时间 -> 交易日（夜盘归属下一**交易日**）。
+
+        用交易日历取夜盘（UTC 12:00 之后，即北京时间 20:00 之后）之后的
+       下一个交易日（周五夜盘归周一、节前夜盘归节后首日）；
+        日历不可用时退化为自然日+1。
+        """
+        if dt.hour >= 12:
+            candidate = (dt + pd.Timedelta(days=1)).date()
+            try:
+                from ...risk.calendar import TradingCalendar
+                cal = TradingCalendar()
+                nxt = cal.next_trading_day(candidate - timedelta(days=1), max_search=15)
+                if nxt is not None:
+                    return nxt
+            except Exception:  # noqa: BLE001
+                pass
+            return candidate
+        return dt.date()
 
     def _to_bars(self, df: pd.DataFrame, req: HistoryRequest) -> List[BarData]:
         bars: List[BarData] = []

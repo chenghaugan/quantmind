@@ -97,7 +97,7 @@ class SearchStep:
     note: str = ""
 
     def to_dict(self) -> dict:
-        r4 = lambda x: round(float(x), 4) if x == x else None  # noqa: E731,T202
+        r4 = lambda x: None if x is None else (round(float(x), 4) if x == x else None)  # noqa: E731,T202
         return {
             "round": self.round,
             "expression": self.expression,
@@ -131,7 +131,7 @@ class SearchResult:
         return self._best_expression or self.seed
 
     def to_dict(self) -> dict:
-        r4 = lambda x: round(float(x), 4) if x == x else None  # noqa: E731,T202
+        r4 = lambda x: None if x is None else (round(float(x), 4) if x == x else None)  # noqa: E731,T202
         return {
             "seed": self.seed,
             "best_expression": self.best_expression,

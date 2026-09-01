@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -279,4 +280,8 @@ def _as_factor_list(raw) -> List[dict]:
 
 def _strip_code_fence(s: str) -> str:
     """去掉 ```json ... ``` 包裹标记（容错 LLM 常见输出）。"""
-    return s.strip().lstrip("`").rstrip("`").strip()
+    s = s.strip()
+    m = re.match(r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?```$", s, re.S)
+    if m:
+        return m.group(1).strip()
+    return s.strip("`").strip()

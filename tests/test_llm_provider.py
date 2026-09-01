@@ -1,4 +1,6 @@
 """LLM Provider 测试。"""
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
@@ -9,6 +11,12 @@ from quantmind.ai.provider import (
     _RealProvider,
     build_provider,
 )
+
+
+def _fake_resp(status: int, body=None, headers=None) -> httpx.Response:
+    """构造真实的 httpx.Response，使 raise_for_status/status_code/json 均生效。"""
+    req = httpx.Request("POST", "https://api.test.com/v1/chat/completions")
+    return httpx.Response(status, json=body, headers=headers or {}, request=req)
 
 
 class TestMockProvider:
@@ -88,6 +96,68 @@ class TestRealProvider:
             result = await provider.chat("", "生成因子")
             # 应该回退到 Mock
             assert "factors" in result
+
+    @pytest.mark.asyncio
+    async def test_429_quota_exhausted_retries_then_fallback(self):
+        """429 额度用尽（throttling）：自动重试，耗尽后回退 Mock 且提示可读。"""
+        provider = _RealProvider(api_key="test-key", base_url="https://api.test.com/v1",
+                                 model="qwen3.7-plus")
+        quota = _fake_resp(429, {
+            "error": {"message": "usage allocated quota exceeded",
+                      "type": "invalid_request_error", "code": "throttling"},
+        })
+        calls = {"n": 0}
+        with patch("httpx.AsyncClient") as mc, patch("asyncio.sleep", new=AsyncMock()) as sl:
+            async def fake_post(*a, **k):
+                calls["n"] += 1
+                return quota
+            mc.return_value.__aenter__.return_value.post = AsyncMock(side_effect=fake_post)
+            result = await provider.chat("", "生成策略代码")
+        assert calls["n"] == 2  # 额度用尽也重试一次（_RETRIES=1）
+        assert sl.await_count == 1
+        assert "额度用尽" in provider.last_fallback_reason
+        assert "qwen3.7-plus" in provider.last_fallback_reason
+        assert "class" in result  # 回退到 Mock 占位代码
+
+    @pytest.mark.asyncio
+    async def test_429_rate_limited_retries_then_success(self):
+        """429 瞬时限流：尊重 Retry-After 重试后成功。"""
+        provider = _RealProvider(api_key="test-key", base_url="https://api.test.com/v1")
+        limited = _fake_resp(429, {"error": {"message": "rate limit exceeded"}},
+                             headers={"retry-after": "1"})
+        ok = _fake_resp(200, {"choices": [{"message": {"content": "成功"}}]})
+        queue = [limited, ok]
+        with patch("httpx.AsyncClient") as mc, patch("asyncio.sleep", new=AsyncMock()):
+            async def fake_post(*a, **k):
+                return queue.pop(0)
+            mc.return_value.__aenter__.return_value.post = AsyncMock(side_effect=fake_post)
+            result = await provider.chat("", "你好")
+        assert result == "成功"
+        assert provider.last_fallback_reason is None
+
+    @pytest.mark.asyncio
+    async def test_429_rate_limited_exhausts_retries(self):
+        """429 瞬时限流：重试耗尽后回退 Mock，fallback_reason 含限流提示。"""
+        provider = _RealProvider(api_key="test-key", base_url="https://api.test.com/v1")
+        limited = _fake_resp(429, {"error": {"message": "rate limit exceeded"}})
+        with patch("httpx.AsyncClient") as mc, patch("asyncio.sleep", new=AsyncMock()) as sl:
+            mc.return_value.__aenter__.return_value.post = AsyncMock(return_value=limited)
+            result = await provider.chat("", "生成策略代码")
+        # _RETRIES=1 → 共 2 次尝试，中间 sleep 1 次
+        assert sl.await_count == 1
+        assert "限流" in provider.last_fallback_reason
+        assert "class" in result
+
+    @pytest.mark.asyncio
+    async def test_5xx_retries_then_fallback(self):
+        """5xx：重试后回退 Mock。"""
+        provider = _RealProvider(api_key="test-key", base_url="https://api.test.com/v1")
+        err = _fake_resp(500, {"error": {"message": "internal error"}})
+        with patch("httpx.AsyncClient") as mc, patch("asyncio.sleep", new=AsyncMock()):
+            mc.return_value.__aenter__.return_value.post = AsyncMock(return_value=err)
+            result = await provider.chat("", "生成策略代码")
+        assert "class" in result
+        assert "500" in provider.last_fallback_reason or "HTTPStatusError" in provider.last_fallback_reason
 
 
 class TestBuildProvider:

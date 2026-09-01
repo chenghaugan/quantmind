@@ -169,6 +169,9 @@ class WSClient:
                     delay = self.reconnect_delay  # 重连成功后重置退避
                     # 握手后服务端回 hello
                     await self._recv_loop(ws)
+                    # 服务端优雅关连接（正常退出 recv_loop）也要清状态，
+                    # 否则退避重连期间页面误显示“已连接”
+                    self._set_connected(False)
             except asyncio.CancelledError:
                 break
             except Exception as exc:  # noqa: BLE001

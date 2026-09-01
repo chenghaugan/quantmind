@@ -111,7 +111,9 @@ def greedy_cluster_dedup(
     clusters: List[Dict[str, object]] = []
 
     def _score(n):
-        return float(metric.get(n, float("-inf")) or float("-inf"))
+        v = metric.get(n)
+        # 0.0 是合法 metric，不能因 falsy 被替换成 -inf（否则噪声丢弃逻辑失效）
+        return float("-inf") if v is None else float(v)
 
     while remaining:
         # 取 metric 最高者为簇代表

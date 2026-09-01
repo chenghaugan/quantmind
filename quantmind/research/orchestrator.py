@@ -74,6 +74,10 @@ class E2EConfig:
     n_groups: int = 5
     long_short: bool = True
     cost_rate: float = 0.0
+    # 因子侧宽松净成本/换手闸门（透传 PipelineConfig）
+    net_gate: bool = False
+    max_turnover: float = 0.0
+    min_net_sharpe: float = 0.0
     max_candidates: int = 8
     persist_pairs: bool = False           # 编排器默认不额外落库，由知识库负责沉淀
     # 持续学习闭环：历史知识库上下文（success/fail/briefs）注入挖掘搜索 LLM prompt
@@ -95,6 +99,7 @@ def run_e2e(
     val_panel: Optional[Panel] = None,
     test_panel: Optional[Panel] = None,
     knowledge_context: Optional[dict] = None,
+    progress: Optional[dict] = None,
 ) -> Dict[str, object]:
     """运行端到端编排：AI 证据研究 → 因子挖掘 → OOS 复合 alpha → 策略代码生成。
 
@@ -125,7 +130,7 @@ def run_e2e(
     from ..ai.provider import MockProvider
     from ..ai.agent import AutoResearchAgent, HypothesisStatus
     from ..ai.codegen import generate_strategy_code
-    from ..ai.sandbox import validate_code
+    from ..ai.sandbox import compile_strategy, validate_code
     from ..ai.safety import lookahead_warnings
     from ..ai.expr_map import factor_spec_to_expression
 
@@ -134,9 +139,20 @@ def run_e2e(
     if panel is None or panel.close.empty:
         raise ValueError("训练期面板为空")
 
+    def _stage(msg: str, cur: int, tot: int) -> None:
+        """向任务框架透出阶段进度（借鉴 LLM 策略挖掘的 progress 模式）。"""
+        if progress is None:
+            return
+        try:
+            progress.clear()
+            progress.update({"current": cur, "total": tot, "message": msg})
+        except Exception:  # noqa: BLE001
+            pass
+
     # =====================================================================
     # 阶段 1：AI 证据研究（A 线）——真实面板 IC 验证，回灌种子
     # =====================================================================
+    _stage("AI 证据研究中…", 1, 4)
     agent = AutoResearchAgent(provider=provider,
                               use_knowledge=config.use_knowledge,
                               web_fallback=config.web_fallback)
@@ -215,12 +231,16 @@ def run_e2e(
         n_groups=config.n_groups,
         long_short=config.long_short,
         cost_rate=config.cost_rate,
+        net_gate=config.net_gate,
+        max_turnover=config.max_turnover,
+        min_net_sharpe=config.min_net_sharpe,
         max_candidates=config.max_candidates,
         persist_pairs=config.persist_pairs,
         knowledge_context=(
             knowledge_context if knowledge_context is not None else config.knowledge_context
         ),
     )
+    _stage("因子挖掘与 OOS 复合中…", 2, 4)
     pipeline_report = run_pipeline(
         panel,
         config=pipe_cfg,
@@ -240,6 +260,7 @@ def run_e2e(
     code_specs = verified_factors or evidence.factors
     if not code_specs:
         code_specs = _specs_from_representatives(pipeline_report.get("steps") or [])
+    _stage("策略代码生成中…", 3, 4)
     code = asyncio.run(generate_strategy_code(
         provider,
         config.idea,
@@ -248,7 +269,9 @@ def run_e2e(
         size=config.code_size,
         max_pos=config.code_max_pos,
     ))
-    ok_sandbox, errors = validate_code(code)
+    # 沙箱对齐（借鉴 LLM 策略挖掘）：不仅查 AST，还要求代码可实例化为 CTA 策略类，
+    # 确保产出的代码可直接注册进策略引擎参与真实回测。
+    ok_sandbox, _compile_err, errors = compile_strategy(code, require_base="CtaTemplate")
     lookahead = lookahead_warnings(code)
 
     # =====================================================================
@@ -310,7 +333,7 @@ def _specs_from_representatives(steps: List[Dict[str, object]]) -> list:
         if not expr:
             continue
         sh = s.get("test_sharpe")
-        w = 1.0 if (isinstance(sh, (int, float)) and sh == sh and sh < 0) else 1.0
+        w = -1.0 if (isinstance(sh, (int, float)) and sh == sh and sh < 0) else 1.0
         specs.append(FactorSpec(
             name="rep_" + str(len(specs) + 1),
             kind="momentum",

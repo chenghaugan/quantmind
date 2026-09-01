@@ -124,8 +124,9 @@ def newey_west_cov(    x: Sequence[float],
     s = float(np.dot(xx, yy) / T)  # Γ_0
     for j in range(1, int(lags) + 1):
         w = 1.0 - j / (lags + 1.0)
-        c = float(np.dot(xx[j:], yy[:-j]) / T)  # Γ_j
-        s += w * (c + c)  # 对称项 Γ_j + Γ_j'
+        c = float(np.dot(xx[j:], yy[:-j]) / T)    # Γ_j(x,y)
+        c2 = float(np.dot(yy[j:], xx[:-j]) / T)   # Γ_j(y,x)（对称项）
+        s += w * (c + c2)
     return s
 
 

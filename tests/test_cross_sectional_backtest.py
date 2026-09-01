@@ -61,3 +61,31 @@ def test_empty_panel_raises():
                   low=pd.DataFrame(), volume=pd.DataFrame())
     with pytest.raises(ValueError):
         cross_sectional_backtest(empty, "alpha021")
+
+
+def test_gross_net_equal_at_zero_cost():
+    """cost_rate=0 → net 指标与 gross 一致（无成本，纯研究展示口径）。"""
+    panel = _make_panel()
+    res = cross_sectional_backtest(panel, "alpha021", forward_periods=1, n_groups=5, cost_rate=0.0)
+    p = res["portfolio"]
+    assert p["net_total_return"] == pytest.approx(p["total_return"], abs=1e-9)
+    assert p["net_sharpe_annual"] == pytest.approx(p["sharpe_annual"], abs=1e-9)
+
+
+def test_turnover_aware_cost_reduces_net():
+    """cost_rate>0 时按实际换手计费：换手为正 → net < gross，且换手被上报。"""
+    panel = _make_panel()
+    res = cross_sectional_backtest(panel, "alpha021", forward_periods=1, n_groups=5, cost_rate=0.002)
+    p = res["portfolio"]
+    assert p["turnover_mean"] > 0
+    assert p["net_total_return"] <= p["total_return"] + 1e-9
+    assert p["cost_ratio"] >= 0
+    assert "net_sharpe_annual" in p and "net_max_drawdown" in p
+
+
+def test_higher_cost_penalizes_more():
+    """成本越高，净收益越低（单调）。"""
+    panel = _make_panel()
+    lo = cross_sectional_backtest(panel, "alpha021", n_groups=5, cost_rate=0.001)["portfolio"]
+    hi = cross_sectional_backtest(panel, "alpha021", n_groups=5, cost_rate=0.01)["portfolio"]
+    assert hi["net_total_return"] < lo["net_total_return"]

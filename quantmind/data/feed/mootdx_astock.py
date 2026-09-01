@@ -54,16 +54,12 @@ class MootdxAStockFeed(BaseDataFeed):
         return self._df_to_bars(df, req)
 
     async def _fetch_mootdx(self, req: HistoryRequest) -> List[BarData]:
-        from mootdx.quotes import Quotes
-
-        client = await asyncio.to_thread(
-            Quotes.factory, market="sh" if _market_of(req.symbol) == 1 else "sz"
+        # 通达信源返回不复权价格，与链路其他源（腾讯/东财 adjust="qfq"）口径不一致。
+        # 为避免混合口径静默回写缓存与数据库造成假跳变，弃用本源走 qfq fallback。
+        # （若未来接入，需用复权因子处理后再返回）
+        raise ValueError(
+            "mootdx 源返回不复权价格，与全链路 qfq 口径不一致，已禁用（走 qfq fallback）"
         )
-        freq = self._freq(req.interval)
-        df = await asyncio.to_thread(
-            client.k, symbol=req.symbol, begin=None, end=None, frequency=freq,
-        )
-        return self._df_to_bars(df, req)
 
     async def _fetch_akshare_fallback(self, req: HistoryRequest) -> List[BarData]:
         import akshare as ak
@@ -78,9 +74,17 @@ class MootdxAStockFeed(BaseDataFeed):
 
     @staticmethod
     def _freq(interval: Interval) -> str:
-        return {"1d": "daily", "5m": "5", "15m": "15", "30m": "30", "1h": "60"}.get(
-            interval.value, "daily"
-        )
+        freq = {
+            "1d": "daily", "5m": "5", "15m": "15", "30m": "30", "1h": "60",
+        }.get(interval.value)
+        if freq is None:
+            # 未映射周期直接报错让 registry 走 fallback，
+            # 避免静默降级成日线后以错误周期标签入库污染存储。
+            raise ValueError(
+                f"mootdx 数据源不支持周期 {interval.value}，"
+                f"支持：1d/5m/15m/30m/1h"
+            )
+        return freq
 
     @staticmethod
     def _df_to_bars(df, req: HistoryRequest) -> List[BarData]:
@@ -122,7 +126,9 @@ def _parse_dt(value) -> datetime:
     if isinstance(value, datetime):
         return value
     s = str(value)
+    # 先尝试完整时间戳（盘中分钟数据如 "2024-01-02 09:05:00"），
+    # 再退日期解析；顺序颠倒会把盘中数据截断成 00:00 静默损毁
     try:
-        return datetime.strptime(s[:10], "%Y-%m-%d")
-    except ValueError:
         return datetime.fromisoformat(s)
+    except ValueError:
+        return datetime.strptime(s[:10], "%Y-%m-%d")

@@ -20,7 +20,8 @@ from .base import RiskModel as RiskModelProtocol
 class NullRisk(RiskModelProtocol):
     """透传：不做任何风控过滤。"""
 
-    def apply(self, target: Optional[float], bar: BarData, context=None) -> Optional[float]:
+    def apply(self, target: Optional[float], bar: BarData, context=None,
+              vt_symbol: Optional[str] = None) -> Optional[float]:
         return target
 
 
@@ -36,15 +37,26 @@ class RiskGateModel(RiskModelProtocol):
         self.engine = engine or RiskEngine(limits=RiskLimits())
         self.allow_reduce = allow_reduce
 
-    def apply(self, target: Optional[float], bar: BarData, context=None) -> Optional[float]:
+    def apply(self, target: Optional[float], bar: BarData, context=None,
+              vt_symbol: Optional[str] = None) -> Optional[float]:
         if target is None:
             return None
-        vt = bar.vt_symbol or f"{bar.symbol}.{bar.exchange.value}"
+        vt = vt_symbol or bar.vt_symbol or f"{bar.symbol}.{bar.exchange.value}"
         sym, exch = vt.rsplit(".", 1)
         cur_vol = 0.0
+        last_price = bar.close_price if vt == (bar.vt_symbol or "") else 0.0
         if context is not None:
             pos = context.get_position(vt)
             cur_vol = pos.volume if pos else 0.0
+            if vt != (bar.vt_symbol or ""):
+                # 非主标的：取该标的最近收盘价做风控价格（绝不能把主标的价格
+                # 注入另一品种，否则价格偏离检查必然误拒）
+                try:
+                    hist = context.get_history(vt, 1)
+                    if hist:
+                        last_price = hist[-1].close_price
+                except Exception:  # noqa: BLE001
+                    pass
         delta = target - cur_vol
         if abs(delta) < 1e-9:
             return target
@@ -55,12 +67,13 @@ class RiskGateModel(RiskModelProtocol):
             direction=Direction.LONG if delta > 0 else Direction.SHORT,
             offset=Offset.OPEN if increasing else Offset.CLOSE,
             volume=abs(delta),
-            price=bar.close_price,
+            price=last_price,  # 预检委托价 = 该标的最近收盘（与 last_price 同口径）
         )
         decision = self.engine.check_order(
             req,
             position=context.get_position(vt) if context is not None else None,
-            last_price=bar.close_price,
+            last_price=last_price,
+            record=False,  # 预检不计数：实盘/模拟盘引擎会再检一次，避免双倍消耗频率限额
         )
         if decision.passed:
             return target

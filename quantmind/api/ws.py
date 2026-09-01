@@ -4,12 +4,16 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Dict, List
 
 from fastapi import WebSocket
 
 _logger = logging.getLogger("quantmind.api.ws")
+
+#: 单客户端发送超时（秒）：慢/半死客户端不拖住请求路径
+_BROADCAST_TIMEOUT = 5.0
 
 
 class ConnectionManager:
@@ -26,14 +30,24 @@ class ConnectionManager:
             self.active.remove(ws)
 
     async def broadcast(self, message: dict) -> None:
-        dead: List[WebSocket] = []
-        for ws in self.active:
-            try:
-                await ws.send_json(message)
-            except Exception:  # noqa: BLE001
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+        # 快照并发送：避免遍历中 connect/disconnect 修改列表导致漏发
+        snapshot = list(self.active)
+        if not snapshot:
+            return
+        results = await asyncio.gather(
+            *(self._send_with_timeout(ws, message) for ws in snapshot)
+        )
+        for ws, ok in zip(snapshot, results):
+            if not ok:
+                self.disconnect(ws)
+
+    @staticmethod
+    async def _send_with_timeout(ws: WebSocket, message: dict) -> bool:
+        try:
+            await asyncio.wait_for(ws.send_json(message), timeout=_BROADCAST_TIMEOUT)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     async def send_personal(self, ws: WebSocket, message: dict) -> None:
         try:

@@ -117,15 +117,20 @@ class ChanThirdBuyStrategy(CtaTemplate):
         highs = self.am.high
         if len(closes) < self.break_window or len(closes) < self.trend_window:
             return
-        # 中枢上沿 ZG：近 break_window 高点上沿（回抽不破的界限）。
-        zg = max(highs[-self.break_window:])
+        # 中枢上沿 ZG：截至**上一根**的近 break_window 高点上沿（回抽不破的界限）。
+        # 不能含当根 high：close<=high 恒成立，含当根会使 last>=zg 等价于 close==当根high，
+        # 持有条件近乎不可满足。
+        zg = max(highs[-self.break_window - 1:-1])
         trend = sum(closes[-self.trend_window:]) / self.trend_window
         last = closes[-1]
         # 三买持有：上行趋势 且 收盘站在 ZG 上方（回抽不重新进入中枢区间）。
         hold = last > trend and last >= zg
         target_vol = self.max_pos * self.size if hold else 0.0
         if target_vol != self.last_target:
-            self.set_target(bar.vt_symbol, target_vol)
+            oid = self.set_target(bar.vt_symbol, target_vol)
+            if oid == "":
+                # 风控拒单：保留 last_target，下一根 bar 重试
+                return
             self.last_target = target_vol
             self.pos = target_vol
 

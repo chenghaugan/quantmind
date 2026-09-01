@@ -3,9 +3,11 @@
 efinance 基于东方财富 API，支持期货日线/分钟线数据。
 相比 akshare（新浪），efinance 的分钟数据没有 1023 根硬限制，可能获取更长历史。
 
-行情 ID 映射：
-  - 股指期货主力：IF0 → 8.IF0, IC0 → 8.IC0, IH0 → 8.IH0, IM0 → 8.IM0
-  - 商品期货主力：rb0 → 115.rb0, cu0 → 115.cu0 等（需动态查询）
+行情 ID 映射（secid = 市场代码.合约代码）：
+  - 股指期货主力连续：IF0 → 220.IFM（沪深300主连）, IC0 → 220.ICM, IH0 → 220.IHM, IM0 → 220.IMM
+    注意：CFFEX 的正确 mktid 是 220（不是 8）。"8.IF0" 是错误 ID，会导致东财永远返回空数据。
+    合约代码后缀：M=主连, M0=当月连续, M1=下月连续, S=次主连；如 IF2609 为具体合约。
+  - 商品期货主力：rb0 → 113.rb0, cu0 → 115.cu0 等（需动态查询）
 
 注意：efinance 为同步库，用 asyncio.to_thread 包裹避免阻塞事件循环；
 导入延迟化，未安装 efinance 时本模块仍可导入（仅运行时报缺依赖）。
@@ -24,12 +26,12 @@ from ...core.object import BarData
 _logger = logging.getLogger("quantmind.data.efinance_feed")
 
 
-# 股指期货主力行情 ID 映射
+# 股指期货主力连续行情 ID 映射（CFFEX mktid=220）
 STOCK_INDEX_FUTURES_QUOTE_IDS = {
-    "IF0": "8.IF0",  # 沪深300主力
-    "IC0": "8.IC0",  # 中证500主力
-    "IH0": "8.IH0",  # 上证50主力
-    "IM0": "8.IM0",  # 中证1000主力
+    "IF0": "220.IFM",  # 沪深300 主力连续
+    "IC0": "220.ICM",  # 中证500 主力连续
+    "IH0": "220.IHM",  # 上证50 主力连续
+    "IM0": "220.IMM",  # 中证1000 主力连续
 }
 
 # 周期映射：Interval → efinance klt 参数

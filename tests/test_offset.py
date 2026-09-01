@@ -22,7 +22,7 @@ def _pos(volume, yd, exch=Exchange.SHFE, direction=Direction.LONG):
 def test_close_today_when_today_enough():
     conv = OffsetConverter()
     conv.update_position(_pos(volume=5, yd=2))
-    req = OrderRequest(symbol="rb", exchange=Exchange.SHFE, direction=Direction.LONG,
+    req = OrderRequest(symbol="rb", exchange=Exchange.SHFE, direction=Direction.SHORT,
                        offset=Offset.CLOSE, volume=3)
     out = conv.convert_order_req(req)
     assert out.offset == Offset.CLOSE_TODAY
@@ -31,7 +31,7 @@ def test_close_today_when_today_enough():
 def test_close_yesterday_when_today_insufficient():
     conv = OffsetConverter()
     conv.update_position(_pos(volume=5, yd=2))  # 今仓=3
-    req = OrderRequest(symbol="rb", exchange=Exchange.SHFE, direction=Direction.LONG,
+    req = OrderRequest(symbol="rb", exchange=Exchange.SHFE, direction=Direction.SHORT,
                        offset=Offset.CLOSE, volume=5)
     out = conv.convert_order_req(req)
     assert out.offset == Offset.CLOSE_YESTERDAY
@@ -40,7 +40,7 @@ def test_close_yesterday_when_today_insufficient():
 def test_non_distinguish_exchange_uses_close():
     conv = OffsetConverter()
     conv.update_position(_pos(volume=10, yd=10, exch=Exchange.DCE))
-    req = OrderRequest(symbol="rb", exchange=Exchange.DCE, direction=Direction.LONG,
+    req = OrderRequest(symbol="rb", exchange=Exchange.DCE, direction=Direction.SHORT,
                        offset=Offset.CLOSE, volume=4)
     out = conv.convert_order_req(req)
     assert out.offset == Offset.CLOSE

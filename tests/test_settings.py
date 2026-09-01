@@ -89,7 +89,7 @@ def test_resave_overwrites_same_env_keys(tmp_path: Path):
     svc.save({"provider": "deepseek", "api_key": "sk-new"})
     lines = [l for l in env.read_text(encoding="utf-8").splitlines()
              if l.strip().startswith("QM_LLM_")]
-    assert len(lines) == 5
+    assert len(lines) == 6
     assert any("sk-new" in l for l in lines)
     assert not any("sk-old" in l for l in lines)
 

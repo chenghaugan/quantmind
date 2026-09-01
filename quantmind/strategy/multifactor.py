@@ -49,5 +49,8 @@ class MultiFactorStrategy(CtaTemplate):
             return
         target = float(self.target_series.iloc[self._idx])
         self._idx += 1
-        self.set_target(bar.vt_symbol, target)
+        oid = self.set_target(bar.vt_symbol, target)
+        if oid == "":
+            # 风控拒单：不更新 pos，下一根 bar 重试
+            return
         self.pos = target

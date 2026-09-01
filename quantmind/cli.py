@@ -242,6 +242,31 @@ def backtest(
 
 
 @app.command()
+def rollover(
+    symbol: str = typer.Option("rb0"),
+    exchange: str = typer.Option("SHFE"),
+    notional: float = typer.Option(100_000.0, help="单次持仓名义金额"),
+    per_year: int = typer.Option(4, help="每年主力换月次数"),
+) -> None:
+    """主力换月成本估算：单次往返 bps + 年度拖累（用于成本参考/机会成本）。"""
+    from .backtest.rollover import summarize_rollovers
+
+    vt = f"{symbol}.{exchange}"
+    info = summarize_rollovers(vt, notional, per_year)
+    table = Table(title=f"换月成本估算 — {vt}")
+    table.add_column("项")
+    table.add_column("值")
+    table.add_row("资产类别", info["asset_class"])
+    table.add_row("单次往返成本(bps)", f"{info['round_trip_cost_bps']:.2f}")
+    table.add_row("每年换月次数", str(per_year))
+    table.add_row("年度换月拖累(bps)", f"{info['annual_rollover_drag_bps']:.2f}")
+    table.add_row("年度换月拖累(金额)", f"{info['annual_rollover_drag_amount']:.2f}")
+    table.add_row("备注", info["note"])
+    Console().print(table)
+    Console().print(f"💡 参考：把 {info['annual_rollover_drag_bps']:.2f} bps/年的换月拖累叠加到该品种策略的年度机会成本/门槛上。")
+
+
+@app.command()
 def research(idea: str = typer.Argument(..., help="投资想法（自然语言）"),
              asset_class: str = typer.Option("", help="资产类别")) -> None:
     """AI 研究：idea -> 研究规格 / 候选因子 / 策略代码。"""
@@ -506,7 +531,10 @@ async def _backtest(symbol, exchange, strategy, mode, gateway, years, exclude_li
     if strategy == "pair":
         if not leg2:
             leg2 = "hc0.SHFE"
-        sym2, ex2 = leg2.split(".")
+        parts2 = leg2.split(".")
+        if len(parts2) != 2 or not parts2[0]:
+            console.print("[red]leg2 需形如 hc0.SHFE（标的.交易所）[/red]"); return
+        sym2, ex2 = parts2
         bars2 = await _fetch(sym2, ex2, years)
         if not bars2:
             console.print("[red]配对第二腿无数据[/red]"); return

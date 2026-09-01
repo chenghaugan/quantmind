@@ -77,10 +77,19 @@ class PerformanceAnalyzer:
         n = len(df)
         mean_ret = df["ret"].mean()
         std_ret = df["ret"].std()
-        annual_return = (1 + total_return) ** (self.tdpy / max(n, 1)) - 1 if total_return > -1 else -1.0
-        sharpe = (mean_ret / std_ret * (self.tdpy ** 0.5)) if std_ret and std_ret > 0 else 0.0
+        # 年化因子：按「交易日数 × 每日 bar 数」折算每年 bar 数。
+        # 日线（每交易日一根）退化为 tdpy；内日数据（M5/H1）不再被当成交易日。
+        try:
+            _dts = pd.to_datetime(df["date"])
+            n_days = max(_dts.dt.date.nunique(), 1)
+        except Exception:  # noqa: BLE001
+            n_days = n
+        bars_per_day = max(n / n_days, 1.0)
+        ppy = self.tdpy * bars_per_day  # 每年 bar 数
+        annual_return = (1 + total_return) ** (self.tdpy / max(n_days, 1)) - 1 if total_return > -1 else -1.0
+        sharpe = (mean_ret / std_ret * (ppy ** 0.5)) if std_ret and std_ret > 0 else 0.0
         downside = df["ret"][df["ret"] < 0].std()
-        sortino = (mean_ret / downside * (self.tdpy ** 0.5)) if downside and downside > 0 else 0.0
+        sortino = (mean_ret / downside * (ppy ** 0.5)) if downside and downside > 0 else 0.0
 
         # 最大回撤
         df["cummax"] = df["equity"].cummax()
@@ -119,7 +128,9 @@ class PerformanceAnalyzer:
 
     @staticmethod
     def _pair_pnl(trades: List[TradeData]) -> List[float]:
-        """把同一合约的相邻开平配对，估算每笔平仓盈亏（用于胜率）。"""
+        """把同一合约的相邻反向成交配对，估算每笔平仓盈亏（用于胜率）。"""
+        import dataclasses
+
         positions: Dict[str, List[TradeData]] = {}
         pnl: List[float] = []
         for t in trades:
@@ -128,10 +139,21 @@ class PerformanceAnalyzer:
             stack = positions[vt]
             if not stack:
                 stack.append(t)
-            else:
-                # 简化：用后一成交价减前一成交价，按方向估算
-                prev = stack.pop()
-                direction = 1 if prev.direction.value == "多" else -1
-                p = (t.price - prev.price) * t.volume * direction
-                pnl.append(p)
+                continue
+            prev = stack[-1]
+            if prev.direction == t.direction:
+                # 同向相邻成交（加仓）：不是平仓回合，继续入栈
+                stack.append(t)
+                continue
+            stack.pop()
+            direction = 1 if prev.direction.value == "多" else -1
+            matched = min(prev.volume, t.volume)
+            pnl.append((t.price - prev.price) * matched * direction)
+            # 部分平仓/反手时保留残量，后续配对方向才不会错
+            if t.volume > prev.volume:
+                residual = dataclasses.replace(t, volume=t.volume - prev.volume)
+                stack.append(residual)
+            elif prev.volume > t.volume:
+                # 开仓量 > 平仓量：开仓记录保留残量回填，剩余平仓才不会错配成新开仓
+                stack[-1] = dataclasses.replace(prev, volume=prev.volume - t.volume)
         return pnl

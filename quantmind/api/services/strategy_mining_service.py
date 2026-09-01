@@ -73,10 +73,19 @@ class StrategyMiningService:
                 interval=Interval.DAILY,
             )
 
-            bars = await self.data_manager.get_bars(history_req)
+            bars = await self.data_manager.get_bar_data(history_req)
 
             if not bars:
                 return {"ok": False, "error": f"无法获取 {symbol}.{exchange} 的历史数据"}
+
+            # 交易成本策略：请求显式指定优先，否则按全局 QM_BACKTEST_COST（auto→True/off→False）
+            from ...config import get_settings
+            req_cost = getattr(req, "cost", None)
+            if req_cost is not None:
+                effective_cost = req_cost
+            else:
+                mode = get_settings().backtest_cost
+                effective_cost = False if mode == "off" else True
 
             # 运行自动回测循环
             loop = AutoBacktestLoop(
@@ -85,6 +94,9 @@ class StrategyMiningService:
                 max_iterations=req.max_iterations,
                 min_sharpe=req.min_sharpe,
                 max_drawdown=req.max_drawdown,
+                max_cost_ratio=getattr(req, "max_cost_ratio", 0.6),
+                compare_zero_cost=getattr(req, "compare_zero_cost", True),
+                cost=effective_cost,
             )
 
             result = await loop.run(
@@ -99,6 +111,18 @@ class StrategyMiningService:
                 "iteration": result.iteration,
                 "report": result.report,
                 "adjustment_notes": result.adjustment_notes,
+                "reject_reason": result.reject_reason,
+                "cost_metrics": {
+                    "total_cost": result.total_cost,
+                    "cost_ratio": result.cost_ratio,
+                    "trade_count": result.trade_count,
+                },
+                "zero_cost_compare": {
+                    "gross_sharpe": result.gross_sharpe,
+                    "gross_annual_return": result.gross_annual_return,
+                    "gross_max_drawdown": result.gross_max_drawdown,
+                    "cost_drag_sharpe": result.cost_drag_sharpe,
+                },
                 "final_spec": result.spec.to_dict(),
             }
         except Exception as e:

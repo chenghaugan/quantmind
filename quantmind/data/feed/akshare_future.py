@@ -43,8 +43,15 @@ class AkShareFuturesFeed(BaseDataFeed):
             # futures_zh_daily_sina 对主连（rb0/IF0）与具体合约（rb2401）均可用，统一走它。
             df = await asyncio.to_thread(ak.futures_zh_daily_sina, symbol=symbol)
         else:
+            # sina 分钟接口只接受 1/5/15/30/60；HOUR("1h")/WEEKLY("1w")
+            # 不能用字符串替换（会产出非法 period "1h"/"1w"）
+            _PERIOD = {Interval.MINUTE_1: "1", Interval.MINUTE_5: "5",
+                       Interval.MINUTE_15: "15", Interval.MINUTE_30: "30",
+                       Interval.HOUR: "60"}
+            if req.interval not in _PERIOD:
+                raise ValueError(f"akshare_future 不支持周期 {req.interval.value}，走 fallback")
             df = await asyncio.to_thread(
-                ak.futures_zh_minute_sina, symbol=symbol, period=req.interval.value.replace("m", "")
+                ak.futures_zh_minute_sina, symbol=symbol, period=_PERIOD[req.interval]
             )
 
         return self._df_to_bars(df, symbol, req.exchange, req.interval)

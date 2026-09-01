@@ -179,6 +179,9 @@ if isinstance(roots, dict) and not roots.get("error"):
 else:
     note("无法读取本地数据配置，请确认后端已启动。", "warning")
 
+st.divider()
+note("📡 数据自动下载（期货/A股/港股/美股）已统一迁移至「数据管理」页 → ⏰ 定时自动更新。", "info")
+
 # ================================================================= 告警通知
 st.divider()
 section("告警通知")

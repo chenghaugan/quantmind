@@ -155,142 +155,132 @@ def _render_history():
         note("无匹配记录，请调整筛选条件。", "info")
         return
     
-    # 双栏布局
-    list_col, detail_col = st.columns([1, 2])
+    # ---- 记录列表：点击即查看详情，点击其他行切换 ----
+    _rows = []
+    for _r in filtered_runs:
+        _md = _r.get("metadata") or {}
+        _status = str(_md.get("status") or "")
+        _badge = "✅" if _status == "completed" else "❌" if _status == "failed" else "⏳"
+        _sharpe = _md.get("composite_sharpe")
+        _rows.append({
+            "label": (f"{_badge} {str(_r.get('created_at') or '')[:16]} │ 💡 {str(_md.get('idea') or '—')[:30]}"
+                      + (f" │ 📈 Sharpe {_sharpe:.2f}" if _sharpe is not None else "")),
+            "run_id": _r.get("run_id"),
+        })
+
+    _picked = st.radio("运行记录（点击查看详情）", [r["label"] for r in _rows],
+                       key="hist_pick", label_visibility="collapsed")
+    selected_id = next((r["run_id"] for r in _rows if r["label"] == _picked), None)
+    if not selected_id:
+        note("点击上方记录即可查看详情。", "info")
+        return
     
-    with list_col:
-        st.markdown("**运行列表**")
-        for idx, r in enumerate(filtered_runs):
-            md = r.get("metadata") or {}
-            idea = str(md.get("idea") or "—")[:50]
-            created = str(r.get("created_at") or "")[:16]
-            status = str(md.get("status") or "")
-            sharpe = md.get("composite_sharpe")
-            
-            # 状态徽章
-            status_badge = "✅" if status == "completed" else "❌" if status == "failed" else "⏳"
-            
-            # 列表项
-            btn_label = f"{status_badge} {created}\n{idea}"
-            if sharpe is not None:
-                btn_label += f"\nSharpe: {sharpe:.2f}"
-            
-            btn_key = f"hist_run_{r.get('run_id')}"
-            if st.button(btn_label, key=btn_key, use_container_width=True):
-                st.session_state["hist_selected"] = r.get("run_id")
+    # 加载详情
+    det = detail_fun(selected_id, timeout=20)
+    if guard_error(det, "运行详情"):
+        return
     
-    with detail_col:
-        selected_id = st.session_state.get("hist_selected")
-        if not selected_id:
-            note("点击左侧运行记录查看详情", "info")
-            return
-        
-        # 加载详情
-        det = detail_fun(selected_id, timeout=20)
-        if guard_error(det, "运行详情"):
-            return
-        
-        md = det.get("metadata") or {}
-        
-        # 概览 KPI
-        st.markdown("### 📊 运行概览")
-        # 投资想法独立展示（长文本）
-        idea_text = str(md.get("idea") or "—")
-        st.info(f"💡 **投资想法**：{idea_text}")
-        # 其他短指标放 KPI 行
-        kpi_row([
-            {"label": "运行时间", "value": str(det.get("created_at") or "")[:19], "tone": "neutral"},
-            {"label": "状态", "value": str(md.get("status") or "—"), "tone": "up" if md.get("status") == "completed" else "down"},
-            {"label": "算法", "value": str(md.get("algo") or "—").upper(), "tone": "neutral"},
-            {"label": "标的数", "value": str(md.get("n_symbols") or 0), "tone": "neutral"},
-        ])
-        
-        # 复合 Alpha 指标
-        st.markdown("### 🎯 复合 Alpha 表现")
-        kpi_row([
-            {"label": "复合前向 IC", "value": fmt_num(md.get("composite_fwd_ic"), 4),
-             "tone": "up" if (md.get("composite_fwd_ic") or 0) > 0 else "neutral"},
-            {"label": "复合 Sharpe", "value": fmt_num(md.get("composite_sharpe"), 3),
-             "tone": "up" if (md.get("composite_sharpe") or 0) > 0 else "neutral"},
-            {"label": "代表因子", "value": str(md.get("n_representative") or 0), "tone": "accent"},
-            {"label": "已验证假设", "value": str(md.get("n_verified_hypotheses") or 0), "tone": "accent"},
-            {"label": "总收益", "value": fmt_pct(md.get("composite_return")),
-             "tone": "up" if (md.get("composite_return") or 0) > 0 else "neutral"},
-            {"label": "最大回撤", "value": fmt_pct(md.get("composite_max_drawdown")),
-             "tone": "down" if (md.get("composite_max_drawdown") or 0) < -0.1 else "neutral"},
-        ])
-        
-        # AI 经验简报
-        brief = md.get("brief") or ""
-        if brief:
-            with st.expander("📝 AI 经验简报", expanded=True):
-                st.markdown(brief)
-        
-        # 因子试验明细
-        trials = det.get("trials") or []
-        if not trials:
-            note("该次运行暂无因子试验明细。", "info")
-            return
-        
-        has_metric = any((t.get("metadata") or {}).get("test_ic") is not None for t in trials)
-        if not has_metric:
-            note("ℹ️ 该记录为**历史回填**：仅含因子状态与判读，无逐因子试验指标。", "info")
-        
-        st.markdown("### 🔬 因子试验明细")
-        
-        # 因子统计概览
-        n_verified = sum(1 for t in trials if (t.get("metadata") or {}).get("status") in ("verified", "pass", "passed"))
-        n_rejected = sum(1 for t in trials if (t.get("metadata") or {}).get("status") in ("rejected", "fail", "failed"))
-        n_representative = sum(1 for t in trials if (t.get("metadata") or {}).get("is_representative"))
-        
-        kpi_row([
-            {"label": "总因子数", "value": str(len(trials)), "tone": "accent"},
-            {"label": "已验证", "value": str(n_verified), "tone": "up"},
-            {"label": "被拒绝", "value": str(n_rejected), "tone": "down"},
-            {"label": "代表因子", "value": str(n_representative), "tone": "accent"},
-        ])
-        
-        # 因子明细表
-        rows = []
-        for t in trials:
+    md = det.get("metadata") or {}
+    
+    # 概览 KPI
+    st.markdown("### 📊 运行概览")
+    # 投资想法独立展示（长文本）
+    idea_text = str(md.get("idea") or "—")
+    st.info(f"💡 **投资想法**：{idea_text}")
+    # 其他短指标放 KPI 行
+    kpi_row([
+        {"label": "运行时间", "value": str(det.get("created_at") or "")[:19], "tone": "neutral"},
+        {"label": "状态", "value": str(md.get("status") or "—"), "tone": "up" if md.get("status") == "completed" else "down"},
+        {"label": "算法", "value": str(md.get("algo") or "—").upper(), "tone": "neutral"},
+        {"label": "标的数", "value": str(md.get("n_symbols") or 0), "tone": "neutral"},
+    ])
+    
+    # 复合 Alpha 指标
+    st.markdown("### 🎯 复合 Alpha 表现")
+    kpi_row([
+        {"label": "复合前向 IC", "value": fmt_num(md.get("composite_fwd_ic"), 4),
+         "tone": "up" if (md.get("composite_fwd_ic") or 0) > 0 else "neutral"},
+        {"label": "复合 Sharpe", "value": fmt_num(md.get("composite_sharpe"), 3),
+         "tone": "up" if (md.get("composite_sharpe") or 0) > 0 else "neutral"},
+        {"label": "代表因子", "value": str(md.get("n_representative") or 0), "tone": "accent"},
+        {"label": "已验证假设", "value": str(md.get("n_verified_hypotheses") or 0), "tone": "accent"},
+        {"label": "总收益", "value": fmt_pct(md.get("composite_return")),
+         "tone": "up" if (md.get("composite_return") or 0) > 0 else "neutral"},
+        {"label": "最大回撤", "value": fmt_pct(md.get("composite_max_drawdown")),
+         "tone": "down" if (md.get("composite_max_drawdown") or 0) < -0.1 else "neutral"},
+    ])
+    
+    # AI 经验简报
+    brief = md.get("brief") or ""
+    if brief:
+        with st.expander("📝 AI 经验简报", expanded=True):
+            st.markdown(brief)
+    
+    # 因子试验明细
+    trials = det.get("trials") or []
+    if not trials:
+        note("该次运行暂无因子试验明细。", "info")
+        return
+    
+    has_metric = any((t.get("metadata") or {}).get("test_ic") is not None for t in trials)
+    if not has_metric:
+        note("ℹ️ 该记录为**历史回填**：仅含因子状态与判读，无逐因子试验指标。", "info")
+    
+    st.markdown("### 🔬 因子试验明细")
+    
+    # 因子统计概览
+    n_verified = sum(1 for t in trials if (t.get("metadata") or {}).get("status") in ("verified", "pass", "passed"))
+    n_rejected = sum(1 for t in trials if (t.get("metadata") or {}).get("status") in ("rejected", "fail", "failed"))
+    n_representative = sum(1 for t in trials if (t.get("metadata") or {}).get("is_representative"))
+    
+    kpi_row([
+        {"label": "总因子数", "value": str(len(trials)), "tone": "accent"},
+        {"label": "已验证", "value": str(n_verified), "tone": "up"},
+        {"label": "被拒绝", "value": str(n_rejected), "tone": "down"},
+        {"label": "代表因子", "value": str(n_representative), "tone": "accent"},
+    ])
+    
+    # 因子明细表
+    rows = []
+    for t in trials:
+        m = t.get("metadata") or {}
+        is_rep = bool(m.get("is_representative"))
+        rows.append({
+            "表达式": (str(m.get("expression") or ""))[:50],
+            "状态": m.get("status") or "",
+            "代表": "★" if is_rep else "",
+            "Train IC": fmt_num(m.get("train_ic"), 4),
+            "Val IC": fmt_num(m.get("val_ic"), 4),
+            "Test IC": fmt_num(m.get("test_ic"), 4),
+            "Test Sharpe": fmt_num(m.get("test_sharpe"), 3),
+            "Test 收益": fmt_pct(m.get("test_return")),
+            "Test 回撤": fmt_pct(m.get("test_mdd")),
+            "判读理由": str(m.get("reason") or "")[:80],
+        })
+    
+    st.dataframe(rows, use_container_width=True, hide_index=True, height=min(60 + 35 * len(rows), 500))
+    
+    # IC 对比图（代表因子）
+    rep_trials = [t for t in trials if (t.get("metadata") or {}).get("is_representative")]
+    if rep_trials and has_metric:
+        st.markdown("### 📈 代表因子 Test IC 对比")
+        ic_data = []
+        for t in rep_trials:
             m = t.get("metadata") or {}
-            is_rep = bool(m.get("is_representative"))
-            rows.append({
-                "表达式": (str(m.get("expression") or ""))[:50],
-                "状态": m.get("status") or "",
-                "代表": "★" if is_rep else "",
-                "Train IC": fmt_num(m.get("train_ic"), 4),
-                "Val IC": fmt_num(m.get("val_ic"), 4),
-                "Test IC": fmt_num(m.get("test_ic"), 4),
-                "Test Sharpe": fmt_num(m.get("test_sharpe"), 3),
-                "Test 收益": fmt_pct(m.get("test_return")),
-                "Test 回撤": fmt_pct(m.get("test_mdd")),
-                "判读理由": str(m.get("reason") or "")[:80],
-            })
+            expr = str(m.get("expression") or "")[:30]
+            ic_data.append({"因子": expr, "Test IC": m.get("test_ic") or 0})
         
-        st.dataframe(rows, use_container_width=True, hide_index=True, height=min(60 + 35 * len(rows), 500))
-        
-        # IC 对比图（代表因子）
-        rep_trials = [t for t in trials if (t.get("metadata") or {}).get("is_representative")]
-        if rep_trials and has_metric:
-            st.markdown("### 📈 代表因子 Test IC 对比")
-            ic_data = []
-            for t in rep_trials:
-                m = t.get("metadata") or {}
-                expr = str(m.get("expression") or "")[:30]
-                ic_data.append({"因子": expr, "Test IC": m.get("test_ic") or 0})
-            
-            if ic_data:
-                import plotly.express as px
-                fig = px.bar(pd.DataFrame(ic_data), x="因子", y="Test IC", 
-                            title="代表因子样本外 IC 对比",
-                            color="Test IC", color_continuous_scale="RdYlGn")
-                fig.update_layout(height=300, xaxis_tickangle=-45)
-                st.plotly_chart(fig, use_container_width=True)
-        
-        # 原始数据（折叠）
-        with st.expander("🔎 原始数据", expanded=False):
-            st.json(det)
+        if ic_data:
+            import plotly.express as px
+            fig = px.bar(pd.DataFrame(ic_data), x="因子", y="Test IC", 
+                        title="代表因子样本外 IC 对比",
+                        color="Test IC", color_continuous_scale="RdYlGn")
+            fig.update_layout(height=300, xaxis_tickangle=-45)
+            st.plotly_chart(fig, use_container_width=True)
+    
+    # 原始数据（折叠）
+    with st.expander("🔎 原始数据", expanded=False):
+        st.json(det)
 
 
 
@@ -301,13 +291,14 @@ _DEFAULT_POOL = 40
 
 setup_page("端到端流水线", "🚀")
 page_header(
-    "端到端 AI 投研流水线",
-    "输入一个投资想法，把「AI证据研究 → 因子挖掘 → 样本外复合 alpha → 策略代码 → 知识库」"
-    "整条研究链一次跑通并整页可视化。",
-    "🚀",
+"端到端 AI 投研流水线",
+"输入一个投资想法，把「AI证据研究 → 因子挖掘 → 样本外复合 alpha → 策略代码 → 知识库」"
+"整条研究链一次跑通并整页可视化。",
+"🚀",
 )
 
 _kb_conn_note()
+
 
 # 视图切换：运行流水线 / 历史运行报告（历史上屏时不进入下方运行表单）
 _view = st.radio("视图", ["🚀 运行流水线", "📜 历史运行报告"], horizontal=True)
@@ -660,6 +651,36 @@ with tab_overview:
                     st.caption(h["evidence"])
         else:
             st.caption("无假设产出。")
+    _sb = result.get("strategy_backtest")
+    if _sb:
+        with st.expander("🧪 策略代码真实回测（阶段5）", expanded=False):
+            if _sb.get("error"):
+                st.error(f"回测失败：{_sb['error']}")
+            else:
+                _ps = _sb.get("per_symbol") or []
+                if _ps:
+                    _sb_rows = []
+                    for _p in _ps:
+                        _r2 = _p.get("report") or {}
+                        _g2 = (_p.get("gate") or {}).get("status") or "-"
+                        if "error" in _p:
+                            _sb_rows.append({"品种": _p.get("symbol", "-"),
+                                             "周期": _p.get("interval", "-"),
+                                             "结果": f"❌ {_p['error'][:30]}"})
+                        else:
+                            _sb_rows.append({
+                                "品种": _p.get("symbol", "-"),
+                                "周期": _p.get("interval", "-"),
+                                "总收益": f"{_r2.get('total_return', 0):+.2%}",
+                                "年化": f"{_r2.get('annual_return', 0):+.2%}",
+                                "Sharpe": f"{_r2.get('sharpe', 0):.2f}",
+                                "回撤": f"{_r2.get('max_drawdown', 0):.2%}",
+                                "门槛": str(_g2).upper(),
+                            })
+                    st.dataframe(_sb_rows, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("无回测明细。")
+
     with st.expander("🔎 原始返回", expanded=False):
         st.json(result)
 
@@ -828,6 +849,22 @@ with tab_code:
     )
     if code:
         st.code(code, language="python")
+        # 一键接力：把代码写入「LLM 策略挖掘」工作流，直接进入审定→回测
+        if _safe and st.button("📥 带着代码去回测（LLM 策略挖掘）", width="stretch",
+                               help="写入挖掘页工作流后自动跳转，直接选择品种/周期开始真实回测"):
+            try:
+                _r = APIClient.put("/strategy/draft/state", json={
+                    "val_idea": str(result.get("idea") or idea or ""),
+                    "val_generated_code": code,
+                    "val_code_sandbox_ok": True,
+                }, timeout=5)
+                if _r.get("ok"):
+                    st.success("✅ 代码已写入挖掘页工作流，正在跳转…")
+                    st.switch_page("pages/24_LLM策略挖掘.py")
+                else:
+                    st.error(f"写入失败：{_r.get('error') or '未知错误'}")
+            except Exception as _e:
+                st.error(f"跳转失败：{_e}")
     else:
         note("未生成策略代码。", "info")
     errs = strategy.get("code_errors") or []

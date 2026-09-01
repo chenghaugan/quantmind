@@ -270,7 +270,10 @@ class OrderManager:
             cur = acc.setdefault(vt, [0.0, 0.0])
             prev_vol = cur[0]
             new_vol = prev_vol + signed
-            if abs(new_vol) > abs(prev_vol):          # 加仓 → 更新均价
+            if prev_vol != 0 and prev_vol * new_vol < 0:
+                # 反手（穿越零仓）：新方向成本以最新成交价计（与 sim/backtest 同口径）
+                cur[1] = t.price
+            elif abs(new_vol) > abs(prev_vol):          # 加仓 → 更新均价
                 added = abs(new_vol) - abs(prev_vol)
                 cur[1] = (cur[1] * abs(prev_vol) + t.price * added) / abs(new_vol)
             elif new_vol == 0:

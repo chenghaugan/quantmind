@@ -5,7 +5,7 @@
 2. 整手交易：买入数量必须是100的整数倍
 3. 涨跌停价格限制：委托价格不能超出涨跌停价
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 
 import pytest
@@ -40,9 +40,14 @@ class TestLotSize:
     """A股买入必须是100股整数倍。"""
 
     def _engine(self, code="600000"):
-        d0 = datetime(2025, 1, 2)
-        bars = _astock_bars(code, [d0], [(10.0, 10.5, 9.5, 10.0)])
-        return BacktestEngine({f"{code}.{Exchange.SSE.value}": bars})
+        # 两根 bar：send_order 要求存在下一交易日可撮合（末根 bar 拒单）
+        d0 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+        d1 = datetime(2025, 1, 3, tzinfo=timezone.utc)
+        bars = _astock_bars(code, [d0, d1], [(10.0, 10.5, 9.5, 10.0),
+                                             (10.0, 10.5, 9.5, 10.0)])
+        eng = BacktestEngine({f"{code}.{Exchange.SSE.value}": bars})
+        eng._current_date = d0
+        return eng
 
     def test_buy_round_down_to_lot(self):
         """买入150股 → 自动调整为100股。"""
@@ -96,9 +101,12 @@ class TestLotSize:
 
     def test_non_astock_not_rounded(self):
         """非A股（期货）不做整手调整。"""
-        d0 = datetime(2025, 1, 2)
-        bars = [_bar("rb2505", Exchange.SHFE, d0, 3500, 3550, 3450, 3500)]
+        d0 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+        d1 = datetime(2025, 1, 3, tzinfo=timezone.utc)
+        bars = [_bar("rb2505", Exchange.SHFE, d0, 3500, 3550, 3450, 3500),
+                _bar("rb2505", Exchange.SHFE, d1, 3500, 3550, 3450, 3500)]
         eng = BacktestEngine({"rb2505.SHFE": bars})
+        eng._current_date = d0
         req = OrderRequest(symbol="rb2505", exchange=Exchange.SHFE,
                            direction=Direction.LONG, offset=Offset.OPEN,
                            volume=3, price=3500)
@@ -115,8 +123,8 @@ class TestLimitPrice:
     """涨跌停价格限制：委托价超出涨跌停范围则拒单。"""
 
     def _engine(self):
-        d0 = datetime(2025, 1, 2)
-        d1 = datetime(2025, 1, 3)
+        d0 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+        d1 = datetime(2025, 1, 3, tzinfo=timezone.utc)
         # Day0 收盘10元 → Day1 涨停11元 / 跌停9元
         bars = _astock_bars("600000", [d0, d1], [
             (10.0, 10.5, 9.5, 10.0),
@@ -127,8 +135,8 @@ class TestLimitPrice:
             exclude_limit=True,
             limit_pct=0.10,
         )
-        # 将 _current_date 设为 d1（模拟在 d1 发委托）
-        eng._current_date = d1
+        # 将 _current_date 设为 d0（存在下一交易日可撮合）
+        eng._current_date = d0
         return eng
 
     def test_price_above_limit_up_rejected(self):
@@ -169,14 +177,14 @@ class TestLimitPrice:
 
     def test_no_exclude_limit_no_check(self):
         """未启用 exclude_limit 时不做价格限制。"""
-        d0 = datetime(2025, 1, 2)
-        d1 = datetime(2025, 1, 3)
+        d0 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+        d1 = datetime(2025, 1, 3, tzinfo=timezone.utc)
         bars = _astock_bars("600000", [d0, d1], [
             (10.0, 10.5, 9.5, 10.0),
             (10.0, 10.5, 9.5, 10.2),
         ])
         eng = BacktestEngine({"600000.SSE": bars}, exclude_limit=False)
-        eng._current_date = d1
+        eng._current_date = d0
         req = OrderRequest(symbol="600000", exchange=Exchange.SSE,
                            direction=Direction.LONG, offset=Offset.OPEN,
                            volume=100, price=15.00)
@@ -185,12 +193,12 @@ class TestLimitPrice:
 
     def test_non_astock_no_limit_check(self):
         """非A股不做涨跌停价格限制。"""
-        d0 = datetime(2025, 1, 2)
-        d1 = datetime(2025, 1, 3)
+        d0 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+        d1 = datetime(2025, 1, 3, tzinfo=timezone.utc)
         bars = [_bar("rb2505", Exchange.SHFE, d0, 3500, 3550, 3450, 3500),
                 _bar("rb2505", Exchange.SHFE, d1, 3500, 3550, 3450, 3500)]
         eng = BacktestEngine({"rb2505.SHFE": bars}, exclude_limit=True, limit_pct=0.10)
-        eng._current_date = d1
+        eng._current_date = d0
         req = OrderRequest(symbol="rb2505", exchange=Exchange.SHFE,
                            direction=Direction.LONG, offset=Offset.OPEN,
                            volume=1, price=5000)
@@ -247,9 +255,12 @@ class TestT1Rule:
 
     def test_non_astock_not_affected(self):
         """非A股不受T+1限制。"""
-        d0 = datetime(2025, 1, 2)
-        bars = [_bar("rb2505", Exchange.SHFE, d0, 3500, 3550, 3450, 3500)]
+        d0 = datetime(2025, 1, 2, tzinfo=timezone.utc)
+        d1 = datetime(2025, 1, 3, tzinfo=timezone.utc)
+        bars = [_bar("rb2505", Exchange.SHFE, d0, 3500, 3550, 3450, 3500),
+                _bar("rb2505", Exchange.SHFE, d1, 3500, 3550, 3450, 3500)]
         eng = BacktestEngine({"rb2505.SHFE": bars})
+        eng._current_date = d0
         eng._apply_fill("rb2505.SHFE", Direction.LONG, 1, 3500, Offset.OPEN, d0)
         # 期货当日卖出 → 应允许
         assert eng._check_t1_sell("rb2505.SHFE", 1, d0)

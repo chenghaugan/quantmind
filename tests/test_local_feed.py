@@ -79,8 +79,8 @@ async def test_china_futures_specific_contract(tmp_path):
     bars = await feed.fetch_bar_data(HistoryRequest(
         symbol="IC2401", exchange=Exchange.CFFEX, interval=Interval.DAILY))
     assert len(bars) == 2  # 2023-12-29 与 2024-01-02 两个自然日
-    # 时间已转 UTC（北京时间 09:05 -> UTC 01:05）；BarData.datetime 为 UTC aware
-    assert bars[0].datetime == pd.Timestamp("2023-12-29 01:05:00", tz="UTC").to_pydatetime()
+    # 日线时间戳归一为交易日 00:00 UTC（与官方日线口径一致）
+    assert bars[0].datetime == pd.Timestamp("2023-12-29 00:00:00", tz="UTC").to_pydatetime()
     # 2023-12-29 日线：high=max(5010,5020)=5020，volume=100+120=220
     assert bars[0].high_price == 5020
     assert bars[0].volume == 220
@@ -124,8 +124,9 @@ async def test_china_futures_backadjusted_removes_rollover_jump(tmp_path):
     # 3 个交易日：2024-01-02(A) / 01-03(重叠,主力=B) / 01-04(B)
     assert len(bars) == 3
     closes = [b.close_price for b in bars]
-    # 原始连续会跳变 100->200；向后复权应平滑（01-02 与 01-03 收盘价相等，无跳变）
-    assert closes[0] == closes[1]
+    # 换月处用同刻价差（B[01-03]-A[01-03]=95）做基差平移：跨换月收益 = 旧主力的
+    # 真实收益（A: 100→105 的 +5），不再被强制清零
+    assert closes[0] == 195.0 and closes[1] == 200.0
     # 最新价（01-04）保持真实不变
     assert closes[2] == 205
     # 真实收益（01-03->01-04 的 +5）被保留

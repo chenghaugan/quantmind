@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Dict
 
-from .constant import Exchange, Offset
+from .constant import Direction, Exchange, Offset
 from .gateway import OrderRequest
 from .object import PositionData
 
@@ -35,10 +35,20 @@ class OffsetConverter:
         if req.offset in (Offset.OPEN, Offset.NONE):
             return req
 
-        pos = self.get_position(f"{req.symbol}.{req.exchange.value}", req.direction.value)
+        # 平仓单方向与被平持仓方向相反：平多（卖出）查多方向持仓的今昨仓
+        base = f"{req.symbol}.{req.exchange.value}"
+        close_direction = Direction.LONG if req.direction == Direction.SHORT else Direction.SHORT
+        pos = self.get_position(base, close_direction.value)
         if pos is None:
-            # 无持仓记录，默认平今（多数交易所平今=平）
-            req.offset = Offset.CLOSE_TODAY
+            # NET 模式持仓（网关不区分多空方向）
+            pos = self.get_position(base, Direction.NET.value)
+        if pos is None:
+            # 无持仓记录：区分平今/平昨的交易所默认平今；
+            # 其余交易所（DCE/CZCE/INE 等）用 CLOSE 由交易所自动归并
+            if req.exchange in DISTINGUISH_EXCHANGES:
+                req.offset = Offset.CLOSE_TODAY
+            else:
+                req.offset = Offset.CLOSE
             return req
 
         # 需要区分的交易所：优先平今，今仓不足再平昨

@@ -155,7 +155,10 @@ with left:
         width="stretch", key="md_hist",
     )
 with right:
-    ann = 252 if interval in ("1d", "1w") else 252 * 4
+    # 年化因子 = 每年期数（1d=252 交易日，1w=52 周，日内按实际交易时长折算）
+    _ppy = {"1d": 252, "1w": 52, "1h": 252 * 4, "30m": 252 * 8,
+            "15m": 252 * 16, "5m": 252 * 48, "1m": 252 * 240}
+    ann = _ppy.get(interval, 252)
     stats = {
         "样本数": f"{len(rets)}",
         "平均收益": f"{rets.mean() * 100:.4f}%",

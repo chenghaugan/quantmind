@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -75,6 +76,7 @@ class PaperEngine:
         self._current_date: Optional[datetime] = None
         self._data: Dict[str, List[BarData]] = {}
         self._lookup: Dict[str, Dict[datetime, BarData]] = {}
+        self._bar_dates: Dict[str, List[datetime]] = {}
         self.dates: List[datetime] = []
         self._next_date: Dict[datetime, Optional[datetime]] = {}
 
@@ -105,6 +107,11 @@ class PaperEngine:
         self._order_seq += 1
         order_id = f"PAPER-{self._order_seq}"
         fill_date = self._next_date.get(self._current_date)
+        if fill_date is None:
+            # 无下一交易日可撮合（on_init 期间或末日发单）：拒单
+            _logger.warning("[PAPER] 拒单（无下一交易日可撮合）: %s x%s",
+                            req.symbol, req.volume)
+            return ""
         self.pending.append({
             "vt_symbol": f"{req.symbol}.{req.exchange.value}",
             "req": req,
@@ -121,12 +128,24 @@ class PaperEngine:
         )
 
     def get_history(self, vt_symbol: str, count: int) -> List[BarData]:
-        return self._data.get(vt_symbol, [])[-count:]
+        """返回截至回放当前日期的最近 ``count`` 根 K 线（无前视）。
+
+        回放/实时期间（``_current_date`` 非空）只返回当前及之前的 bar；
+        初始化阶段返回全量历史（供 on_init 因果预计算）。
+        """
+        bars = self._data.get(vt_symbol, [])
+        if self._current_date is not None:
+            dates = self._bar_dates.get(vt_symbol)
+            if dates is not None:
+                i = bisect_right(dates, self._current_date)
+                return bars[max(0, i - count):i]
+        return bars[-count:]
 
     # ---- 运行（回放） ----
     def run_replay(self, data: Dict[str, List[BarData]], strategies_init: bool = True) -> dict:
         self._data = data
         self._lookup = {vt: {b.datetime: b for b in bars} for vt, bars in data.items()}
+        self._bar_dates = {vt: [b.datetime for b in bars] for vt, bars in data.items()}
         self.dates = sorted({b.datetime for bars in data.values() for b in bars})
         self._next_date = {}
         for i, d in enumerate(self.dates):
@@ -148,7 +167,7 @@ class PaperEngine:
                         if ctx.vt_symbol == vt:
                             ctx.strategy.on_bar(bar)
             self._mark_to_market(d)
-        self._force_fill_remaining()
+        self._cancel_remaining()
         self._mark_to_market(self.dates[-1] if self.dates else datetime.now())
         for ctx in self.contexts:
             ctx.strategy.on_stop()
@@ -159,17 +178,26 @@ class PaperEngine:
         remaining = []
         for p in self.pending:
             if p["fill_date"] is not None and p["fill_date"] <= date:
-                self._execute_fill(p, date)
+                executed = self._execute_fill(p, date)
+                if not executed:
+                    # 未成交（停牌/数据缺口等）：保留挂单待后续重试，
+                    # 不再静默丢弃（否则 trade_count 与持仓对不上）。
+                    _logger.debug("[PAPER] 挂单未成交，保留重试: %s", p["vt_symbol"])
+                    remaining.append(p)
             else:
                 remaining.append(p)
         self.pending = remaining
 
-    def _execute_fill(self, p: dict, date: datetime) -> None:
+    def _execute_fill(self, p: dict, date: datetime) -> bool:
         vt = p["vt_symbol"]
         req = p["req"]
         bar = self._bar_at_or_after(vt, p["fill_date"] or date)
         if bar is None:
-            return
+            return False
+        if bar.datetime > date:
+            # 停牌/数据缺口：目标日无 bar，恢复日在未来——不在当前日提前
+            # 以未来价格成交（前视），保留挂单待引擎走到恢复日再撮合
+            return False
         px = fill_price(bar, req.direction, self.slippage)
         self._apply_fill(vt, req.direction, req.volume, px)
         self._order_seq += 1
@@ -183,6 +211,7 @@ class PaperEngine:
             self.risk.on_trade(req.volume, bar.datetime)
         self._emit(EventType.EVENT_TRADE, trade)
         self._emit(EventType.EVENT_POSITION, self.get_position(vt))
+        return True
 
     def _apply_fill(self, vt_symbol: str, direction: Direction, volume: float, price: float) -> None:
         size = self.sizes.get(vt_symbol, 1.0)
@@ -197,11 +226,14 @@ class PaperEngine:
             closed = min(abs(signed_vol), abs(cur_vol))
             realized = (price - pos.price) * closed * size * (1 if cur_vol > 0 else -1)
             self.cash += realized
-        if abs(new_vol) > abs(cur_vol):
+        # 均价更新：反手（穿越零仓）时新方向以最新成交价计成本；同向加仓用加权均价
+        if new_vol == 0:
+            pos.price = 0.0
+        elif cur_vol == 0 or cur_vol * new_vol < 0:
+            pos.price = price
+        elif abs(new_vol) > abs(cur_vol):
             added = abs(new_vol) - abs(cur_vol)
             pos.price = (pos.price * abs(cur_vol) + price * added) / abs(new_vol)
-        elif new_vol == 0:
-            pos.price = 0.0
         pos.volume = new_vol
         self.cash -= price * volume * size * self.commission
         self.positions[vt_symbol] = pos
@@ -215,13 +247,23 @@ class PaperEngine:
                 return lookup[d]
         return None
 
-    def _force_fill_remaining(self) -> None:
-        for p in list(self.pending):
-            vt = p["vt_symbol"]
-            bar = self._bar_at_or_after(vt, self.dates[-1]) if self.dates else None
-            if bar is not None:
-                px = fill_price(bar, p["req"].direction, self.slippage)
-                self._apply_fill(vt, p["req"].direction, p["req"].volume, px)
+    def _bar_at_or_before(self, vt_symbol: str, date: datetime) -> Optional[BarData]:
+        """返回该合约在 date 当日或之前最近一根 bar（停牌盯市沿用停牌前价格）。"""
+        bars = self._data.get(vt_symbol, [])
+        dates = self._bar_dates.get(vt_symbol)
+        if not bars or not dates:
+            return None
+        i = bisect_right(dates, date)
+        if i == 0:
+            return None
+        return bars[i - 1]
+
+    def _cancel_remaining(self) -> None:
+        """收尾：取消剩余未成交挂单（不伪造成交）。"""
+        for p in self.pending:
+            _logger.info("[PAPER] 收尾取消未成交挂单: %s x%s",
+                         p["vt_symbol"], p["req"].volume)
+        self.pending = []
 
     def _mark_to_market(self, date: datetime) -> None:
         equity = self.cash
@@ -229,7 +271,8 @@ class PaperEngine:
             if pos.volume == 0:
                 continue
             size = self.sizes.get(vt, 1.0)
-            bar = self._bar_at_or_after(vt, date)
+            # 停牌/数据缺口时用当日或之前最近收盘价，避免用未来价格盯市
+            bar = self._bar_at_or_before(vt, date)
             if bar is not None:
                 equity += pos.volume * (bar.close_price - pos.price) * size
         self.equity = equity

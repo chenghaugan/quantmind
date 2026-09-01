@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Callable, Optional
@@ -20,6 +21,8 @@ class RedisStore:
     def __init__(self, url: str) -> None:
         self.url = url
         self._client = None
+        self._pubsub_tasks: list = []  # 保留订阅 task 强引用，避免被 GC
+        self._pubsubs: list = []
 
     async def connect(self) -> None:
         import redis.asyncio as aioredis
@@ -29,6 +32,19 @@ class RedisStore:
         _logger.info("Redis 连接已建立")
 
     async def close(self) -> None:
+        # 先取消订阅循环并等待退出，再关 pubsub 与主连接
+        tasks = list(self._pubsub_tasks)
+        self._pubsub_tasks.clear()
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        for ps in self._pubsubs:
+            try:
+                await ps.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+        self._pubsubs.clear()
         if self._client:
             await self._client.aclose()
 
@@ -80,6 +96,7 @@ class RedisStore:
 
             import asyncio
 
-            asyncio.create_task(_loop())
+            self._pubsubs.append(pubsub)
+            self._pubsub_tasks.append(asyncio.create_task(_loop()))
         except Exception as exc:  # noqa: BLE001
             _logger.warning("Redis 订阅失败: %s", exc)

@@ -43,10 +43,16 @@ def test_validate_strategy_rejected_not_promoted(tmp_path) -> None:
 
     svc = BacktestService(dm=None, ee=EventEngine())
 
-    # 无数据源 → 直接返回 error（失败闭合，不抛异常）
+    # 无数据源 → 直接返回 error（失败闭合，不抛异常）。
+    # 预置模板路径已移除：用审定代码（code）走新流程。
+    _minimal_code = (
+        "from quantmind.strategy.base import CtaTemplate\n\n"
+        "class XStrategy(CtaTemplate):\n"
+        "    def on_bar(self, bar):\n"
+        "        pass\n")
     req = _FakeReq(idea="动量", strategy="momentum", symbol="IC0",
                    exchange="CFFEX", interval="1d", start=None, end=None,
-                   setting={}, cost=False,
+                   setting={}, cost=False, code=_minimal_code,
                    gate={"min_sharpe": 1.0, "min_drawdown": -0.15}, promote=True)
 
     import asyncio
@@ -63,3 +69,59 @@ def test_resolve_and_defaults() -> None:
     assert DEFAULT_SETTINGS["momentum"]["window"] == 20
     assert DEFAULT_SETTINGS["chan_third_buy"]["break_window"] == 20
     assert DEFAULT_SETTINGS["chan_first_buy"]["roc_window"] == 10
+
+
+def test_validate_strategy_multi_interval(tmp_path) -> None:
+    """多周期回测：intervals 列表 → 品种×周期 逐项回测，条目带 interval 字段。"""
+    os.environ["QM_KNOWLEDGE_DB"] = str(tmp_path / "kb.db")
+    from quantmind.api.services.backtest_service import BacktestService
+    from quantmind.core.engine import EventEngine
+
+    svc = BacktestService(dm=None, ee=EventEngine())
+
+    _minimal_code = (
+        "from quantmind.strategy.base import CtaTemplate\n\n"
+        "class XStrategy(CtaTemplate):\n"
+        "    def on_bar(self, bar):\n"
+        "        pass\n")
+    req = _FakeReq(idea="动量", strategy="momentum", symbols=["IC0", "rb0"],
+                   exchange="CFFEX", interval="1d",
+                   intervals=["1d", "15m"], start=None, end=None,
+                   setting={}, cost=False, code=_minimal_code,
+                   gate=None, promote=False)
+
+    import asyncio
+    out = asyncio.run(svc.validate_strategy(req))
+    assert isinstance(out, dict)
+    # 无数据源：每个 品种×周期 组合都有一条带 interval 的错误条目（失败闭合）
+    ps = out.get("per_symbol") or []
+    assert len(ps) == 4  # 2 品种 × 2 周期
+    assert out.get("intervals") == ["1d", "15m"]
+    assert out.get("interval") == "1d"  # 兼容字段 = 第一个周期
+    for iv in ("1d", "15m"):
+        for sym in ("IC0", "rb0"):
+            match = [p for p in ps if p.get("symbol") == sym and p.get("interval") == iv]
+            assert len(match) == 1, f"{sym}@{iv} 缺条目"
+            assert "error" in match[0]  # dm=None → 数据获取失败（失败闭合）
+
+
+def test_validate_strategy_intervals_compat_fallback(tmp_path) -> None:
+    """不传 intervals 时回退到旧 interval 字段（向后兼容）。"""
+    os.environ["QM_KNOWLEDGE_DB"] = str(tmp_path / "kb.db")
+    from quantmind.api.services.backtest_service import BacktestService
+    from quantmind.core.engine import EventEngine
+
+    svc = BacktestService(dm=None, ee=EventEngine())
+    _minimal_code = (
+        "from quantmind.strategy.base import CtaTemplate\n\n"
+        "class XStrategy(CtaTemplate):\n"
+        "    def on_bar(self, bar):\n"
+        "        pass\n")
+    req = _FakeReq(idea="动量", symbols=["IC0"], exchange="CFFEX",
+                   interval="15m", start=None, end=None,
+                   setting={}, cost=False, code=_minimal_code, gate=None, promote=False)
+    import asyncio
+    out = asyncio.run(svc.validate_strategy(req))
+    assert out.get("intervals") == ["15m"]
+    assert len(out["per_symbol"]) == 1
+    assert out["per_symbol"][0].get("interval") == "15m"

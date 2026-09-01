@@ -1,21 +1,13 @@
 """API 请求/响应模型（扩展：研究 / 因子 / 回测 / 策略 / 订单 / 生命周期）。"""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---- 历史数据 ----
 class HistoryQuery(BaseModel):
-    symbol: str
-    exchange: str = "SHFE"
-    interval: str = "1d"
-    start: Optional[str] = None
-    end: Optional[str] = None
-
-
-class DataDownloadRequest(BaseModel):
     symbol: str
     exchange: str = "SHFE"
     interval: str = "1d"
@@ -121,25 +113,39 @@ class BacktestRequest(BaseModel):
     end: Optional[str] = None     # 回测结束日期 YYYY-MM-DD（None=自动）
 
 
-class StrategyValidateRequest(BaseModel):
-    """策略思想测试：策略思路 →（LLM 预编程 或 预置模板）→ 真实数据回测 → 门槛判定 →（可选）入有效策略库。
+class OptimizationConfig(BaseModel):
+    """网格参数优化配置：IS/OOS 切分 + 高原检验 + Deflated Sharpe 三防线。"""
 
-    两种策略来源：
-      - ``llm_code=True``（默认推荐）：把 ``idea``（策略思想，如布林带回穿规则全文）交给
+    enabled: bool = False
+    # 用裸 list 保住元素原始类型（int/float），避免 pydantic 强转 float 破坏策略参数语义
+    param_grid: Dict[str, list] = {}   # {"window": [10,20,30]}；空 → 用策略内 PARAM_GRID
+    is_ratio: float = Field(0.7, ge=0.1, le=0.9)   # 样本内占比（split_is_oos 契约）
+    max_combos: int = Field(60, ge=1)         # 组合数硬上限（防组合爆炸）
+    top_k: int = Field(5, ge=1)               # 进入 OOS 验证的组合数
+    min_trades: int = Field(10, ge=0)         # 组合最少成交笔数（IS 段淘汰）
+    plateau_ratio: float = Field(0.6, ge=0.0, le=1.0)  # 参数高原：邻域中位/最优 ≥ 阈值才可信
+    use_dsr: bool = True                      # 入库判据用 Deflated Sharpe（替代原始 Sharpe）
+    warmup_bars: int = Field(120, ge=0)       # OOS 回测预热根数（从 IS 尾部借）
+
+
+class StrategyValidateRequest(BaseModel):
+    """策略思想测试：策略思路 → LLM 预编程（或用户审定代码）→ 真实数据回测 → 门槛判定 →（可选）入有效策略库。
+
+    策略来源：
+      - ``code`` 非空：直接使用用户在对话式编程阶段审定的代码（仍过沙箱校验）。
+    ``code`` 为空：把 ``idea``（策略思想，如布林带回穿规则全文）交给
         LLM 预编程为 CtaTemplate 策略代码，AST 沙箱校验后回测。
-      - ``llm_code=False``：``strategy`` 指定预置模板（momentum/chan_first_buy/
-        chan_third_buy/bollinger_recover/dual_ma）作为快捷方式。
 
     支持多品种：``symbols`` 列表逐品种独立回测对比，每个品种各自门槛判定，
     达标品种自动写入 lifecycle（有效策略库）。
     """
 
-    idea: str = ""                       # 策略思想/投资想法（llm_code=True 时为主输入）
-    strategy: str = ""                   # 预置模板名（llm_code=False 时用；空则从 idea 识别）
-    llm_code: bool = True                # True → LLM 预编程；False → 预置模板
+    idea: str = ""                       # 策略思想/投资想法（主输入）
+    code: str = ""                       # 用户审定的策略代码（非空时跳过 LLM，直接注册回测）
     symbols: List[str] = ["IC0"]         # 多品种：逐品种回测对比
     exchange: str = "CFFEX"              # 默认交易所（单品种快捷用）
-    interval: str = "1d"                 # 1d/1h/30m/15m/5m/1m
+    interval: str = "1d"                 # 1d/1h/30m/15m/5m/1m（旧字段，向后兼容）
+    intervals: Optional[List[str]] = None  # 多周期回测：非空时逐周期回测，优先于 interval
     start: Optional[str] = None           # YYYY-MM-DD；None=全部历史
     end: Optional[str] = None
     setting: Dict[str, Any] = {}          # 预置模板参数；空 → 默认参数
@@ -147,6 +153,21 @@ class StrategyValidateRequest(BaseModel):
     # 门槛判定与自动入库（默认关闭，向后兼容）
     gate: Optional[dict] = None           # {min_sharpe, min_drawdown, ...}；None=不判定
     promote: bool = False                 # 判定 verified 后自动写入 lifecycle（有效策略库）
+    optimization: Optional[OptimizationConfig] = None  # 参数优化（防过拟合三防线）
+
+
+class StrategyDraftMessage(BaseModel):
+    """LLM 策略编程对话的单条消息。"""
+
+    role: str = "user"                   # "user"（思想/修改意见）| "assistant"（代码）
+    content: str
+
+
+class StrategyDraftRequest(BaseModel):
+    """LLM 策略代码草稿（对话式编程）：无状态多轮，历史由前端每次携带。"""
+
+    idea: str = ""                       # 首轮：策略思想；后续轮可空（修改意见在 history 末尾）
+    history: List[StrategyDraftMessage] = []  # 完整对话史（截断由前端负责）
 
 
 class StrategyRegisterRequest(BaseModel):
@@ -172,9 +193,9 @@ class PaperRunRequest(BaseModel):
     symbol: str = "rb0"
     exchange: str = "SHFE"
     setting: Dict[str, Any] = {}
-    capital: float = 1_000_000.0
-    commission: float = 0.0002
-    days: int = 400                     # 回放窗口（自然日回溯取数）
+    capital: float = Field(1_000_000.0, gt=0)
+    commission: float = Field(0.0002, ge=0)
+    days: int = Field(400, ge=1)          # 回放窗口（自然日回溯取数）
 
 
 # ---- Walk-Forward 滚动验证 ----
@@ -182,11 +203,11 @@ class WalkForwardRequest(BaseModel):
     strategy: str = "dual_ma"
     symbol: str = "rb0"
     exchange: str = "SHFE"
-    train_window: int = 250
-    test_window: int = 60
-    step: Optional[int] = None
+    train_window: int = Field(250, ge=1)
+    test_window: int = Field(60, ge=1)
+    step: Optional[int] = Field(None, ge=1)
     setting: Dict[str, Any] = {}
-    capital: float = 1_000_000.0
+    capital: float = Field(1_000_000.0, gt=0)
     cost: bool = False
 
 
@@ -195,8 +216,8 @@ class OrderRequestSchema(BaseModel):
     vt_symbol: str
     direction: str                # 多 / 空
     offset: str = "开"            # 开 / 平 / 平今 / 平昨
-    volume: float
-    price: float = 0.0
+    volume: float = Field(..., gt=0)
+    price: float = Field(0.0, ge=0)
 
 
 # ---- 生命周期晋升 ----
@@ -393,6 +414,10 @@ class FactorPipelineRequest(BaseModel):
     n_groups: int = 5
     long_short: bool = True
     cost_rate: float = 0.0
+    # 因子侧宽松净成本/换手闸门
+    net_gate: bool = False
+    max_turnover: float = 0.0
+    min_net_sharpe: float = 0.0
     max_candidates: int = 8
 
 
@@ -427,6 +452,9 @@ class FactorE2ERequest(BaseModel):
     n_groups: int = 5
     long_short: bool = True
     cost_rate: float = 0.0
+    net_gate: bool = False
+    max_turnover: float = 0.0
+    min_net_sharpe: float = 0.0
     max_candidates: int = 8
     # AI 证据研究阶段（A 线）
     verify_threshold: float = 0.02
@@ -486,4 +514,7 @@ class AutoBacktestRequest(BaseModel):
     max_iterations: int = 3             # 最大迭代次数
     min_sharpe: float = 0.5             # 最低 Sharpe 闸门
     max_drawdown: float = -0.30         # 最大回撤下限
+    max_cost_ratio: float = 0.6         # 成本/净收益上限（高换手拦截），0=关闭
+    compare_zero_cost: bool = True      # 跑一次零成本对照，量化成本拖累
+    cost: Optional[Union[bool, Dict[str, Any]]] = None  # 差异化成本：True=默认表/dict=自定义/False=零成本/None=按 QM_BACKTEST_COST
 

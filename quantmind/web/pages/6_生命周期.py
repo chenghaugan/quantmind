@@ -96,6 +96,9 @@ else:
         )
         _sharpe = _rec.get("sharpe")
         _mdd = _rec.get("max_drawdown")
+        _cost_ratio = _rec.get("cost_ratio")
+        _total_cost = _rec.get("total_cost")
+        _trades = _rec.get("trade_count")
         _lc_rows.append({
             "策略ID": _rec.get("strategy_id") or "—",
             "阶段": badge(_rec.get("state") or "—", "info"),
@@ -104,6 +107,9 @@ else:
             "想法": _rec.get("idea") or "—",
             "Sharpe": (f"{_sharpe:.3f}" if _sharpe is not None else "—"),
             "MaxDD": (f"{_mdd:.3f}" if _mdd is not None else "—"),
+            "成本/收益": (f"{_cost_ratio:.1%}" if _cost_ratio is not None else "—"),
+            "总成本": (f"{_total_cost:,.0f}" if _total_cost is not None else "—"),
+            "换手(笔)": (_trades if _trades is not None else "—"),
             "判读理由": _rec.get("reason") or "—",
         })
     st.dataframe(pd.DataFrame(_lc_rows), width="stretch", hide_index=True)

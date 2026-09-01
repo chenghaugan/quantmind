@@ -75,6 +75,11 @@ class PipelineConfig:
     n_groups: int = 5
     long_short: bool = True
     cost_rate: float = 0.0
+    # 净成本/换手宽松闸门（因子侧）：在研究展示 gross 之外，
+    # 用换手感知 net 指标过滤高换手/成本吃光的因子，避免其进入复合组合。
+    net_gate: bool = False                    # True 才启用该闸门
+    max_turnover: float = 0.0                 # 单期平均换手上限（0=关闭）
+    min_net_sharpe: float = 0.0               # 净 Sharpe 下限（0=关闭）
     # 复合组合（可选）：把代表因子合成一个可交易 alpha 组合
     run_composite: bool = False          # True 时在 test 期对代表因子做复合回测
     composite_scheme: str = "icir"       # equal | icir | inv_var | min_var
@@ -97,9 +102,14 @@ class StepReport:
     train_rank_ic: float = float("nan")
     val_ic: Optional[float] = None         # val 期 IC（仅报告）
     test_ic: Optional[float] = None        # test 期 IC
-    test_sharpe: Optional[float] = None    # test 期 OOS 多空组合 Sharpe
+    test_sharpe: Optional[float] = None    # test 期 OOS 多空组合 Sharpe（gross，研究展示）
     test_return: Optional[float] = None
     test_mdd: Optional[float] = None
+    # 换手感知净成本指标（门槛用）
+    test_net_sharpe: Optional[float] = None
+    turnover_mean: Optional[float] = None
+    cost_ratio: Optional[float] = None
+    high_turnover: bool = False            # 换手超上限被闸门标记
     removed_redundant: List[str] = field(default_factory=list)
     daily_returns: List[Optional[float]] = field(default_factory=list)   # test 期多空日收益
     ic_series: List[Optional[float]] = field(default_factory=list)       # test 期逐日截面 IC
@@ -117,6 +127,10 @@ class StepReport:
             "test_sharpe": r4(self.test_sharpe) if self.test_sharpe is not None else None,
             "test_return": r4(self.test_return) if self.test_return is not None else None,
             "test_mdd": r4(self.test_mdd) if self.test_mdd is not None else None,
+            "test_net_sharpe": r4(self.test_net_sharpe) if self.test_net_sharpe is not None else None,
+            "turnover_mean": r4(self.turnover_mean) if self.turnover_mean is not None else None,
+            "cost_ratio": r4(self.cost_ratio) if self.cost_ratio is not None else None,
+            "high_turnover": self.high_turnover,
             "removed_redundant": self.removed_redundant,
             "daily_returns": self.daily_returns,
             "ic_series": self.ic_series,
@@ -130,7 +144,9 @@ def _eval_ic(expr: str, panel: Panel, forward_periods: int, market: str, val_pan
     try:
         rep = evaluate_expression(expr, panel, forward_periods=forward_periods,
                                   market=market, use_cache=False)
-        train["ic"] = rep.ic_mean if rep.ic_mean == rep.ic_mean else float("nan")
+        # ic=pearson（与 search 模块口径一致），rank_ic=rep.ic_mean（spearman）
+        _pic = getattr(rep, "ic_pearson", None)
+        train["ic"] = _pic if _pic == _pic else float("nan")
         train["rank_ic"] = rep.ic_mean if rep.ic_mean == rep.ic_mean else float("nan")
     except Exception as exc:  # noqa: BLE001
         _logger.debug("train IC 评估失败 %s: %s", expr, exc)
@@ -183,16 +199,24 @@ def _daily_ic_series(expr: str, panel: Panel, forward_periods: int) -> List[Opti
 
 def _run_judge(pool: List[str], provider: LLMProvider) -> Dict[str, float]:
     """（可选）用 LLM 对候选池打分，返回 expr → 分数（供排序；失败则全 0）。"""
+    import asyncio
     from .judge import judge_scoring
-    scores: Dict[str, float] = {}
-    for e in pool:
-        try:
-            r = judge_scoring(e, provider)
-            d = r.prediction if isinstance(r.prediction, dict) else {}
-            scores[e] = float(sum(int(v) for v in d.values())) if d else 0.0
-        except Exception:  # noqa: BLE001
-            scores[e] = 0.0
-    return scores
+
+    async def _score_all() -> Dict[str, float]:
+        scores: Dict[str, float] = {}
+        for e in pool:
+            try:
+                r = await judge_scoring(e, provider)
+                d = r.prediction if isinstance(r.prediction, dict) else {}
+                scores[e] = float(sum(int(v) for v in d.values())) if d else 0.0
+            except Exception:  # noqa: BLE001
+                scores[e] = 0.0
+        return scores
+
+    try:
+        return asyncio.run(_score_all())
+    except Exception:  # noqa: BLE001
+        return {e: 0.0 for e in pool}
 
 
 def _attach_composite_contribution(composite: Dict[str, object], steps: List[Dict[str, object]]) -> None:
@@ -257,9 +281,14 @@ def run_pipeline(
     if panel is None or panel.close.empty:
         raise ValueError("训练期面板为空")
 
-    # 1) 若未显式提供 val/test，按比例自动切分（防泄漏）
-    if val_panel is None and test_panel is None:
-        train_p, val_p, test_p = time_split(panel, config.train_frac, config.val_frac)
+    # 1) 若未显式提供 val/test，按比例自动切分（防泄漏）。
+    # 只传 val 或只传 test 时也必须对剩余段做自动切分，否则 train_p=全量 panel，
+    # 搜索/去重/打分会看到 "OOS" 期数据，指标实为样本内。
+    if val_panel is None or test_panel is None:
+        auto_train, auto_val, auto_test = time_split(panel, config.train_frac, config.val_frac)
+        train_p = auto_train
+        val_p = val_panel if val_panel is not None else auto_val
+        test_p = test_panel if test_panel is not None else auto_test
     else:
         train_p, val_p, test_p = panel, val_panel, test_panel
 
@@ -335,6 +364,14 @@ def run_pipeline(
                 step.test_sharpe = pf.get("sharpe_annual")
                 step.test_return = pf.get("total_return")
                 step.test_mdd = pf.get("max_drawdown")
+                step.test_net_sharpe = pf.get("net_sharpe_annual")
+                step.turnover_mean = pf.get("turnover_mean")
+                step.cost_ratio = pf.get("cost_ratio")
+                # 宽松闸门：换手超上限或净成本吃掉过度 → 标记（不移除展示）
+                if (config.max_turnover and config.max_turnover > 0
+                        and step.turnover_mean is not None
+                        and step.turnover_mean > config.max_turnover):
+                    step.high_turnover = True
                 step.daily_returns = [float(x) for x in pf.get("daily_returns") or []]
                 # 逐日截面 IC（供前端画 IC 时序，观察稳定性）
                 try:
@@ -368,6 +405,23 @@ def run_pipeline(
 
     # 7)（可选）复合组合：在 test 期把代表因子合成一个可交易 alpha 组合
     composite_res: Optional[Dict[str, object]] = None
+    if config.net_gate:
+        # 宽松净成本/换手闸门：把高换手或净成本吃光的因子从复合池剔除（仍留在展示）
+        has_turn_gate = config.max_turnover and config.max_turnover > 0
+        has_net_gate = config.min_net_sharpe and config.min_net_sharpe > 0
+        if has_turn_gate or has_net_gate:
+            _step_by_expr = {s["expression"]: s for s in steps}
+            filtered = []
+            for expr in rep_exprs:
+                st = _step_by_expr.get(expr, {})
+                if st.get("high_turnover"):
+                    continue
+                ns = st.get("test_net_sharpe")
+                if has_net_gate and ns is not None and ns < config.min_net_sharpe:
+                    continue
+                filtered.append(expr)
+            _logger.info("净成本闸门：%d→%d 个代表因子进入复合", len(rep_exprs), len(filtered))
+            rep_exprs = filtered
     if (config.run_composite and rep_exprs and test_p is not None
             and len(test_p.dates) >= config.n_groups):
         try:

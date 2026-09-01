@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from ..core.constant import Interval
@@ -55,7 +55,9 @@ def check_bars(bars: List[BarData], interval: Interval, freshness: timedelta | N
 
     # 新鲜度
     if freshness is not None:
-        now = datetime.now(tz=bars[-1].datetime.tzinfo)
+        # bar 约定为 naive UTC，用本地时钟在 UTC+8 环境会误判“年轻”8 小时
+        now = datetime.now(timezone.utc).replace(tzinfo=None) \
+            if bars[-1].datetime.tzinfo is None else datetime.now(tz=bars[-1].datetime.tzinfo)
         if now - bars[-1].datetime > freshness:
             rep.stale = True
             rep.issues.append("数据过期")

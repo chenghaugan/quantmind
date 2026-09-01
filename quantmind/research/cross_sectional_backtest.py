@@ -35,21 +35,32 @@ def _factor_scores(panel: Panel, factor_name: str, expression: str | None) -> pd
 
 
 def _run_portfolio(panel, scores, forward_periods, n_groups, long_short, cost_rate):
-    """得分面板 -> 每日横截面多空组合 -> 权益曲线 + 绩效。"""
+    """得分面板 -> 每日横截面多空组合 -> 权益曲线 + 绩效。
+
+    ``cost_rate`` 为**每单位换手**的单边成本（turnover-aware），即
+    ``cost_now = 0.5 * Σ|Δw| * cost_rate``，只在持仓权重变化时计费，
+    贴合真实截面组合撮合；因为逐日重排换手天然很高，扁平每期固定扣费会失真。
+
+    同时返回 gross（无成本，供研究展示）与 net（含换手成本，供门槛判定）两套曲线。
+    """
     n_symbols = len(panel.symbols)
     n_groups = max(2, min(n_groups, n_symbols))
     close = panel.close
     fwd = close.pct_change(forward_periods).shift(-forward_periods)
 
-    curve: list = []
+    gross_curve: list = []
+    net_curve: list = []
     port_ret: list = []
-    equity = 1.0
+    equity_g = equity_n = 1.0
+    turnover_list: list = []
+    prev_w: pd.Series | None = None
     for d in scores.index:
         s = scores.loc[d]
         r = fwd.loc[d]
         valid = s.notna() & r.notna()
         if valid.sum() < n_groups:
-            curve.append({"date": d, "equity": equity})
+            gross_curve.append({"date": d, "equity": equity_g})
+            net_curve.append({"date": d, "equity": equity_n})
             continue
         sv = s[valid]
         rv = r[valid]
@@ -62,14 +73,52 @@ def _run_portfolio(panel, scores, forward_periods, n_groups, long_short, cost_ra
         long_ret = float(rv[long_mask].mean())
         short_ret = float(rv[short_mask].mean())
         day_ret = (long_ret - short_ret) if long_short else long_ret
-        day_ret = day_ret - cost_rate
-        equity *= (1.0 + day_ret)
-        curve.append({"date": d, "equity": equity})
-        port_ret.append(day_ret)
 
-    analyzer = PerformanceAnalyzer()
-    perf = analyzer.analyze(curve, [])
-    return curve, port_ret, perf
+        # 权重向量（对齐 scores.columns，做多/做空等权）
+        w = pd.Series(0.0, index=scores.columns)
+        idx = sv.index.to_numpy()
+        w.loc[idx[long_mask.to_numpy()]] = 1.0 / max(int(long_mask.sum()), 1)
+        if long_short:
+            w.loc[idx[short_mask.to_numpy()]] = -1.0 / max(int(short_mask.sum()), 1)
+        # 换手感知成本：单边换手 = 0.5 * L1(|Δw|)
+        turnover = float(0.5 * (w - prev_w).abs().sum()) if prev_w is not None else 0.0
+        cost_now = turnover * cost_rate
+        turnover_list.append(turnover)
+
+        equity_g *= (1.0 + day_ret)
+        equity_n *= (1.0 + day_ret - cost_now)
+        gross_curve.append({"date": d, "equity": equity_g})
+        net_curve.append({"date": d, "equity": equity_n})
+        port_ret.append(day_ret)
+        prev_w = w
+
+    g_perf = PerformanceAnalyzer().analyze(gross_curve, [])
+    n_perf = PerformanceAnalyzer().analyze(net_curve, [])
+    return gross_curve, net_curve, port_ret, g_perf, n_perf, turnover_list
+
+
+def _portfolio_output(g_perf, n_perf, port_ret, turnover_list) -> Dict:
+    """把 gross（研究展示）与 net（门槛判定）组合成报告字典。"""
+    n_cost = max(0.0, g_perf.total_return - n_perf.total_return)
+    # 年化成本拖累（bps，组合总成本的年化近似）
+    cost_bps = (n_cost / abs(g_perf.total_return) * 1e4) if g_perf.total_return else 0.0
+    return {
+        # gross：仅用于研究展示（alpha 上界），未含交易成本
+        "sharpe": g_perf.sharpe,          # 兼容旧键名
+        "sharpe_annual": g_perf.sharpe,
+        "total_return": g_perf.total_return,
+        "max_drawdown": g_perf.max_drawdown,
+        "calmar": g_perf.calmar,
+        # net：含换手成本，供门槛判定
+        "net_sharpe_annual": n_perf.sharpe,
+        "net_total_return": n_perf.total_return,
+        "net_max_drawdown": n_perf.max_drawdown,
+        "net_calmar": n_perf.calmar,
+        "turnover_mean": float(sum(turnover_list) / len(turnover_list)) if turnover_list else 0.0,
+        "cost_ratio": (float(n_cost / abs(g_perf.total_return)) if g_perf.total_return else 0.0),
+        "cost_bps": round(cost_bps, 2),
+        "daily_returns": [float(x) for x in port_ret],
+    }
 
 
 def factor_expression_backtest(
@@ -90,7 +139,7 @@ def factor_expression_backtest(
     if panel.close.empty:
         raise ValueError("面板为空，无法回测")
     scores = _factor_scores(panel, "", expression)
-    curve, port_ret, perf = _run_portfolio(
+    gross, net, port_ret, g_perf, n_perf, turn = _run_portfolio(
         panel, scores, forward_periods, n_groups, long_short, cost_rate)
 
     e = FactorEvaluator()
@@ -100,9 +149,11 @@ def factor_expression_backtest(
         "factor": expression,
         "expression": expression,
         "n_symbols": len(panel.symbols),
-        "n_dates": len(curve),
+        "n_dates": len(gross),
         "ic_report": ic_rep.to_dict(),
-        "portfolio": {**perf.to_dict(), "daily_returns": [float(x) for x in port_ret]},
+        "portfolio": _portfolio_output(g_perf, n_perf, port_ret, turn),
+        "gross_curve": gross,
+        "net_curve": net,
     }
 
 
@@ -123,7 +174,9 @@ def cross_sectional_backtest(
     :param forward_periods: 持仓周期（根），收益用 close[t]→close[t+fp]。
     :param n_groups: 分组数；头组做多、尾组做空（等权）。
     :param long_short: True=多空组合，False=仅多头组合。
-    :param cost_rate: 每期双边成本近似（直接扣减组合收益），如 0.001。
+    :param cost_rate: 每单位换手的**单边**成本（turnover-aware），
+        实际计费 ``cost = 0.5 * Σ|Δw| * cost_rate``，只在权重变化时扣，
+        如 0.001；0=零成本（gross）。净指标见 ``portfolio.net_*``。
     :param expression: 可选任意 DSL 因子表达式（优先于 factor_name）。
     :returns: {factor, n_symbols, n_dates, ic_report, portfolio{...}}
     """
@@ -131,7 +184,7 @@ def cross_sectional_backtest(
         raise ValueError("面板为空，无法回测")
     label = expression or factor_name
     scores = _factor_scores(panel, factor_name, expression)
-    curve, port_ret, perf = _run_portfolio(
+    gross, net, port_ret, g_perf, n_perf, turn = _run_portfolio(
         panel, scores, forward_periods, n_groups, long_short, cost_rate)
 
     evaluator = FactorEvaluator()
@@ -148,11 +201,10 @@ def cross_sectional_backtest(
         "factor": label,
         "expression": expression,
         "n_symbols": len(panel.symbols),
-        "n_dates": len(curve),
+        "n_dates": len(gross),
         "ic_report": ic_rep.to_dict() if ic_rep else None,
-        "portfolio": {
-            **perf.to_dict(),
-            "daily_returns": [float(x) for x in port_ret],
-        },
+        "portfolio": _portfolio_output(g_perf, n_perf, port_ret, turn),
+        "gross_curve": gross,
+        "net_curve": net,
     }
 

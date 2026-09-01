@@ -5,6 +5,11 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     TZ=Asia/Shanghai
 
+# 使用阿里云 Debian 镜像（无需代理）
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null; \
+    true
+
 # 系统依赖 + 中文时区（真实行情时间处理必须）
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential curl git tzdata \
@@ -17,8 +22,10 @@ WORKDIR /app
 # 拷全部源码（开发时由 compose 卷挂载覆盖，实现热更新）
 COPY . .
 
-# 安装项目及全部依赖（editable，确保 import 始终指向 /app/quantmind）
-RUN pip install --no-cache-dir --upgrade pip \
+# 使用阿里云 PyPI 镜像安装依赖
+RUN pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ \
+    && pip config set global.trusted-host mirrors.aliyun.com \
+    && pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -e .
 
 EXPOSE 8000 8501

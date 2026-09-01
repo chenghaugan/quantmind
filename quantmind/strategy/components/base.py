@@ -93,8 +93,12 @@ class PortfolioModel(Protocol):
 class RiskModel(Protocol):
     """风控过滤。"""
 
-    def apply(self, target: Optional[float], bar: BarData, context=None) -> Optional[float]:
-        """按风控约束调整目标仓位；返回 None 表示拒绝本次调仓。"""
+    def apply(self, target: Optional[float], bar: BarData, context=None,
+              vt_symbol: Optional[str] = None) -> Optional[float]:
+        """按风控约束调整目标仓位；返回 None 表示拒绝本次调仓。
+
+        ``vt_symbol``：本次调仓的目标标的（多标的组合下可能与 bar 的标的不同）。
+        """
         ...
 
 

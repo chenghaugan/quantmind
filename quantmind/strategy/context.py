@@ -64,8 +64,12 @@ class StrategyContext(ABC):
         sym, exch = parse_vt_symbol(vt_symbol)
         direction = Direction.LONG if delta > 0 else Direction.SHORT
         volume = abs(delta)
-        increasing = abs(target) >= abs(cur_vol)
-        offset = Offset.OPEN if increasing else Offset.CLOSE
+        if cur_vol != 0 and cur_vol * target < 0:
+            # 精确反手（异号）：实际含平仓动作，按 CLOSE 计费/传网关（由 OffsetConverter
+            # 拆分平仓+开仓量），按 OPEN 会让成本模型用错费率、实盘 offset 语义错误
+            offset = Offset.CLOSE
+        else:
+            offset = Offset.OPEN if abs(target) >= abs(cur_vol) else Offset.CLOSE
         req = OrderRequest(
             symbol=sym,
             exchange=_exch_from_str(exch),

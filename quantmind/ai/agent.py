@@ -151,8 +151,16 @@ class AutoResearchAgent:
         return brief
 
     async def _guard(self, out: AutoResearchOutput, brief: Optional[KnowledgeBrief]) -> bool:
-        """方法论知识层护栏：无法忠实实现时，短路返回并回问用户，不编造因子。"""
+        """方法论知识层护栏：无法忠实实现时，短路返回并回问用户，不编造因子。
+
+        离线 MockProvider 例外：Mock 是确定性回退，无法也不应追问用户，
+        直接降级继续，保证「无 key / 离线可跑」契约成立。
+        """
         if brief is None or brief.can_implement:
+            return False
+        if isinstance(self.provider, MockProvider):
+            self._log(out, -1, "knowledge_guard_skipped_mock", input="",
+                      output="Mock 不回问，直接降级继续")
             return False
         out.needs_input = list(brief.missing) or [
             "该方法论无法从现有资料忠实实现，请补充其定义与量化实现要点。"
@@ -371,7 +379,7 @@ class AutoResearchAgent:
                     status=(HypothesisStatus.VERIFIED if best_ic == best_ic
                             and abs(best_ic) >= verify_threshold else HypothesisStatus.REJECTED),
                     evidence=(f"CoT 搜索 best_ic={best_ic:.4f}, "
-                              f"steps={len(res.steps)}" if best_ic == best_ic
+                              f"rounds={res.rounds}" if best_ic == best_ic
                               else "CoT 搜索无有效 IC"),
                 )
                 out.hypotheses.append(h_search)

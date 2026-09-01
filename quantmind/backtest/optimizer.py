@@ -29,8 +29,10 @@ def _pick(report, metric: str) -> float:
         return report.total_return
     if metric == "calmar":
         return report.calmar
-    if metric == "max_drawdown":  # 越小越好，取负
-        return -report.max_drawdown
+    if metric == "max_drawdown":
+        # max_drawdown 为非正值（如 -0.1 表示 10% 回撤）；搜索框架按「最大化」
+        # 选优，直接保留负号 → 回撤越小得分越高（取负反而会选中最大回撤）
+        return report.max_drawdown
     return report.sharpe
 
 
@@ -62,6 +64,22 @@ def grid_search(
     return OptimizeResult(best_setting=best_setting, best_metric=round(best_metric, 4), results=results)
 
 
+def _grid_values(low: float, high: float, step):
+    """生成区间 [low, high] 上以 step 步进的值，兼容浮点（range 要求 int）。
+
+    用于 Optuna 缺省时的网格回退。整数入参退化为等价 ``range``。
+    """
+    if all(isinstance(v, int) for v in (low, high, step)):
+        return list(range(low, high + 1, step))
+    vals: List[float] = []
+    v = float(low)
+    step = float(step)
+    while v <= float(high) + 1e-9:
+        vals.append(round(v, 6))
+        v += step
+    return vals
+
+
 def optuna_optimize(
     strategy_class,
     data: Dict[str, List[BarData]],
@@ -76,7 +94,7 @@ def optuna_optimize(
         import optuna  # type: ignore
     except ImportError:
         _logger.warning("未安装 optuna，回退网格搜索")
-        grid = {k: list(range(low, high + 1, step)) for k, (low, high, step) in param_defs.items()}
+        grid = {k: _grid_values(low, high, step) for k, (low, high, step) in param_defs.items()}
         return grid_search(strategy_class, data, vt_symbol, grid, metric, sizes)
 
     def objective(trial):

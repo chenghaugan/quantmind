@@ -24,7 +24,9 @@ class DualMaStrategy(CtaTemplate):
         self.size = 1          # 合约乘数（期货 rb=10 / IF=300，由外部传入）
         self.max_pos = 1.0     # 最大仓位比例（0~1）
         self.fixed_size = 1    # 单次调仓手数（=size*max_pos 的目标净仓比例由 set_target 决定）
-        self.am = ArrayManager(self.slow + 10)
+        # ArrayManager 缓冲按**应用 settings 后**的窗口惰性构建（与 ChanThirdBuyStrategy 同款修复）：
+        # 提前按默认 slow+10 定长会让 setting 调大窗口后 sma 恒返回 0，策略静默变成恒多/恒空
+        self.am = None
         self.last_target = 0.0
         super().__init__(context, setting)
 
@@ -32,6 +34,8 @@ class DualMaStrategy(CtaTemplate):
         pass
 
     def on_bar(self, bar: BarData) -> None:
+        if self.am is None:
+            self.am = ArrayManager(max(self.fast, self.slow) + 5)
         self.am.update_bar(bar)
         if not self.am.inited:
             return
@@ -43,6 +47,9 @@ class DualMaStrategy(CtaTemplate):
             target = -self.max_pos
         target_vol = target * self.size
         if target_vol != self.last_target:
-            self.set_target(bar.vt_symbol, target_vol)
+            oid = self.set_target(bar.vt_symbol, target_vol)
+            if oid == "":
+                # 风控拒单：保留 last_target，下一根 bar 重试
+                return
             self.last_target = target_vol
             self.pos = target_vol

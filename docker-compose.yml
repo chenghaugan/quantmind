@@ -1,10 +1,19 @@
 # 全容器化：timescaledb + redis + api(FastAPI) + web(Streamlit)
 # 源码挂卷 → 改码免重建；仅改依赖时 docker compose build api web
 # 热更新：uvicorn --reload / streamlit --server.runOnSave
+#
+# 端口已避开宿主机其他项目：
+#   5435 (TimescaleDB, 避开 investment-postgres 5432 / investment-pg 5434)
+#   6380 (Redis, 避开 redis-newapi 内部 6379)
+#   8001 (API, 避开 portainer 8000)
+#   8502 (Web, 预留安全端口)
 
 services:
   timescaledb:
     image: timescale/timescaledb:latest-pg16
+    container_name: quantmind-timescaledb
+    # 共享内存：默认 64MB 会导致大表并行查询报 "could not resize shared memory"
+    shm_size: 1g
     environment:
       POSTGRES_DB: quantmind
       POSTGRES_USER: qm
@@ -13,51 +22,89 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     ports:
-      - "5432:5432"
+      - "5435:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U qm -d quantmind"]
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
+    container_name: quantmind-redis
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
 
   api:
     build: .
+    container_name: quantmind-api
+    # 透传宿主机 .env（含 QM_BACKTEST_COST/TAVILY_API_KEY/QM_LOCAL_*_ROOT 等全部配置项），
+    # 否则 .env.example 中文档化的变量在容器内静默失效；上方 environment 优先级更高。
+    # required: false —— .env 不存在时不报错（需 compose v2.24+）
+    env_file:
+      - path: .env
+        required: false
     command: ["uvicorn", "quantmind.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     environment:
-      QM_DB_URL: postgresql://qm:${QM_DB_PASSWORD:-quantmind}@timescaledb:5432/quantmind
+      QM_DB_URL: postgresql+asyncpg://qm:${QM_DB_PASSWORD:-quantmind}@timescaledb:5432/quantmind
       QM_REDIS_URL: redis://redis:6379/0
       QM_LLM_PROVIDER: ${QM_LLM_PROVIDER:-mock}
+      QM_LLM_API_KEY: ${QM_LLM_API_KEY:-}
+      QM_LLM_BASE_URL: ${QM_LLM_BASE_URL:-}
+      QM_LLM_MODEL: ${QM_LLM_MODEL:-}
+      QM_LLM_TIMEOUT: ${QM_LLM_TIMEOUT:-300}
       QM_LOG_LEVEL: ${QM_LOG_LEVEL:-INFO}
+      QM_TQSDK_USER: ${QM_TQSDK_USER:-}
+      QM_TQSDK_PASS: ${QM_TQSDK_PASS:-}
+      QM_MARKET_WARM_ENABLED: ${QM_MARKET_WARM_ENABLED:-false}
+      QM_MARKET_WARM_BATCH: ${QM_MARKET_WARM_BATCH:-50}
+      QM_MARKET_WARM_MAX_SYMBOLS: ${QM_MARKET_WARM_MAX_SYMBOLS:-5000}
+      # 清除代理环境变量，避免 MCP/外部连接超时
+      http_proxy: ""
+      https_proxy: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
     volumes:
-      - ./quantmind:/app/quantmind          # ★ 挂卷：热更新
+      - ./quantmind:/app/quantmind          # ★ 源码挂卷：热更新
+      - ./data_cache:/app/data_cache        # 行情仓库持久化
+      - ./config:/app/config                # 配置文件
     depends_on:
       timescaledb:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "8001:8000"
+    restart: unless-stopped
 
   web:
     build: .
-    command: ["streamlit", "run", "web/streamlit_app.py",
+    container_name: quantmind-web
+    command: ["streamlit", "run", "quantmind/web/streamlit_app.py",
               "--server.address", "0.0.0.0", "--server.port", "8501",
               "--server.runOnSave", "true"]
     environment:
       QM_API_URL: http://api:8000
+      # 清除代理环境变量
+      http_proxy: ""
+      https_proxy: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
     volumes:
-      - ./quantmind:/app/quantmind          # ★ 挂卷：热更新
+      - ./quantmind:/app/quantmind          # ★ 源码挂卷：热更新
+      - ./data_cache:/app/data_cache        # ★ 与 api 共享历史数据（删除/展示同一文件）
     depends_on:
       - api
     ports:
-      - "8501:8501"
+      - "8502:8501"
+    restart: unless-stopped
 
 volumes:
   pgdata:

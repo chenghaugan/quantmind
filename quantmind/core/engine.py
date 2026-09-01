@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Awaitable, Callable, Dict, List, Optional
 
 from .event import Event, EventType
@@ -29,6 +30,7 @@ class EventEngine:
         self._general_handlers: List[EventHandler] = []
         self._task: Optional[asyncio.Task] = None
         self._running = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ---- 注册 ----
     def register(self, event_type: EventType, handler: EventHandler) -> None:
@@ -46,6 +48,18 @@ class EventEngine:
 
     # ---- 入队 ----
     def put(self, event: Event) -> None:
+        """线程安全入队：跨线程（如 to_thread 工作线程）投递经事件循环调度。"""
+        loop = self._loop
+        if (loop is not None and loop.is_running()
+                and threading.current_thread() is not threading.main_thread()):
+            try:
+                loop.call_soon_threadsafe(self._put_nowait, event)
+                return
+            except RuntimeError:
+                pass  # 事件循环已关闭：退回直接入队
+        self._put_nowait(event)
+
+    def _put_nowait(self, event: Event) -> None:
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
@@ -59,6 +73,7 @@ class EventEngine:
         if self._running:
             return
         self._running = True
+        self._loop = asyncio.get_running_loop()
         self._task = asyncio.create_task(self._run(), name="event-engine")
         _logger.info("EventEngine 启动")
 

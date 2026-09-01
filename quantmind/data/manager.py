@@ -100,6 +100,9 @@ class DataManager:
         _sink: Dict[str, str] = {}
         bars = await self.registry.get_bar_data(req, source_sink=_sink)
         src_name = _sink.get(req.symbol, "")
+        # 部分数据源（新浪/腾讯 fallback 等）无视 start/end 返回全量历史，
+        # 统一在此按请求窗口裁剪，保证各层返回口径一致（防前视/防越界）。
+        bars = self._clip_bars(bars, req)
 
         # 4) 回写（容错）：真实源数据落本地仓库 + 持久库
         if bars:
@@ -120,3 +123,21 @@ class DataManager:
         if source_sink is not None:
             source_sink[req.symbol] = src_name or "unknown"
         return bars
+
+    @staticmethod
+    def _clip_bars(bars: List[BarData], req: HistoryRequest) -> List[BarData]:
+        """按请求窗口裁剪 bars（兼容 tz-aware/naive 混合比较）。"""
+        if not bars:
+            return bars
+
+        def _norm(dt):
+            return dt.replace(tzinfo=None) if dt.tzinfo else dt
+
+        start = _norm(req.start) if req.start is not None else None
+        end = _norm(req.end) if req.end is not None else None
+        out = bars
+        if start is not None:
+            out = [b for b in out if _norm(b.datetime) >= start]
+        if end is not None:
+            out = [b for b in out if _norm(b.datetime) <= end]
+        return out

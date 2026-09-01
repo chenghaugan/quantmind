@@ -48,7 +48,7 @@ class MomentumCtaStrategy(CtaTemplate):
         if not self.am.inited:
             return
         closes = self.am.close
-        mom = closes[-1] / closes[-self.window] - 1.0
+        mom = closes[-1] / closes[-self.window - 1] - 1.0  # 跨 window 个收益区间（原 [-window] 只有 window-1 个）
         if mom > self.threshold:
             target = self.max_pos * self.size
         elif mom < -self.threshold:
@@ -56,7 +56,10 @@ class MomentumCtaStrategy(CtaTemplate):
         else:
             target = 0.0
         if target != self.last_target:
-            self.set_target(bar.vt_symbol, target)
+            oid = self.set_target(bar.vt_symbol, target)
+            if oid == "":
+                # 风控拒单：保留 last_target，下一根 bar 重试
+                return
             self.last_target = target
             self.pos = target
 
@@ -118,9 +121,10 @@ class ChanFirstBuyStrategy(CtaTemplate):
         if down_trend and self.prev_low is not None:
             prev_price, prev_roc, _ = self.prev_low
             if cur_low < prev_price and cur_roc > prev_roc:
-                self._set(bar.vt_symbol, self.max_pos * self.size)
-                self.entry_low = cur_low
-                self.prev_low = (cur_low, cur_roc, cur_low_idx)
+                # 拒单时不更新 entry_low/prev_low（预支更新会让本次背驰买点永久丢失）
+                if self._set(bar.vt_symbol, self.max_pos * self.size):
+                    self.entry_low = cur_low
+                    self.prev_low = (cur_low, cur_roc, cur_low_idx)
                 return
         # 更新低点记录（价格创新低时更新）
         if self.prev_low is None or cur_low < self.prev_low[0]:
@@ -131,11 +135,15 @@ class ChanFirstBuyStrategy(CtaTemplate):
             if last > ma or (self.entry_low is not None and last < self.entry_low):
                 self._set(bar.vt_symbol, 0.0)
 
-    def _set(self, vt_symbol: str, target: float) -> None:
+    def _set(self, vt_symbol: str, target: float) -> bool:
         if target != self.last_target:
-            self.set_target(vt_symbol, target)
+            oid = self.set_target(vt_symbol, target)
+            if oid == "":
+                # 风控拒单：保留 last_target，下一根 bar 重试
+                return False
             self.last_target = target
             self.pos = target
+        return True
 
 
 class BollingerRecoverStrategy(CtaTemplate):
@@ -213,18 +221,29 @@ class BollingerRecoverStrategy(CtaTemplate):
             if close > middle or (self.entry_price and close > self.entry_price * (1 + self.stop_loss)):
                 target = 0.0
 
+        fired = None  # 本根触发的入场信号（拒单时需回滚状态以便重试）
         if target == 0.0:
             if signal_long:
                 target = self.max_pos * self.size
-                self.entry_price = close
+                fired = "long"
             elif signal_short:
                 target = -self.max_pos * self.size
-                self.entry_price = close
+                fired = "short"
 
         if target != self.last_target:
-            self.set_target(bar.vt_symbol, target)
+            oid = self.set_target(bar.vt_symbol, target)
+            if oid == "":
+                # 风控拒单：保留 last_target，下一根 bar 重试；
+                # 回穿信号回滚为“刚刚触发”状态，否则本次入场永久丢失
+                if fired == "long":
+                    self._below = 0
+                elif fired == "short":
+                    self._above = 0
+                return
             self.last_target = target
             self.pos = target
+            if fired == "long" or fired == "short":
+                self.entry_price = close
             if target == 0.0:
                 self.entry_price = None
 
@@ -246,6 +265,17 @@ DEFAULT_SETTINGS: Dict[str, dict] = {
                        "size": 1, "max_pos": 1.0},
     "bollinger_recover": {"window": 20, "k": 2.0, "recover_days": 5,
                            "stop_loss": 0.05, "size": 1, "max_pos": 1.0},
+}
+
+#: 预置模板的默认参数搜索网格（参数优化用；围绕 DEFAULT_SETTINGS 默认值展开）
+DEFAULT_PARAM_GRIDS: Dict[str, dict] = {
+    "momentum": {"window": [10, 20, 30], "threshold": [0.02, 0.03, 0.04]},
+    "chan_first_buy": {"trend_window": [40, 60, 80], "low_window": [15, 20, 25],
+                       "roc_window": [8, 10, 12]},
+    "chan_third_buy": {"trend_window": [40, 60, 80], "break_window": [15, 20, 25]},
+    "bollinger_recover": {"window": [15, 20, 30], "k": [1.5, 2.0, 2.5],
+                          "stop_loss": [0.03, 0.05, 0.08]},
+    "dual_ma": {"fast": [3, 5, 8], "slow": [15, 20, 30]},
 }
 
 #: idea → 策略名 关键词识别表（顺序敏感：先匹配更具体的）

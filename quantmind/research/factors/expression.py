@@ -37,20 +37,40 @@ _OPS = {
     ast.LtE: operator.le,
     ast.Eq: operator.eq,
     ast.NotEq: operator.ne,
-    ast.And: lambda a, b: a and b,
-    ast.Or: lambda a, b: a or b,
+    ast.And: lambda a, b: a & b,
+    ast.Or: lambda a, b: a | b,
 }
 
+def _pos_int(n, name: str = "n") -> int:
+    """窗口/位移参数校验：必须为正整数（防负偏移引入未来数据）。"""
+    v = int(n)
+    if v <= 0:
+        raise ValueError(f"{name} 必须为正整数，禁止负偏移（前视）：{n}")
+    return v
+
+
+def _op_ref(x, n):
+    return x.shift(_pos_int(n, "ref"))
+
+
+def _op_momentum(x, n):
+    return x / x.shift(_pos_int(n, "momentum")) - 1.0
+
+
+def _op_pct_change(x, n):
+    return x.pct_change(_pos_int(n, "pct_change"))
+
+
 _SAFE_FUNCS = {
-    "ref": lambda x, n: x.shift(int(n)),
+    "ref": _op_ref,
     "mean": lambda x, n: x.rolling(int(n), min_periods=2).mean(),
     "std": lambda x, n: x.rolling(int(n), min_periods=2).std(),
     "sma": lambda x, n: x.rolling(int(n), min_periods=2).mean(),
     "ema": lambda x, n: x.ewm(span=int(n), adjust=False).mean(),
-    "zscore": lambda x, n: (x - x.rolling(int(n), min_periods=20).mean())
-    / (x.rolling(int(n), min_periods=20).std().replace(0, pd.NA)),
-    "pct_change": lambda x, n: x.pct_change(int(n)),
-    "momentum": lambda x, n: x / x.shift(int(n)) - 1.0,
+    "zscore": lambda x, n: (x - x.rolling(int(n), min_periods=min(int(n), 2)).mean())
+    / (x.rolling(int(n), min_periods=min(int(n), 2)).std().replace(0, pd.NA)),
+    "pct_change": _op_pct_change,
+    "momentum": _op_momentum,
     "roll_corr": lambda a, b, n: a.rolling(int(n)).corr(b),
     "abs": lambda x: x.abs(),
     "log": lambda x: x.clip(lower=1e-9).apply(lambda v: pd.NA if pd.isna(v) else __import__("math").log(v)),
@@ -81,7 +101,8 @@ def eval_factor_expression(expr: str, df: pd.DataFrame) -> pd.Series:
     result = _eval_node(tree.body, env)
     if not isinstance(result, pd.Series):
         result = pd.Series(result)
-    return result.fillna(0.0)
+    # 先清 ±inf（如除以 0），再填 NaN→0，避免 inf 毒化下游 IC/评估
+    return result.replace([float("inf"), float("-inf")], float("nan")).fillna(0.0)
 
 
 def _eval_node(node: ast.AST, env: dict) -> object:
@@ -116,6 +137,4 @@ def _eval_node(node: ast.AST, env: dict) -> object:
         raise ExpressionError(f"未知变量: {node.id}")
     if isinstance(node, ast.Constant):
         return node.value
-    if isinstance(node, ast.Num):  # 兼容老版本
-        return node.n
     raise ExpressionError(f"不支持的语法节点: {type(node).__name__}")

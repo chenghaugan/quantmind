@@ -1,4 +1,6 @@
 """认证授权模块"""
+import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 from jose import JWTError, jwt
@@ -6,8 +8,14 @@ from passlib.context import CryptContext
 from fastapi import HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# JWT 配置
-SECRET_KEY = "quantmind-secret-key-change-in-production"  # 生产环境需修改
+# JWT 配置（生产环境必须通过环境变量设置强密钥）
+SECRET_KEY = os.environ.get("QUANTMIND_JWT_SECRET", "quantmind-secret-key-change-in-production")
+if not os.environ.get("QUANTMIND_JWT_SECRET"):
+    import logging
+    logging.getLogger("quantmind.api.auth").warning(
+        "未设置 QUANTMIND_JWT_SECRET，正在使用默认 JWT 密钥——token 可被伪造，"
+        "生产环境请通过环境变量设置强密钥"
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24小时
 
@@ -101,3 +109,8 @@ def authenticate_user(username: str, password: str) -> Optional[Dict]:
     if not verify_password(password, user["hashed_password"]):
         return None
     return user
+
+
+async def authenticate_user_async(username: str, password: str) -> Optional[Dict]:
+    """异步认证：bcrypt verify 是刻意慢的 CPU 操作，放线程池避免阻塞事件循环。"""
+    return await asyncio.to_thread(authenticate_user, username, password)

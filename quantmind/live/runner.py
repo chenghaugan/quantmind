@@ -98,13 +98,29 @@ class LiveEngine(StrategyContext):
         self.order_manager.add_order(req, order_id)
         return order_id
 
-    def get_position(self, vt_symbol: str) -> PositionData:
+    def get_position(self, vt_symbol: str, include_frozen: bool = True) -> PositionData:
+        """返回持仓；默认计入在途挂单（预期净持仓）。
+
+        策略 ``set_target`` 的 delta 基于该值计算，可避免在途单未成交时
+        重复发出同向全量委托；风控/对账需要纯已成交持仓时传 ``include_frozen=False``。
+        """
         pos = self.positions.get(vt_symbol)
-        if pos is not None:
-            return pos
-        sym, exch = vt_symbol.rsplit(".", 1)
-        return PositionData(symbol=sym, exchange=Exchange(exch),
-                            direction=Direction.NET, volume=0.0)
+        if pos is None:
+            sym, exch = vt_symbol.rsplit(".", 1)
+            base = PositionData(symbol=sym, exchange=Exchange(exch),
+                                direction=Direction.NET, volume=0.0)
+        else:
+            base = pos
+        if not include_frozen:
+            return base
+        frozen = self.order_manager.frozen_volume(vt_symbol)
+        if abs(frozen) < 1e-9:
+            return base
+        # 已成交 + 在途 = 预期净持仓（不修改存储的持仓对象）
+        return PositionData(
+            symbol=base.symbol, exchange=base.exchange, direction=base.direction,
+            volume=base.volume + frozen, price=base.price,
+        )
 
     def get_history(self, vt_symbol: str, count: int) -> List[BarData]:
         return self._history.get(vt_symbol, [])[-count:]

@@ -15,6 +15,7 @@ CTP/XTP/IB 桩只能打日志、模拟即时回执，无法在无网络/无凭�
 """
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 from datetime import datetime, timezone
@@ -31,6 +32,9 @@ from ..core.gateway import (
 from ..core.object import AccountData, OrderData, PositionData, TradeData
 
 _logger = logging.getLogger("quantmind.live.sim")
+
+# 全局单调序列号：保证同毫秒内多笔成交的 trade_id 唯一
+_trade_seq = itertools.count()
 UTC = timezone.utc
 
 
@@ -57,7 +61,10 @@ def simulate_one_trade(
     trade = TradeData(
         gateway_name=gateway_name,
         symbol=req.symbol, exchange=req.exchange,
-        order_id=order_id, trade_id=f"{gateway_name}-{int(time.time() * 1000)}",
+        order_id=order_id,
+        # 同毫秒多笔成交（不同 order）会撞 id 被 order_manager 幂等去重丢弃，
+        # 追加全局单调序列号保证唯一
+        trade_id=f"{gateway_name}-{int(time.time() * 1000)}-{next(_trade_seq)}",
         direction=req.direction, offset=req.offset,
         price=px, volume=vol,
         datetime=datetime.now(UTC),
@@ -190,6 +197,9 @@ class SimGateway(BaseGateway):
         new = cur + signed
         if new == 0:
             pos.price = 0.0
+        elif cur == 0 or cur * new < 0:
+            # 反手（穿越零仓）：新方向以最新成交价计成本
+            pos.price = price
         elif abs(new) > abs(cur):
             added = abs(new) - abs(cur)
             pos.price = (pos.price * abs(cur) + price * added) / abs(new)

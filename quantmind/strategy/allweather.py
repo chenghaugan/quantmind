@@ -63,5 +63,8 @@ class VolTargetStrategy(CtaTemplate):
             return
         t = float(self._target.iloc[self._idx])
         self._idx += 1
-        self.set_target(bar.vt_symbol, t * self.size)
+        oid = self.set_target(bar.vt_symbol, t * self.size)
+        if oid == "":
+            # 风控拒单：不更新 pos，下一根 bar 重试
+            return
         self.pos = t * self.size

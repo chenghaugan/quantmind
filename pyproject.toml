@@ -29,6 +29,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "python-jose[cryptography]>=3.3",
     "passlib[bcrypt]>=1.7",
+    "bcrypt<4.1",
+    "tqsdk>=3.10",
+    "efinance>=0.4",
 ]
 
 [project.optional-dependencies]

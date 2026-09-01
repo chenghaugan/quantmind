@@ -257,7 +257,7 @@ with g1:
                     width="stretch", key="bt_g1")
 with g2:
     st.plotly_chart(create_gauge(abs(mdd), "最大回撤（红线 30%）", vmin=0, vmax=0.6,
-                                 good=0.0, height=220),
+                                 good=0.30, lower_is_better=True, height=220),
                     width="stretch", key="bt_g2")
 
 # 水下回撤曲线 — 全宽展示

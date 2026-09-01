@@ -25,10 +25,15 @@ def run_strategy(
     gateway_name: str = "ctp",
     gateway_settings: Optional[dict] = None,
     cost=None,
+    commission: Optional[float] = None,
+    slippage: Optional[float] = None,
+    warmup_bars: int = 0,
 ) -> dict:
     """按模式运行策略，返回结果字典。
 
     重引擎（BacktestEngine/PaperEngine/LiveEngine）延迟导入以打破循环依赖。
+    ``commission``/``slippage`` 仅在 ``cost`` 为空（旧式单一费率）时生效；
+    传入 0 且 ``cost=False`` 即可得到干净的零成本回测，用于量化成本拖累。
     """
     # 延迟导入，避免 backtest.engine <-> strategy 循环
     from ..backtest.engine import BacktestEngine
@@ -42,7 +47,10 @@ def run_strategy(
         limit_pct = (setting or {}).get("limit_pct", None)
         eng = BacktestEngine(data, sizes=sizes, event_engine=event_engine,
                              exclude_limit=exclude_limit, limit_pct=limit_pct,
-                             cost_table=cost)
+                             cost_table=cost,
+                             commission=commission if commission is not None else 0.0002,
+                             slippage=slippage if slippage is not None else 0.0,
+                             warmup_bars=warmup_bars)
         eng.add_strategy(strategy_class, vt_symbol, setting)
         report = eng.run()
         return {

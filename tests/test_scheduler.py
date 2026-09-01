@@ -143,9 +143,33 @@ def test_market_warm_warms_pending_batch(monkeypatch):
         ))
     # 固定全市场清单：A股 3 个 + 港股 1 个（绕过 akshare，patch 到源模块）
     import quantmind.data.feed.market_universe as _mu
+    _mkts = {"A": ["600519.SSE", "000001.SZSE", "300750.SZSE"], "HK": ["00700.HKEX"]}
     monkeypatch.setattr(
-        _mu, "discover_all",
-        lambda cap_a=None, cap_hk=None: ["600519.SSE", "000001.SZSE", "300750.SZSE", "00700.HKEX"])
+        _mu, "discover_market",
+        lambda market, cap=6000: _mkts.get(market, []))
+
+    # 新版 _warm_single：A股走腾讯(_fetch_stock_bars)、港股走 EmHkFeed，patch 掉以免联网
+    async def _fake_fetch(symbol, exchange, interval_str):
+        return [BarData(
+            symbol=symbol, exchange=exchange, interval=Interval.DAILY,
+            datetime=datetime(2023, 1, 1, tzinfo=UTC),
+            open_price=1.0, high_price=1.0, low_price=1.0, close_price=1.0,
+            volume=1.0, open_interest=0.0, turnover=0.0,
+        )]
+    import quantmind.api.stock_download as _sd
+    monkeypatch.setattr(_sd, "_fetch_stock_bars", _fake_fetch)
+
+    class _FakeHk:
+        async def fetch_bar_data(self, req):
+            return [BarData(
+                symbol=req.symbol, exchange=req.exchange, interval=Interval.DAILY,
+                datetime=datetime(2023, 1, 1, tzinfo=UTC),
+                open_price=1.0, high_price=1.0, low_price=1.0, close_price=1.0,
+                volume=1.0, open_interest=0.0, turnover=0.0,
+            )]
+    import quantmind.data.feed.em_hk as _em_hk
+    monkeypatch.setattr(_em_hk, "EmHkFeed", lambda: _FakeHk())
+
     # 用一个 fake dm：手动构造注册表+store+disk_cache
     import tempfile
     feed = _FakeFeed()
@@ -155,9 +179,14 @@ def test_market_warm_warms_pending_batch(monkeypatch):
         dm = DataManager(reg, InMemoryStore(), disk_cache=dc)
         result = asyncio.run(_job_market_warm({"dm": dm, "ee": None}))
         assert result["action"] == "market_warm"
-        assert result["warmed"] == 2          # 只预热 batch=2 个
-        assert result["pending_left"] == 2    # 4 个 - 2 = 剩余 2
+        # A股 3 取 batch=2，港股 1 取 1 → 本趟共 3；A股剩 1、港股剩 0 → pending_left=1
+        assert result["warmed"] == 3
+        assert result["pending_left"] == 1
         assert result.get("skipped") is None  # 非跳过路径不返回 skipped
+        # 分市场明细：A 已按 batch 截断，HK 全部建库
+        assert result["by_market"]["A"]["target"] == 2
+        assert result["by_market"]["A"]["pending_left"] == 1
+        assert result["by_market"]["HK"]["done"] is True
 
 
 def _flat_settings(**kw):
@@ -167,6 +196,67 @@ def _flat_settings(**kw):
             self.__dict__.update(d)
     s = _S(kw)
     return lambda: s
+
+
+def test_market_warm_full_builds_all(monkeypatch):
+    """full=True 时一次把所有未缓存标的（A股+港股）全部建完，不再只建 batch 个。"""
+    import asyncio
+    from datetime import datetime, timezone
+    from quantmind.api.scheduler import _job_market_warm
+    from quantmind.core.constant import Exchange, Interval
+    from quantmind.core.object import BarData
+    from quantmind.data import DataManager, InMemoryStore
+    from quantmind.data.feed.base import BaseDataFeed, HistoryRequest
+    from quantmind.data.feed.registry import DataFeedRegistry
+    from quantmind.data.store.disk_cache import DiskBarCache
+
+    UTC = timezone.utc
+
+    class _FakeFeed(BaseDataFeed):
+        name = "fake"
+        async def fetch_bar_data(self, req):
+            return []
+
+    monkeypatch.setattr(
+        "quantmind.config.get_settings", _flat_settings(
+            market_warm_enabled=True, market_warm_batch=2, market_warm_max_symbols=1000,
+        ))
+    import quantmind.data.feed.market_universe as _mu
+    _mkts = {"A": ["600519.SSE", "000001.SZSE", "300750.SZSE"], "HK": ["00700.HKEX"]}
+    monkeypatch.setattr(_mu, "discover_market", lambda market, cap=6000: _mkts.get(market, []))
+
+    async def _fake_fetch(symbol, exchange, interval_str):
+        return [BarData(
+            symbol=symbol, exchange=exchange, interval=Interval.DAILY,
+            datetime=datetime(2023, 1, 1, tzinfo=UTC),
+            open_price=1.0, high_price=1.0, low_price=1.0, close_price=1.0,
+            volume=1.0, open_interest=0.0, turnover=0.0,
+        )]
+    import quantmind.api.stock_download as _sd
+    monkeypatch.setattr(_sd, "_fetch_stock_bars", _fake_fetch)
+    class _FakeHk:
+        async def fetch_bar_data(self, req):
+            return [BarData(
+                symbol=req.symbol, exchange=req.exchange, interval=Interval.DAILY,
+                datetime=datetime(2023, 1, 1, tzinfo=UTC),
+                open_price=1.0, high_price=1.0, low_price=1.0, close_price=1.0,
+                volume=1.0, open_interest=0.0, turnover=0.0,
+            )]
+    import quantmind.data.feed.em_hk as _em_hk
+    monkeypatch.setattr(_em_hk, "EmHkFeed", lambda: _FakeHk())
+
+    import tempfile
+    reg = DataFeedRegistry(); reg.register(_FakeFeed(), priority=10)
+    with tempfile.TemporaryDirectory() as td:
+        dc = DiskBarCache(td)
+        dm = DataManager(reg, InMemoryStore(), disk_cache=dc)
+        result = asyncio.run(_job_market_warm({"dm": dm, "ee": None}, full=True))
+        # full=True：A股 3 只全部 + 港股 1 只全部 = 4 只，pending_left=0
+        assert result["warmed"] == 4
+        assert result["pending_left"] == 0
+        assert result["done"] is True
+        assert result["by_market"]["A"]["target"] == 3
+        assert result["by_market"]["A"]["pending_left"] == 0
 
 
 @pytest.mark.skipif(not _aps_available(), reason="apscheduler 未安装")

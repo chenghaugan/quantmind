@@ -19,8 +19,10 @@ set -euo pipefail
 # 如需改走 Docker Desktop 代理转发端口，设 QM_DOCKER_PROXY=http://host.docker.internal:3128
 PROXY="${QM_DOCKER_PROXY:-http://host.docker.internal:7897}"
 
+# 镜像名与 docker-compose.yml build 默认命名一致（quantmind-api）；
+# 如需自定义 tag：docker build -t quantmind:latest .
 docker run --rm \
   -e "HTTP_PROXY=${PROXY}" -e "HTTPS_PROXY=${PROXY}" \
   -e "http_proxy=${PROXY}" -e "https_proxy=${PROXY}" \
   -e "QM_LLM_PROVIDER=${QM_LLM_PROVIDER:-mock}" \
-  quantmind:latest "$@"
+  quantmind-api:latest "$@"

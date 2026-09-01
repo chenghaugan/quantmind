@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -31,6 +34,15 @@ _BAR_COLUMNS = [
 ]
 
 _REFRESH_LOG_NAME = "refresh_log.json"
+
+#: 交易所 -> 市场归类（总览聚合用）
+_MARKET_OF = {
+    "CFFEX": "期货", "SHFE": "期货", "DCE": "期货", "CZCE": "期货",
+    "INE": "期货", "GFEX": "期货",
+    "SSE": "A股", "SZSE": "A股", "HKEX": "港股",
+    "NASDAQ": "美股", "NYSE": "美股", "AMEX": "美股",
+    "COMEX": "美股", "CME": "美股", "NYMEX": "美股", "CBOT": "美股",
+}
 
 
 def _utcnow_iso() -> str:
@@ -105,10 +117,24 @@ class DiskBarCache:
         if df.empty:
             return []
         df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-        if req.start is not None:
-            df = df[df["datetime"] >= pd.Timestamp(req.start)]
-        if req.end is not None:
-            df = df[df["datetime"] <= pd.Timestamp(req.end)]
+        df = df.dropna(subset=["datetime"])
+        # 覆盖检查：文件未覆盖请求窗口时视为未命中，回源补齐后由 save 合并，
+        # 避免早期小窗口请求留下的切片被当作全量历史返回（数据完整性）。
+        # tz 归一与 manager._clip_bars 同口径，避免 naive/aware 混比抛 TypeError
+        _start = pd.Timestamp(req.start) if req.start is not None else None
+        _end = pd.Timestamp(req.end) if req.end is not None else None
+        if _start is not None and _start.tzinfo is not None:
+            _start = _start.tz_convert("UTC").tz_localize(None)
+        if _end is not None and _end.tzinfo is not None:
+            _end = _end.tz_convert("UTC").tz_localize(None)
+        if _start is not None and df["datetime"].min() > _start:
+            return []
+        if _end is not None and df["datetime"].max() < _end:
+            return []
+        if _start is not None:
+            df = df[df["datetime"] >= _start]
+        if _end is not None:
+            df = df[df["datetime"] <= _end]
         bars: List[BarData] = []
         for _, row in df.iterrows():
             dt = row["datetime"]
@@ -128,6 +154,28 @@ class DiskBarCache:
                 turnover=float(row.get("turnover", 0) or 0),
             ))
         return bars
+
+    def latest_datetime(self, req: HistoryRequest) -> Optional[datetime]:
+        """轻量读取本地最新 bar 时间戳（只读 datetime 列，供预检跳过用）。
+
+        相比 ``load`` 不构建 BarData 列表，大文件读取快一个量级。
+        naive 时间戳视为 UTC（与仓库写入约定一致）。无缓存返回 None。
+        """
+        path = self._path(req)
+        if not path.exists():
+            return None
+        try:
+            df = pd.read_parquet(path, columns=["datetime"])
+            if df.empty:
+                return None
+            s = pd.to_datetime(df["datetime"], errors="coerce").dropna()
+            if s.empty:
+                return None
+            dt = s.max().to_pydatetime()
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("读取本地最新时间戳 %s 失败: %s", path, exc)
+            return None
 
     # ----------------------------------------------------------------- 回写
     def save(self, bars: List[BarData]) -> int:
@@ -151,7 +199,7 @@ class DiskBarCache:
                 old["datetime"] = pd.to_datetime(old["datetime"], errors="coerce")
                 merged = (
                     pd.concat([old, new_df], ignore_index=True)
-                    .drop_duplicates(subset="datetime")
+                    .drop_duplicates(subset="datetime", keep="last")
                     .sort_values("datetime")
                     .reset_index(drop=True)
                 )
@@ -159,7 +207,17 @@ class DiskBarCache:
                 _logger.warning("合并现有仓库文件失败，覆盖写入: %s", exc)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            merged.to_parquet(path, index=False)
+            # 原子写（临时文件 + rename）：多进程共享目录时避免读到写了一半的文件
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=path.stem + ".", suffix=".tmp", dir=str(path.parent))
+            os.close(fd)
+            try:
+                merged.to_parquet(tmp_path, index=False)
+                os.replace(tmp_path, path)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
         except Exception as exc:  # noqa: BLE001
             _logger.warning("写本地行情仓库 %s 失败: %s", path, exc)
             return 0
@@ -300,38 +358,143 @@ class DiskBarCache:
                 })
         return out
 
-    def stats(self, include_symbols: bool = True) -> dict:
+    def stats(self, include_symbols: bool = True, aggregate: bool = False) -> dict:
         """仓库概览：文件数、总行数、最大最后交易日，及逐标的明细。
 
         ``include_symbols`` 为 True 时额外返回 ``symbols`` 列表，每项含
-        ``{file, symbol, exchange, interval, rows, start, end, last}``，
-        供「行情仓库总览」页展示各标的覆盖区间与行数。
+        ``{file, symbol, exchange, interval, rows, start, end, last}``。
+        ``aggregate`` 为 True 时额外返回 ``agg`` 聚合桶（by_exchange / by_interval /
+        freshness / top_rows / stale_top），供总览页默认展示，避免逐标的铺开。
         """
-        n_files = 0
-        n_rows = 0
+        per = self._scan_symbols()
+        n_files = len(per)
+        n_rows = sum(s.get("rows", 0) for s in per)
         last = None
+        for s in per:
+            _l = s.get("last")
+            if _l and (last is None or _l > last):
+                last = _l
+        out: dict = {
+            "root": str(self.root),
+            "files": n_files,
+            "rows": n_rows,
+            "last_datetime": last,
+            "refresh_log": _REFRESH_LOG_NAME,
+        }
+        if include_symbols:
+            out["symbols"] = per
+        if aggregate:
+            out["agg"] = self._buckets(per)
+        return out
+
+    # --------------------------------------------------------- 聚合 / 分页
+    _SCAN_TTL = 20.0
+
+    def _ensure_cache(self) -> None:
+        if not getattr(self, "_scan_cache", None):
+            self._scan_cache = {"ts": 0.0, "per": [], "sig": None}
+
+    def _dir_signature(self) -> tuple:
+        """仓库目录签名：(文件名, mtime_ns, size) 的排序元组。
+
+        os.scandir 只碰目录项（几千文件 ~ 几十 ms），不读文件内容；仓库无变化时
+        直接复用上次扫描结果，避免总览页反复全量扫 parquet（几千文件要数十秒~分钟级）。
+        """
+        sig = []
+        try:
+            with os.scandir(self.root) as it:
+                for e in it:
+                    if e.is_file() and e.name.endswith(".parquet"):
+                        st = e.stat()
+                        sig.append((e.name, st.st_mtime_ns, st.st_size))
+        except FileNotFoundError:
+            pass
+        sig.sort()
+        return tuple(sig)
+
+    def _scan_symbols(self, force: bool = False) -> List[dict]:
+        """扫描仓库全部 parquet 头标：目录签名失效缓存，总览与明细下钻共享同一快照。"""
+        self._ensure_cache()
+        if not force:
+            try:
+                sig = self._dir_signature()
+                if (self._scan_cache.get("sig") == sig
+                        and self._scan_cache.get("per") is not None):
+                    return self._scan_cache["per"]
+            except Exception:  # noqa: BLE001 - 签名失败退回 TTL 行为
+                pass
+        per = self._do_scan()
+        try:
+            sig = self._dir_signature()
+        except Exception:  # noqa: BLE001
+            sig = None
+        self._scan_cache = {"ts": time.time(), "per": per, "sig": sig}
+        return per
+
+    @staticmethod
+    def _file_summary(p: Path) -> Optional[dict]:
+        """从 parquet footer 统计读 (rows, start, end)：不读数据页。
+
+        依赖写文件时记录的 datetime 列 min/max 统计（pyarrow 默认写入）；
+        任一 row group 缺统计或类型不支持时返回 None，由调用方回退慢路径。
+        """
+        import pyarrow.parquet as pq
+
+        pf = pq.ParquetFile(p)
+        rows = int(pf.metadata.num_rows)
+        idx = pf.schema_arrow.get_field_index("datetime")
+        if idx < 0:
+            return None
+        mn = mx = None
+        for rg in range(pf.metadata.num_row_groups):
+            st = pf.metadata.row_group(rg).column(idx).statistics
+            if st is None or not st.has_min_max:
+                return None
+            mn = st.min if mn is None else min(mn, st.min)
+            mx = st.max if mx is None else max(mx, st.max)
+        if mn is None or mx is None:
+            return None
+        try:
+            mn = pd.Timestamp(mn)
+            mx = pd.Timestamp(mx)
+        except (ValueError, TypeError):  # 统计给出的是裸 int 等不可靠类型 → 回退
+            return None
+        return {"rows": rows, "start": mn.isoformat(),
+                "end": mx.isoformat(), "last": mx.isoformat()}
+
+    def _file_summary_slow(self, p: Path) -> Optional[dict]:
+        """旧行为：读 datetime 列算 min/max（慢，仅 footer 统计缺失时兜底）。"""
+        df = pd.read_parquet(p, columns=["datetime"])
+        dt = pd.to_datetime(df["datetime"], errors="coerce").dropna()
+        if not len(dt):
+            return {"rows": 0, "start": None, "end": None, "last": None}
+        return {"rows": int(len(dt)), "start": dt.min().isoformat(),
+                "end": dt.max().isoformat(), "last": dt.max().isoformat()}
+
+    def _do_scan(self) -> List[dict]:
+        """真正扫描仓库：读每个 parquet 的 footer 元数据（行数 + datetime 列 min/max 统计）。
+
+        footer 统计不读数据页，单文件毫秒级，几千只标的秒级完成；
+        统计缺失（未写入 min/max）的文件回退为读 datetime 列（旧行为）。
+        """
         per: List[dict] = []
         for p in self.root.glob("*.parquet"):
-            n_files += 1
             parts = p.stem.split(".")
             key = {"symbol": parts[0], "exchange": parts[1], "interval": parts[2]} \
                 if len(parts) == 3 else {}
             info = {"file": p.name, "rows": 0, "start": None, "end": None, "last": None}
             info.update(key)
             try:
-                df = pd.read_parquet(p, columns=["datetime"])
-                n_rows += len(df)
-                dt = pd.to_datetime(df["datetime"], errors="coerce").dropna()
-                if len(dt):
-                    info["rows"] = int(len(dt))
-                    info["start"] = dt.min().isoformat()
-                    info["end"] = dt.max().isoformat()
-                    info["last"] = dt.max().isoformat()
-                    if last is None or dt.max() > last:
-                        last = dt.max()
-                    _sd, _up = self.staleness(dt.max())
-                    info["staleness_days"] = _sd
-                    info["up_to_date"] = _up
+                summary = self._file_summary(p)
+                if summary is None:  # footer 统计不可用 → 回退旧路径
+                    summary = self._file_summary_slow(p)
+                if summary:
+                    info.update(summary)
+                    last = pd.Timestamp(summary["end"]) if summary.get("end") else None
+                    if last is not None:
+                        _sd, _up = self.staleness(last)
+                        info["staleness_days"] = _sd
+                        info["up_to_date"] = _up
             except Exception:  # noqa: BLE001
                 continue
             per.append(info)
@@ -352,13 +515,109 @@ class DiskBarCache:
                     "latest": _h.get("latest"),
                     "status": _h.get("status"),
                 }
-        out: dict = {
-            "root": str(self.root),
-            "files": n_files,
-            "rows": n_rows,
-            "last_datetime": last.isoformat() if last is not None else None,
-            "refresh_log": _REFRESH_LOG_NAME,
+        return per
+
+    @staticmethod
+    def _market_of(exchange: str) -> str:
+        return _MARKET_OF.get((exchange or "").upper(), "其他")
+
+    def _buckets(self, per: List[dict]) -> dict:
+        """把逐标的明细聚合成总览桶（交易所/周期/新鲜度 + Top-N）。"""
+        by_exch: dict = {}
+        by_int: dict = {}
+        for s in per:
+            exch = (s.get("exchange") or "?")
+            intv = s.get("interval") or "?"
+            rows = s.get("rows", 0)
+            s_start = s.get("start")
+            s_last = s.get("last")
+            bee = by_exch.setdefault(exch, {"exchange": exch,
+                                            "market": self._market_of(exch),
+                                            "symbols": 0, "rows": 0,
+                                            "coverage_start": None, "coverage_end": None})
+            bee["symbols"] += 1
+            bee["rows"] += rows
+            if s_start and (bee["coverage_start"] is None or s_start < bee["coverage_start"]):
+                bee["coverage_start"] = s_start
+            if s_last and (bee["coverage_end"] is None or s_last > bee["coverage_end"]):
+                bee["coverage_end"] = s_last
+            bi = by_int.setdefault(intv, {"interval": intv, "symbols": 0, "rows": 0})
+            bi["symbols"] += 1
+            bi["rows"] += rows
+        fresh = stale_1_3 = stale_gt3 = 0
+        for s in per:
+            up = s.get("up_to_date")
+            sd = s.get("staleness_days")
+            if up is True:
+                fresh += 1
+            elif up is False:
+                if sd is not None and sd > 3:
+                    stale_gt3 += 1
+                else:
+                    stale_1_3 += 1
+        top_rows = sorted(per, key=lambda x: -(x.get("rows") or 0))[:50]
+        stale_top = sorted((s for s in per if s.get("up_to_date") is False),
+                           key=lambda x: -(x.get("staleness_days") or 0))[:50]
+        def _pick(s, keys):
+            return {k: s.get(k) for k in keys}
+        return {
+            "by_exchange": sorted(by_exch.values(), key=lambda x: -x["symbols"]),
+            "by_interval": sorted(by_int.values(), key=lambda x: -x["symbols"]),
+            "freshness": {"fresh": fresh, "stale_1_3d": stale_1_3, "stale_gt3d": stale_gt3},
+            "markets": sorted({self._market_of(s.get("exchange")) for s in per}),
+            "exchanges": sorted({(s.get("exchange") or "") for s in per}),
+            "intervals": sorted({(s.get("interval") or "") for s in per}),
+            "top_rows": [_pick(s, ("symbol", "exchange", "interval", "rows", "last"))
+                          for s in top_rows],
+            "stale_top": [_pick(s, ("symbol", "exchange", "interval",
+                                    "staleness_days", "last")) for s in stale_top],
         }
-        if include_symbols:
-            out["symbols"] = per
-        return out
+
+    def symbol_page(
+        self,
+        exchange: str = "",
+        market: str = "",
+        interval: str = "",
+        freshness: str = "",
+        q: str = "",
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict:
+        """逐标的明细分页（供下钻）：按交易所/市场/周期/新鲜度/关键词过滤。"""
+        per = self._scan_symbols()
+        out: List[dict] = []
+        for s in per:
+            if exchange and (s.get("exchange") or "").upper() != exchange.upper():
+                continue
+            if market and self._market_of(s.get("exchange")) != market:
+                continue
+            if interval and (s.get("interval") or "") != interval:
+                continue
+            if freshness:
+                up = s.get("up_to_date")
+                if freshness == "stale":
+                    if up is not False:
+                        continue
+                elif freshness == "fresh":
+                    if up is not True:
+                        continue
+            if q:
+                key = f"{s.get('symbol')}.{s.get('exchange')}"
+                if q.lower() not in key.lower():
+                    continue
+            out.append(s)
+        total = len(out)
+        page = max(1, page)
+        page_size = max(1, min(page_size, 500))
+        start = (page - 1) * page_size
+        agg = self._buckets(per)
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "symbols": out[start:start + page_size],
+            "markets": agg["markets"],
+            "exchanges": agg["exchanges"],
+            "intervals": agg["intervals"],
+            "freshness": agg["freshness"],
+        }

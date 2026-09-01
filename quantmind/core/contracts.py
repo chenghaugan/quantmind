@@ -27,11 +27,22 @@ _SIZE_TABLE = {
 }
 
 
+import re
+
+
 def default_size(vt_symbol: str) -> float:
-    """按合约代码返回默认乘数（其余默认 1）。"""
+    """按合约代码返回默认乘数（其余默认 1）。
+
+    兼容带月份代码/期权后缀的合约：如 ``T2409.CFFEX`` → T（10000）、
+    ``I2501.DCE`` → I（100）、``IO2409-C-3900`` → IO（100）。
+    """
     sym = vt_symbol.split(".")[0].upper()
-    # 期权合约形如 IO2409-C-3900，取前 2 字母
-    for key in (sym, sym[:2]):
-        if key in _SIZE_TABLE:
+    # 剥离数字/后缀，提取字母根（如 T2409 → T、IO2409-C-3900 → IO）
+    m = re.match(r"[A-Za-z]+", sym)
+    root = m.group(0) if m else sym
+    # 依次尝试：完整代码、字母根、递减前缀
+    candidates = [sym, root, root[:2], root[:1]]
+    for key in candidates:
+        if key and key in _SIZE_TABLE:
             return _SIZE_TABLE[key]
     return 1.0

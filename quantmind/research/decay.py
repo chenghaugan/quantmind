@@ -127,13 +127,35 @@ class FactorDecayScanner:
                 notes=["数据不足，无法评估衰减"],
             )
 
-        # 近期窗口 vs 历史窗口
+        # 近期窗口 vs 历史窗口（历史窗口取近期窗口**之前**的区间，
+        # 否则衰减比被近期自身稀释，难以触发阈值）
         recent = ic.iloc[-self.config.ic_window_days :]
-        history = ic.iloc[-self.config.history_window_days :]
+        if n_total <= self.config.ic_window_days:
+            # 历史窗口与近期完全重叠（或为空）：衰减不可评估，虚报比率只会误导
+            return DecayMetrics(
+                factor_id=factor_id,
+                state=current_state,
+                notes=["数据不足：历史窗口与近期窗口重叠，无法评估衰减"],
+            )
+        h_end = -self.config.ic_window_days
+        history = ic.iloc[-self.config.history_window_days :h_end]
+        if history.empty:
+            return DecayMetrics(
+                factor_id=factor_id,
+                state=current_state,
+                notes=["数据不足：历史窗口无有效样本，无法评估衰减"],
+            )
 
         ic_recent = float(recent.mean())
         ic_history = float(history.mean())
-        ic_ratio = ic_recent / ic_history if abs(ic_history) > 1e-9 else None
+        if abs(ic_history) > 1e-9:
+            ic_ratio = ic_recent / ic_history
+            # 负 IC 历史下简单比值会符号反转（改善被误判为衰减），
+            # 翻转符号使「近期/历史」同向可比
+            if ic_history < 0:
+                ic_ratio = -ic_ratio
+        else:
+            ic_ratio = None
 
         # Sharpe（IR）：滚动 IC 的均值/标准差
         sharpe_recent = _rolling_sharpe(recent)

@@ -1,16 +1,17 @@
 """下载股指期货主力连续（IF0/IC0/IH0/IM0）全周期数据 → 本地 parquet 仓库。
 
 数据源：
+  - tqsdk（天勤）：免费版 8000 根 K 线（1m≈47天，5m≈251天，15m≈2年，30m≈4年，60m≈6.6年）
   - akshare（新浪）：日线主力连续约 2017 至今（~9.5 年），分钟数据受 1023 根上限限制
-  - efinance（东方财富）：分钟数据无 1023 根限制，可能获取更长历史
-  - auto：分钟数据优先 efinance，失败回退 akshare；日线用 akshare
+  - efinance（东方财富）：分钟数据无 1023 根限制，但早期价格可能失真
+  - auto：优先 tqsdk，失败回退 efinance → akshare
 
 落盘：``data_cache/{symbol}.{exchange}.{interval}.parquet``
   （与 ``DiskBarCache.save`` 格式一致：datetime(UTC)/open/high/low/close/volume/
    open_interest/turnover，幂等合并去重）。
 
 用法：
-    .\\venv\\Scripts\\python.exe scripts\\download_index_futures.py [--periods 1d,60m,30m,15m,5m,1m] [--source akshare|efinance|auto]
+    python scripts/download_index_futures.py [--periods 1d,60m,30m,15m,5m,1m] [--source tqsdk|akshare|efinance|auto]
 """
 from __future__ import annotations
 
@@ -112,23 +113,21 @@ def _df_to_bars(df, symbol: str, interval) -> List[BarData]:
     return bars
 
 
-async def fetch_one(symbol: str, interval, period: str, source: str = "akshare") -> List[BarData]:
-    """拉单个 品种×周期。source: akshare/efinance/auto"""
+async def fetch_one(symbol: str, interval, period: str, source: str = "auto") -> List[BarData]:
+    """拉单个 品种×周期。source: tqsdk/akshare/efinance/auto"""
     import akshare as ak
     
-    # auto 模式：分钟数据优先 efinance，日线用 akshare
+    # auto 模式：优先 tqsdk，失败回退 efinance → akshare
     if source == "auto":
-        if interval == Interval.DAILY:
-            source = "akshare"
-        else:
-            source = "efinance"  # 分钟数据优先尝试 efinance
+        source = "tqsdk"
     
-    # efinance 数据源
-    if source == "efinance":
+    # tqsdk 数据源（8000 根 K 线，远超新浪 1023 根）
+    if source == "tqsdk":
+        feed = None
         try:
-            from quantmind.data.feed.efinance_feed import EfinanceFeed
-            feed = EfinanceFeed()
+            from quantmind.data.feed.tqsdk_feed import TqSdkFeed
             from quantmind.data.feed.base import HistoryRequest
+            feed = TqSdkFeed()
             req = HistoryRequest(
                 symbol=symbol,
                 exchange=Exchange.CFFEX,
@@ -137,9 +136,29 @@ async def fetch_one(symbol: str, interval, period: str, source: str = "akshare")
             bars = await feed.fetch_bar_data(req)
             if bars:
                 return bars
-            # efinance 返回空数据，回退到 akshare
-            if source == "efinance":
-                print(f"    efinance 返回空数据，回退 akshare")
+            print(f"    tqsdk 返回空数据，回退 efinance")
+        except Exception as exc:
+            print(f"    tqsdk 失败: {str(exc)[:60]}，回退 efinance")
+        finally:
+            if feed is not None:
+                await feed.close()  # 异常路径也必须关闭，否则泄漏 TqApi 连接+线程
+        source = "efinance"  # 回退到 efinance
+    
+    # efinance 数据源
+    if source == "efinance":
+        try:
+            from quantmind.data.feed.efinance_feed import EfinanceFeed
+            from quantmind.data.feed.base import HistoryRequest
+            feed = EfinanceFeed()
+            req = HistoryRequest(
+                symbol=symbol,
+                exchange=Exchange.CFFEX,
+                interval=interval,
+            )
+            bars = await feed.fetch_bar_data(req)
+            if bars:
+                return bars
+            print(f"    efinance 返回空数据，回退 akshare")
         except Exception as exc:
             print(f"    efinance 失败: {str(exc)[:60]}，回退 akshare")
         source = "akshare"  # 回退到 akshare
@@ -156,8 +175,8 @@ async def main() -> int:
     ap = argparse.ArgumentParser(description="下载股指期货主力连续全周期数据")
     ap.add_argument("--periods", type=str, default="1d,60m,30m,15m,5m,1m",
                     help="逗号分隔周期（1d/60m/30m/15m/5m/1m）")
-    ap.add_argument("--source", type=str, default="auto", choices=["akshare", "efinance", "auto"],
-                    help="数据源：akshare（新浪）/ efinance（东方财富）/ auto（分钟优先efinance，失败回退akshare）")
+    ap.add_argument("--source", type=str, default="auto", choices=["tqsdk", "akshare", "efinance", "auto"],
+                    help="数据源：tqsdk（天勤8000根）/ akshare（新浪1023根）/ efinance（东财）/ auto（优先tqsdk）")
     args = ap.parse_args()
 
     want = {p.strip() for p in args.periods.split(",") if p.strip()}

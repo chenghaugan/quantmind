@@ -90,8 +90,11 @@ def test_cache_hit_returns_same_report(tmp_path):
     assert r1.n_samples == r2.n_samples
     # to_dict() 对数值做 r4/r6 圆整，故容差取 1e-3
     assert abs(r1.ic_mean - r2.ic_mean) < 1e-3
-    # 验证缓存确实写入
-    hit = cache.get("Rank($close, 20)", market="csi300", forward_periods=1)
+    # 验证缓存确实写入（evaluate_expression 写入时带数据指纹，读取需一致）
+    from quantmind.research.eval import panel_fingerprint
+    fp = panel_fingerprint(panel)
+    hit = cache.get("Rank($close, 20)", market="csi300", forward_periods=1,
+                    data_fingerprint=fp)
     assert hit is not None
     assert abs(hit.ic_mean - r1.ic_mean) < 1e-3
 

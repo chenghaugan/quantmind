@@ -87,7 +87,8 @@ else:
     section("因子明细")
     rows = []
     for f in factors:
-        state = f.get("state", "ACTIVE")
+        # 后端 state 为小写（"active"），STATE_META key 为大写
+        state = str(f.get("state", "ACTIVE")).upper()
         meta = STATE_META.get(state, ("", "info"))
         note_text = "；".join(f.get("notes") or [])
         rows.append({

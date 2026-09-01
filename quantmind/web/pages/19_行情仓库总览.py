@@ -1,7 +1,10 @@
-"""行情仓库总览页：本地 Parquet 写缓存（DiskBarCache）的逐标的覆盖区间可视化+运维。
+"""行情仓库总览页：本地 Parquet 写缓存（DiskBarCache）的**聚合**覆盖概览 + 按需下钻。
 
-数据集市：真实行情落盘后秒级复用；本页展示缓存里每个标的的行数、起止区间、最新交易日，
-并支持手动预热（从真实源拉取落盘）与清空重建。
+几千只标的下不再逐标的铺开渲染：默认只展示 总览 KPI + 聚合桶（交易所/周期/新鲜度 +
+Top-N），逐标的明细走「按需下钻」（搜索/筛选/分页），从后端轻接口取，避免前端一次
+渲染几万行。
+
+数据集市：真实行情落盘后秒级复用。支持手动预热（从真实源拉取落盘）与清空重建。
 """
 import sys
 from pathlib import Path
@@ -22,8 +25,8 @@ from utils.constants import ALL_EXCHANGES, EXCHANGE_NAMES  # noqa: E402
 setup_page("行情仓库总览", "🗄️")
 page_header(
     "本地行情仓库（Parquet 写缓存）",
-    "真实行情落盘后秒级复用，不再每次联网拉取。此处查看每个标的的覆盖纵深、最新交易日，"
-    "并支持手动预热与清空重建。",
+    "真实行情落盘后秒级复用，不再每次联网拉取。此处按 市场/交易所/周期 聚合总览覆盖纵深，"
+    "逐标的明细按需下钻（搜索 / 筛选 / 分页），支持手动预热与清空重建。",
     "🗄️",
 )
 
@@ -37,7 +40,7 @@ note(
 EXCH_MAP = {e: EXCHANGE_NAMES.get(e, e) for e in ALL_EXCHANGES}
 
 
-# ------------------------------------------------------------- 加载仓库状态
+# ------------------------------------------------------------- 加载聚合总览
 def _load_stats():
     return APIClient.cache_stats(timeout=30)
 
@@ -57,70 +60,174 @@ if "qm_cache_history" not in st.session_state:
     _h_res = APIClient.cache_history(timeout=15)
     st.session_state.qm_cache_history = (_h_res.get("history") if isinstance(_h_res, dict)
                                          else None) or []
-_symbols = stats.get("symbols") or []
+
+_agg = stats.get("agg") or {}
 _hist = st.session_state.qm_cache_history or []
 
-# ---- 新鲜度统计 ----
-_up = [s for s in _symbols if s.get("up_to_date")]
-_stale = [s for s in _symbols if s.get("up_to_date") is False]
-_stale_days = [s.get("staleness_days") for s in _symbols if s.get("staleness_days") is not None]
-_worst = max(_stale_days) if _stale_days else 0
+# ---- 顶部 KPI（来自聚合，不再逐标的）----
+_files = stats.get("files", 0)
+_rows = stats.get("rows", 0)
+_fr = _agg.get("freshness") or {}
+_n_stale = _fr.get("stale_1_3d", 0) + _fr.get("stale_gt3d", 0)
+_stale_top = _agg.get("stale_top") or []
+_worst = max((s.get("staleness_days") or 0) for s in _stale_top) if _stale_top else 0
 _last_refresh = None
 if _hist:
     _last_refresh = _hist[0].get("ts")
 
-# ---- 顶部 KPI ----
 kpi_row([
-    {"label": "标的数", "value": fmt_num(len(_symbols), 0), "tone": "accent"},
-    {"label": "K 线总数", "value": fmt_num(stats.get("rows", 0), 0), "tone": "neutral"},
+    {"label": "标的数", "value": fmt_num(_files, 0), "tone": "accent",
+     "hint": "文件数（标的×周期）"},
+    {"label": "K 线总数", "value": fmt_num(_rows, 0), "tone": "neutral"},
     {"label": "最新交易日", "value": (stats.get("last_datetime") or "—")[:10],
      "tone": "neutral"},
-    {"label": "落后标的", "value": f"{len(_stale)} / {len(_symbols)} (最差 {_worst}d)",
-     "tone": "danger" if _stale else "success"},
+    {"label": "落后标的", "value": f"{_n_stale} / {_files} (最差 {_worst}d)",
+     "tone": "danger" if _n_stale else "success"},
 ])
 
 st.caption("仓库路径: " + str(stats.get("root", ""))
            + ("  ·  上次刷新: " + (_last_refresh or "—")[:19] if _last_refresh else ""))
 
-# ------------------------------------------------------------- 逐标的覆盖明细表格
-section("逐标的覆盖明细", "行数 / 覆盖区间 / 最新交易日 / 新鲜度")
-if _symbols:
-    rows = []
-    for s in _symbols:
-        _sd = s.get("staleness_days")
-        _f = s.get("up_to_date")
-        _freshtxt = "✅ 最新" if _f else (f"⚠️ 落后 {_sd}d" if _sd is not None else "—")
-        rows.append({
+# ------------------------------------------------------------- 聚合汇总区
+section("按市场 / 交易所聚合", "各市场/交易所的标的数与 K 线数（默认总览，不是逐标的）")
+_by_exch = _agg.get("by_exchange") or []
+if _by_exch:
+    market_rows = []
+    _mkt_agg = {}
+    for b in _by_exch:
+        m = b.get("market") or "其他"
+        mm = _mkt_agg.setdefault(m, {"市场": m, "标的数": 0, "K线数": 0})
+        mm["标的数"] += b.get("symbols", 0)
+        mm["K线数"] += b.get("rows", 0)
+        market_rows.append({
+            "交易所": f"{b.get('exchange')} ({m})",
+            "标的数": fmt_num(b.get("symbols", 0), 0),
+            "K线数": fmt_num(b.get("rows", 0), 0),
+        })
+    c_mkt, c_exch = st.columns([1, 2])
+    with c_mkt:
+        st.markdown("**市场**")
+        st.dataframe(pd.DataFrame(list(_mkt_agg.values())),
+                     width="stretch", hide_index=True)
+    with c_exch:
+        st.markdown("**交易所**")
+        st.dataframe(pd.DataFrame(market_rows), width="stretch", hide_index=True,
+                     height=min(50 + 30 * len(market_rows), 360))
+else:
+    st.info("仓库暂无语义聚合（可能为空或需刷新）。")
+
+# 周期与新鲜度
+c_int, c_fr = st.columns([1, 1])
+with c_int:
+    section("按周期聚合")
+    _by_int = _agg.get("by_interval") or []
+    if _by_int:
+        st.dataframe(pd.DataFrame([{
+            "周期": b.get("interval"),
+            "标的数": b.get("symbols", 0),
+            "K线数": fmt_num(b.get("rows", 0), 0),
+        } for b in _by_int]), width="stretch", hide_index=True)
+with c_fr:
+    section("新鲜度")
+    st.dataframe(pd.DataFrame([{
+        "桶": "最新", "数量": _fr.get("fresh", 0)},
+        {"桶": "落后 1-3 天", "数量": _fr.get("stale_1_3d", 0)},
+        {"桶": "落后 >3 天", "数量": _fr.get("stale_gt3d", 0)},
+    ]), width="stretch", hide_index=True)
+
+# ------------------------------------------------------------- 覆盖纵深（聚合版，按交易所）
+if _by_exch:
+    section("覆盖区间（按交易所聚合，不再每标的一根）")
+    try:
+        _cov = pd.DataFrame([{
+            "交易所": f"{b.get('exchange')} ({b.get('market','')})",
+            "起点": pd.to_datetime(b.get("coverage_start")) if b.get("coverage_start") else None,
+            "终点": pd.to_datetime(b.get("coverage_end")) if b.get("coverage_end") else None,
+            "K线数": b.get("rows", 0),
+            "标的数": b.get("symbols", 0),
+        } for b in _by_exch])
+        fig = px.timeline(_cov, x_start="起点", x_end="终点", y="交易所",
+                          color="K线数", color_continuous_scale="Blues",
+                          hover_data={"标的数": True})
+        fig.update_layout(height=240, margin=dict(t=24, b=24),
+                          xaxis_title="", yaxis_title="")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.caption(f"共 {len(_by_exch)} 个交易所聚合区间（行情数据的实际覆盖纵深）。")
+    except Exception as exc:  # noqa: BLE001
+        st.info(f"覆盖区间可视化暂不可用：{exc}")
+
+# ------------------------------------------------------------- Top-N（只看大头，不铺全量）
+_top = _agg.get("top_rows") or []
+if _top:
+    section("数据量 Top 50", "只看体积最大的标的，避免逐标的铺开")
+    st.dataframe(pd.DataFrame([{
+        "标的": f"{s.get('symbol')}.{s.get('exchange')}",
+        "周期": s.get("interval"),
+        "K线数": fmt_num(s.get("rows", 0), 0),
+        "最新": (s.get("last") or "—")[:10],
+    } for s in _top]), width="stretch", hide_index=True, height=360)
+
+# ------------------------------------------------------------- 按需下钻（默认折叠）
+with st.expander("🔎 逐标的明细下钻（搜索 / 筛选 / 分页）", expanded=False):
+    if "qm_sym_page" not in st.session_state:
+        st.session_state.qm_sym_page = 1
+    _dr1, _dr2, _dr3, _dr4 = st.columns(4)
+    with _dr1:
+        _mkt = st.selectbox("市场", ["全部"] + list(_agg.get("markets") or []),
+                            key="dr_market")
+    with _dr2:
+        _exch = st.selectbox("交易所", ["全部"] + list(_agg.get("exchanges") or []),
+                             key="dr_exch", format_func=lambda e: EXCH_MAP.get(e, e))
+    with _dr3:
+        _intv = st.selectbox("周期", ["全部"] + list(_agg.get("intervals") or []),
+                             key="dr_interval")
+    with _dr4:
+        _frz = st.selectbox("新鲜度", ["全部", "最新", "落后"], key="dr_fresh")
+    _q = st.text_input("标的搜索（如 600519 / rb0）", key="dr_q")
+
+    # 筛选条件变化时重置页码，否则旧页码超过新结果页数会显示空页
+    _filter_sig = (_exch, _mkt, _intv, _frz, _q.strip())
+    if st.session_state.get("_dr_filter_sig") != _filter_sig:
+        st.session_state["_dr_filter_sig"] = _filter_sig
+        st.session_state.qm_sym_page = 1
+    _page = st.session_state.qm_sym_page
+    _sym_res = APIClient.cache_symbols(
+        exchange="" if _exch == "全部" else _exch,
+        market="" if _mkt == "全部" else _mkt,
+        interval="" if _intv == "全部" else _intv,
+        freshness={"最新": "fresh", "落后": "stale"}.get(_frz, ""),
+        q=_q.strip(), page=_page, page_size=50,
+    )
+    if isinstance(_sym_res, dict) and "symbols" in _sym_res:
+        _total = _sym_res.get("total", 0)
+        st.caption(f"命中 {_total} 条（第 {_page} 页 / 每页 50）")
+        _rows = pd.DataFrame([{
             "标的": f"{s.get('symbol')}.{s.get('exchange')}",
             "周期": s.get("interval"),
             "K线数": fmt_num(s.get("rows", 0), 0),
             "起点": (s.get("start") or "—")[:10],
-            "终点": (s.get("end") or "—")[:10],
+            "终点": (s.get("last") or "—")[:10],
             "最新": (s.get("last") or "—")[:10],
-            "新鲜度": _freshtxt,
-        })
-    df = pd.DataFrame(rows)
-    st.dataframe(df, width="stretch", hide_index=True, height=min(50 + 35 * len(df), 460))
-else:
-    st.info("仓库为空：可点下方「预热」从真实源拉取标的数据。")
-
-# ------------------------------------------------------------- 覆盖区间条形图
-if _symbols:
-    section("各标的覆盖区间（时间纵深）")
-    fig = px.timeline(
-        pd.DataFrame([{
-            "标的": f"{s.get('symbol')}.{s.get('exchange')}",
-            "起点": pd.to_datetime(s.get("start")) if s.get("start") else None,
-            "终点": pd.to_datetime(s.get("end")) if s.get("end") else None,
-            "K线数": s.get("rows", 0),
-        } for s in _symbols]),
-        x_start="起点", x_end="终点", y="标的",
-        color="K线数", color_continuous_scale="Blues",
-    )
-    fig.update_layout(height=280, margin=dict(t=24, b=24),
-                      xaxis_title="", yaxis_title="")
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
+            "新鲜度": ("✅ 最新" if s.get("up_to_date") is True else
+                       (f"⚠️ 落后 {s.get('staleness_days')}d"
+                        if s.get("up_to_date") is False else "—")),
+        } for s in _sym_res["symbols"]])
+        st.dataframe(_rows, width="stretch", hide_index=True, height=400)
+        _n_pages = max(1, -(-_total // 50))
+        _pg1, _pg2, _pg3 = st.columns([1, 2, 1])
+        with _pg1:
+            if st.button("⬅️ 上一页", disabled=(_page <= 1)):
+                st.session_state.qm_sym_page = max(1, _page - 1)
+                st.rerun()
+        with _pg3:
+            if st.button("下一页 ➡️", disabled=(_page >= _n_pages)):
+                st.session_state.qm_sym_page = _page + 1
+                st.rerun()
+        with _pg2:
+            st.markdown(f"<div style='text-align:center'>共 {_n_pages} 页</div>",
+                        unsafe_allow_html=True)
+    else:
+        st.info("暂无匹配标的。")
 
 # ------------------------------------------------------------- 刷新历史
 section("刷新历史", "自动(交易日17:00) + 手动触发")
@@ -138,8 +245,6 @@ if _hist:
         })
     st.dataframe(pd.DataFrame(_hrows), width="stretch", hide_index=True,
                  height=min(50 + 30 * len(_hrows), 360))
-    _sched_note = "距下次自动刷新: 每个交易日 17:00（cron `0 17 * * 1-5`）"
-    st.caption(_sched_note)
 else:
     st.info("暂无刷新记录。触发一次「全量刷新」或「预热」后这里会展示历史。")
 

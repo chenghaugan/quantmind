@@ -225,10 +225,10 @@ if "mined_spec" in st.session_state:
 
         kpi_row(
             [
-                ("Sharpe", f"{report.get('sharpe', 0):.3f}"),
-                ("年化收益", f"{report.get('annual_return', 0):.2%}"),
-                ("最大回撤", f"{report.get('max_drawdown', 0):.2%}"),
-                ("胜率", f"{report.get('win_rate', 0):.2%}"),
+                {"label": "Sharpe", "value": f"{report.get('sharpe', 0):.3f}"},
+                {"label": "年化收益", "value": f"{report.get('annual_return', 0):.2%}"},
+                {"label": "最大回撤", "value": f"{report.get('max_drawdown', 0):.2%}"},
+                {"label": "胜率", "value": f"{report.get('win_rate', 0):.2%}"},
             ]
         )
 

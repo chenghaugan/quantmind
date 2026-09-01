@@ -110,14 +110,16 @@ def _ts_sum(x, n: int) -> pd.DataFrame:
 
 
 def _ts_argmax(x, n: int) -> pd.DataFrame:
+    # 与 wq._ts_arg_max 同语义：距窗口内最大值的周期数（0=最大值在窗口末端）
     return x.rolling(int(n), min_periods=1).apply(
-        lambda a: int(np.argmax(a)), raw=True
+        lambda a: int(n) - 1 - int(np.argmax(a)), raw=True
     )
 
 
 def _ts_argmin(x, n: int) -> pd.DataFrame:
+    # 与 wq._ts_arg_min 同语义：距窗口内最小值的周期数（0=最小值在窗口末端）
     return x.rolling(int(n), min_periods=1).apply(
-        lambda a: int(np.argmin(a)), raw=True
+        lambda a: int(n) - 1 - int(np.argmin(a)), raw=True
     )
 
 
@@ -442,7 +444,7 @@ def panel_eval_expression(expr: str, panel: Panel) -> pd.DataFrame:
         result = pd.DataFrame(result, index=panel.dates, columns=panel.symbols)
     # 对齐面板的 index/columns
     result = result.reindex(index=panel.dates, columns=panel.symbols)
-    return result.fillna(0.0)
+    return result.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
 
 def _eval_node(node: ast.AST, env: Dict[str, object]) -> object:
@@ -461,8 +463,10 @@ def _eval_node(node: ast.AST, env: Dict[str, object]) -> object:
             raise ExpressionError(f"不支持的一元运算符: {type(node.op).__name__}")
         return op(operand)
     if isinstance(node, ast.Compare):
+        if len(node.ops) != 1:
+            raise ExpressionError("不支持链式比较（如 a < b < c），请显式用 & 连接")
         left = _eval_node(node.left, env)
-        right = _eval_node(node.right, env)
+        right = _eval_node(node.comparators[0], env)
         op = {
             ast.Lt: operator.lt,
             ast.LtE: operator.le,
@@ -497,8 +501,6 @@ def _eval_node(node: ast.AST, env: Dict[str, object]) -> object:
         raise ExpressionError(f"未知变量: {node.id}")
     if isinstance(node, ast.Constant):
         return node.value
-    if isinstance(node, ast.Num):  # 兼容老版本
-        return node.n
     raise ExpressionError(f"不支持的语法节点: {type(node).__name__}")
 
 

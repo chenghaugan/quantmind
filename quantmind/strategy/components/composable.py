@@ -131,14 +131,20 @@ class ComposableStrategy(CtaTemplate):
         targets = self.portfolio.apply_all(self._signals, self._universe, self.context)
 
         # 3&4. Risk 过滤 + Execution 逐标的执行
+        primary_target = None
         for sym, tgt in targets.items():
-            final_target = self.risk.apply(tgt, bar, self.context)
+            # 风控闸门按目标标的检查（非主标的传 vt_symbol，避免用主标的持仓/价格误判）
+            vt_arg = sym if sym != (bar.vt_symbol or "") else None
+            final_target = self.risk.apply(tgt, bar, self.context, vt_symbol=vt_arg)
             if final_target is None:
                 continue
             self.execution.set_target(sym, float(final_target))
+            if sym == self._primary:
+                primary_target = float(final_target)
 
-        if self._primary in targets:
-            self.pos = float(targets[self._primary])
+        # 主标的展示值仅在风控放行后更新（拒绝时不虚报仓位）
+        if primary_target is not None:
+            self.pos = primary_target
 
     # ---- 让 CtaTemplate.set_target 也可用（可选执行路径）----
     def _set_target_direct(self, vt, target):

@@ -85,13 +85,18 @@ class FactorEvalCache:
             )
 
     @staticmethod
-    def make_key(expr: str, market: str = "", forward_periods: int = 1) -> str:
-        """构造缓存键（表达式 + 市场 + 前向周期）。"""
-        return f"{market}|f{forward_periods}|{expr}"
+    def make_key(expr: str, market: str = "", forward_periods: int = 1,
+                 data_fingerprint: str = "") -> str:
+        """构造缓存键（表达式 + 市场 + 前向周期 + 数据指纹）。
 
-    def get(self, expr: str, market: str = "", forward_periods: int = 1) -> Optional[FactorReport]:
+        ``data_fingerprint``（如面板日期范围）防止换日期区间/追加数据后命中旧报告。
+        """
+        return f"{market}|f{forward_periods}|{data_fingerprint}|{expr}"
+
+    def get(self, expr: str, market: str = "", forward_periods: int = 1,
+            data_fingerprint: str = "") -> Optional[FactorReport]:
         """读取缓存；未命中返回 None。"""
-        key = self.make_key(expr, market, forward_periods)
+        key = self.make_key(expr, market, forward_periods, data_fingerprint)
         try:
             with self._connect() as conn:
                 row = conn.execute(
@@ -104,9 +109,10 @@ class FactorEvalCache:
         except Exception:  # noqa: BLE001 缓存损坏不应阻塞评估
             return None
 
-    def set(self, report: FactorReport, expr: str, market: str = "", forward_periods: int = 1) -> None:
+    def set(self, report: FactorReport, expr: str, market: str = "", forward_periods: int = 1,
+            data_fingerprint: str = "") -> None:
         """写入缓存。"""
-        key = self.make_key(expr, market, forward_periods)
+        key = self.make_key(expr, market, forward_periods, data_fingerprint)
         payload = json.dumps(report.to_dict(), allow_nan=True, ensure_ascii=False)
         try:
             with self._connect() as conn:
@@ -140,6 +146,24 @@ def _coerce_bars_to_panel(bars_by_symbol) -> Panel:
     return Panel.from_bars(bars_by_symbol)
 
 
+def panel_fingerprint(panel) -> str:
+    """面板数据指纹（日期范围 + 规模 + 标的身份），供评估缓存键使用。"""
+    import hashlib
+
+    try:
+        p = _coerce_bars_to_panel(panel)
+        _dates = p.close.index
+        if len(_dates):
+            symbols_hash = hashlib.md5(
+                ",".join(sorted(p.close.columns)).encode()
+            ).hexdigest()[:8]
+            return (f"{_dates.min().date()}~{_dates.max().date()}"
+                    f"#{len(_dates)}x{p.close.shape[1]}#{symbols_hash}")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def evaluate_expression(
     expression: str,
     panel,
@@ -168,12 +192,16 @@ def evaluate_expression(
     evaluator = FactorEvaluator()
     cache_obj = cache if cache is not None else (FactorEvalCache() if use_cache else None)
 
+    # 数据指纹（日期范围 + 规模）：换日期区间/追加数据后不再命中旧缓存
+    p = _coerce_bars_to_panel(panel)
+    fingerprint = panel_fingerprint(p)
+
     if cache_obj is not None:
-        hit = cache_obj.get(expression, market=market, forward_periods=forward_periods)
+        hit = cache_obj.get(expression, market=market, forward_periods=forward_periods,
+                            data_fingerprint=fingerprint)
         if hit is not None:
             return hit
 
-    p = _coerce_bars_to_panel(panel)
     fdf = _panel_eval(expression, p)
     report = evaluator.evaluate_factor_panel(
         fdf, p, forward_periods=forward_periods, n_groups=n_groups,
@@ -181,7 +209,8 @@ def evaluate_expression(
     )
 
     if cache_obj is not None:
-        cache_obj.set(report, expression, market=market, forward_periods=forward_periods)
+        cache_obj.set(report, expression, market=market, forward_periods=forward_periods,
+                      data_fingerprint=fingerprint)
     return report
 
 

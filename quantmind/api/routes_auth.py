@@ -1,10 +1,11 @@
 """认证授权路由"""
+import asyncio
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from .auth import (
-    authenticate_user,
+    authenticate_user_async,
     create_access_token,
     get_current_user,
     ACCESS_TOKEN_EXPIRE_MINUTES,
@@ -19,7 +20,7 @@ security = HTTPBearer()
 @router.post("/login", response_model=TokenResponse)
 async def login(request: LoginRequest):
     """用户登录，返回 JWT token"""
-    user = authenticate_user(request.username, request.password)
+    user = await authenticate_user_async(request.username, request.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

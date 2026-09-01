@@ -216,13 +216,15 @@ class TradingCalendar:
         return None
 
     def has_night_session(self, d: date) -> bool:
-        """``d`` 日晚是否开夜盘：``d`` 是交易日且**次日也是交易日**。
+        """``d`` 日晚是否开夜盘：``d`` 是交易日且下一**交易日**间隔不超过 3 天。
 
-        节假日前最后一个交易日晚上不开夜盘（夜盘归属下一交易日）。
+        夜盘归属下一交易日：周五晚夜盘归属下周一（间隔 3 天，正常开市）；
+        节假日前最后一个交易日与下一交易日的间隔通常 >3 天，不开夜盘。
         """
         if not self.is_trading_day(d):
             return False
-        return self.is_trading_day(d + timedelta(days=1))
+        nxt = self.next_trading_day(d)
+        return nxt is not None and (nxt - d).days <= 3
 
     # ---- 交易时段 ----
     def is_trading_time(

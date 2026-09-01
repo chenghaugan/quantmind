@@ -168,6 +168,16 @@ with st.form("factor_form"):
                 help="单标：ref/delta/corr/ts_rank…；多标（截面）用 delay/mean/rank… "
                      "（ref 会自动映射为 delay）",
             )
+        elif mode == "席位因子":
+            # 席位因子模式：必须有 F1-F8 选择控件，否则 factor_name 未定义（NameError）
+            # 或残留上一模式的因子名导致后端 KeyError
+            seat_pool = sorted(factor_desc.keys()) if isinstance(factor_desc, dict) and factor_desc \
+                else [f"F{i}" for i in range(1, 9)]
+            factor_name = st.selectbox("席位因子", seat_pool,
+                                       help="商品期货持仓结构因子（F1 净持仓 … F8 情绪）")
+            if isinstance(factor_desc, dict) and factor_desc.get(factor_name):
+                st.caption(f"📖 {factor_desc[factor_name]}")
+            expression = None
 
         if mode_target == "多标的（截面）" and mode != "席位因子":
             gc1, gc2, gc3 = st.columns(3)

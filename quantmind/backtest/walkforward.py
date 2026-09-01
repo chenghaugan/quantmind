@@ -76,7 +76,9 @@ def walk_forward(
     :param strategy_class: 策略类（如 MultiFactorStrategy）。
     :param setting: 策略参数字典。
     :param vt_symbol: 标的（如 "rb0.SHFE"）。
-    :param train_window: 训练/预热窗口长度（根）。
+    :param train_window: 训练/预热窗口长度（根）。注意：当前实现每折仅回放
+        测试窗口，训练窗不参与引擎回放；策略自身的 warmup（如均线窗口）
+        会在每折开头产生空跑期，折绩效会被相应低估。
     :param test_window: 每折测试窗口长度（根）。
     :param step: 滚动步长（默认 = test_window，即不重叠切分）。
     :param cost: 成本模型（None=旧式单一费率；或 CostModel / dict / True）。

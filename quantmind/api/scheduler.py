@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -308,19 +309,85 @@ def _record_refresh_error(dc, key, exch, interv, detail):
 _MARKET_EXCHANGES = {"SSE", "SZSE", "HKEX"}
 
 
-async def _job_market_warm(sys_state: Dict[str, Any]) -> Dict[str, Any]:
+async def _warm_single(dm, dc, vt: str) -> bool:
+    """对单个 vt-symbol 拉日线并落盘；成功返回 True。
+
+    A股/港股走**快速直连源**（腾讯日线 / 新浪港股），绕开通用多源回退链——
+    那条链里有 akshare_future/efinance 等对 A股会**无超时挂死**的期货源，
+    曾导致预热任务卡住数小时、web 请求 http 超时。统一加 45s 兜底超时防挂死。
+    """
+    from ..data.feed.base import HistoryRequest
+    from ..core.constant import Exchange, Interval
+
+    symbol, exch = vt.rsplit(".", 1)
+    try:
+        exchange = Exchange(exch)
+        if exchange in (Exchange.SSE, Exchange.SZSE):
+            # A股：腾讯日线（与「更新A股数据」同源，~1s）
+            from .stock_download import _fetch_stock_bars
+            bars = await asyncio.wait_for(
+                _fetch_stock_bars(symbol, exchange, "1d"), timeout=45)
+            source = "tencent"
+        elif exchange == Exchange.HKEX:
+            # 港股：新浪日线（akshare stock_hk_daily，GET 快）
+            from ..data.feed.em_hk import EmHkFeed
+            bars = await asyncio.wait_for(
+                EmHkFeed().fetch_bar_data(
+                    HistoryRequest(symbol=symbol, exchange=exchange, interval=Interval.DAILY)),
+                timeout=45)
+            source = "em_hk"
+        else:
+            # 期货：沿用通用回退链，但加超时防挂死
+            sink: Dict[str, Any] = {}
+            bars = await asyncio.wait_for(
+                dm.get_bar_data(HistoryRequest(symbol=symbol, exchange=exchange,
+                                               interval=Interval.DAILY), source_sink=sink),
+                timeout=45)
+            source = sink.get(symbol, "")
+
+        ok = bool(bars)
+        if bars:  # 落盘（幂等合并）；parquet 读写较重，放线程池避免阻塞事件循环
+            await asyncio.to_thread(dc.save, bars)
+        _record = await asyncio.to_thread(
+            _record_refresh,
+            dc, {"symbol": symbol, "exchange": exch, "interval": "1d"},
+            exchange, Interval.DAILY, bars, ok, source)
+        return ok
+    except Exception as exc:  # noqa: BLE001
+        await asyncio.to_thread(
+            _record_refresh_error,
+            dc, {"symbol": vt.split(".")[0], "exchange": vt.split(".")[-1],
+                 "interval": "1d"},
+            Exchange(vt.split(".")[-1]), Interval.DAILY, str(exc)[:120])
+        return False
+
+
+def _resolve_warm_markets(settings, markets) -> List[str]:
+    """把市场选择解析为规范列表（'A'/'HK'）；缺省取配置 market_warm_markets。"""
+    from ..data.feed.market_universe import MARKET_EXCHANGES
+    if markets:
+        return [m for m in markets if m in MARKET_EXCHANGES]
+    cfg = getattr(settings, "market_warm_markets", ["A", "HK"]) or ["A", "HK"]
+    return [m for m in cfg if m in MARKET_EXCHANGES]
+
+
+async def _job_market_warm(
+    sys_state: Dict[str, Any],
+    markets: Optional[List[str]] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
+    full: bool = False,
+) -> Dict[str, Any]:
     """全市场（A股+港股）自动预热：把未缓存的标的分批拉入本地行情仓库。
 
-    每趟发现全市场清单 -> 与仓库已缓存键取差集得到「待建标的」-> 按 batch 上限
-    取前 N 个逐个 ``dm.get_bar_data`` 拉到真实源并落盘。已在缓存的不重复拉（增量），
+    A 股与港股**分开处理**：按市场（``markets``，'A'/'HK'）各自发现清单、各自取差集、
+    各自按 batch 取前 N 个逐个 ``dm.get_bar_data`` 拉到真实源并落盘；已在缓存的不重复拉（增量），
     跑完本趟即返回，剩余留给下一趟（自推进 catch-up，无持久队列，KISS）。
+    返回结果含聚合统计与 ``by_market`` 分市场明细，便于前端分别展示。
 
     默认关闭（``QM_MARKET_WARM_ENABLED`` 为 False 时跳过），保证开箱离线/测试不受影响。
     """
     from ..config import get_settings
-    from ..data.feed.market_universe import discover_all
-    from ..data.feed.base import HistoryRequest
-    from ..core.constant import Exchange, Interval
+    from ..data.feed.market_universe import discover_market, MARKET_EXCHANGES
 
     dm = sys_state.get("dm")
     dc = getattr(dm, "disk_cache", None) if dm is not None else None
@@ -337,13 +404,12 @@ async def _job_market_warm(sys_state: Dict[str, Any]) -> Dict[str, Any]:
         _logger.exception("market_warm 读取配置失败: %s", exc)
         return {"action": "market_warm", "skipped": True, "reason": f"配置读取失败: {exc}"}
 
-    # 发现全市场清单（A股在前，港股在后；失败返回空则跳过本趟）
-    universe = discover_all(cap_a=cap, cap_hk=cap)
-    universe = [u for u in universe if u.split(".")[-1] in _MARKET_EXCHANGES]
-    if not universe:
-        return {"action": "market_warm", "skipped": True, "reason": "全市场清单为空(akshare 不可用?)"}
+    selected = _resolve_warm_markets(settings, markets)
+    if not selected:
+        return {"action": "market_warm", "skipped": True,
+                "reason": "未选择任何市场(markets 应为 'A'/'HK')"}
 
-    # 已缓存键（仅市场交易所），用于增量差集
+    # 已缓存键（所有市场交易所），用于各市场取差集
     try:
         cached_keys = {
             k["symbol"] + "." + k["exchange"].upper()
@@ -353,40 +419,99 @@ async def _job_market_warm(sys_state: Dict[str, Any]) -> Dict[str, Any]:
         _logger.warning("market_warm 读取已缓存键失败: %s", exc)
         cached_keys = set()
 
-    pending = [u for u in universe if u not in cached_keys]
-    todo = pending[:batch]
-    total_pending = len(pending)
+    by_market: Dict[str, Dict[str, Any]] = {}
+    summary: Dict[str, Any] = {"target": 0, "warmed": 0, "failed": 0,
+                               "pending_left": 0, "done": True}
 
-    warmed, failed = 0, 0
-    for vt in todo:
-        try:
-            symbol, exch = vt.rsplit(".", 1)
-            req = HistoryRequest(symbol=symbol, exchange=Exchange(exch), interval=Interval.DAILY)
-            sink: Dict[str, Any] = {}
-            bars = await dm.get_bar_data(req, source_sink=sink)
-            ok = bool(bars)
-            source = sink.get(symbol, "")
-            _record_refresh(dc, {"symbol": symbol, "exchange": exch, "interval": "1d"},
-                            Exchange(exch), Interval.DAILY, bars, ok, source)
-            warmed += 1 if ok else 0
-            failed += 0 if ok else 1
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            _record_refresh_error(dc, {"symbol": vt.split(".")[0], "exchange": vt.split(".")[-1], "interval": "1d"},
-                                  Exchange(vt.split(".")[-1]), Interval.DAILY, str(exc)[:120])
+    # 先按市场各自发现清单 / 取差集 / 截断 batch，汇总出「待建任务」扁平列表
+    todos: List[tuple] = []  # (market, vt)
+    for m in selected:
+        exchs = MARKET_EXCHANGES.get(m, set())
+        # discover_market 内为同步 akshare（可能慢/含网络重试），放线程池避免阻塞事件循环
+        universe = await asyncio.to_thread(discover_market, m, cap)
+        universe = [u for u in universe if u.split(".")[-1] in exchs]
+        if not universe:
+            by_market[m] = {"target": 0, "warmed": 0, "failed": 0,
+                            "pending_left": 0, "done": False, "skipped": True,
+                            "reason": "清单为空(akshare 不可用?)"}
+            continue
 
-    return {
-        "action": "market_warm",
-        "target": len(todo),
-        "warmed": warmed,
-        "failed": failed,
-        "pending_left": max(total_pending - len(todo), 0),
-        "done": total_pending == 0,
-    }
+        pending = [u for u in universe if u not in cached_keys]
+        # full=True：一次把所有待建标的全建完（内部仍逐只拉取+限速，不阻塞事件循环）；
+        # 否则（调度/手动单趟）按 batch 截断、剩余下趟继续（自推进 catch-up）。
+        todo = pending if full else pending[:batch]
+        left = max(len(pending) - len(todo), 0)
+        by_market[m] = {
+            "target": len(todo),
+            "warmed": 0,
+            "failed": 0,
+            "pending_left": left,
+            "done": left == 0,   # 本趟后是否已无待建（全部建库）
+        }
+        summary["target"] += len(todo)
+        summary["pending_left"] += left
+        summary["done"] = summary["done"] and by_market[m]["done"]
+        todos.extend((m, vt) for vt in todo)
+
+    if not todos:
+        if not by_market:
+            return {"action": "market_warm", "skipped": True,
+                    "reason": "所选市场清单均为空(akshare 不可用?)"}
+        # 有市场但无待建（可能全部已缓存）
+        summary["action"] = "market_warm"
+        summary["markets"] = selected
+        summary["by_market"] = by_market
+        return summary
+
+    # 逐任务拉取落盘，并按市场归堆统计
+    for i, (m, vt) in enumerate(todos, start=1):
+        if progress_callback:
+            progress_callback(i, len(todos), f"预热 {vt} (1d)")
+        if await _warm_single(dm, dc, vt):
+            by_market[m]["warmed"] += 1
+            summary["warmed"] += 1
+        else:
+            by_market[m]["failed"] += 1
+            summary["failed"] += 1
+
+    summary["action"] = "market_warm"
+    summary["markets"] = selected
+    summary["by_market"] = by_market
+    return summary
 
 
 def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """构造内置任务注册表（懒解析，依赖从 sys_state 注入，可缺省）。"""
+    from .futures_download import _job_futures_auto_download
+    from .stock_download import _job_stock_auto_download
+    from .services.market_update_settings_service import MarketUpdateSettingsService
+
+    # 股票市场自动更新配置（A股/港股/美股各自独立开关与时间）
+    try:
+        mu_service = sys_state.get("market_update_settings") or MarketUpdateSettingsService()
+    except Exception:  # noqa: BLE001
+        mu_service = None
+
+    def _stock_cron(key: str, fallback: str) -> str:
+        if mu_service is None:
+            return fallback
+        try:
+            return mu_service.get_market(key).get("schedule_cron", fallback)
+        except Exception:  # noqa: BLE001
+            return fallback
+
+    def _stock_job(market: str) -> Dict[str, Any]:
+        return {
+            "name": {"A": "stock_download", "HK": "hk_download", "US": "us_download"}[market],
+            "fn": _job_stock_auto_download,
+            "cron": _stock_cron(
+                {"A": "a_stock", "HK": "hk_stock", "US": "us_stock"}[market],
+                {"A": "0 17 * * 1-5", "HK": "0 23 * * 1-5", "US": "0 5 * * 1-5"}[market]),
+            "timezone": "Asia/Shanghai",
+            "kwargs": {"sys_state": sys_state, "market": market},
+            "required": False,
+        }
+
     return [
         {
             "name": "health_check",
@@ -429,6 +554,19 @@ def build_default_jobs(sys_state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "kwargs": {"sys_state": sys_state},
             "required": False,
         },
+        {
+            # 期货数据自动下载：收盘后增量更新
+            # 品种、周期、调度时间从配置文件读取，可在 Web 界面配置
+            "name": "futures_download",
+            "fn": _job_futures_auto_download,
+            "cron": sys_state.get("futures_download_cron", "30 16 * * 1-5"),  # 默认交易日 16:30
+            "timezone": "Asia/Shanghai",
+            "kwargs": {"sys_state": sys_state},
+            "required": False,
+        },
+        _stock_job("A"),
+        _stock_job("HK"),
+        _stock_job("US"),
     ]
 
 

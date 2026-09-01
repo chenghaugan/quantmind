@@ -27,11 +27,17 @@ _CACHE_TTL = 24 * 3600  # 标的清单一日一更足够
 
 
 def _exchange_of(code: str) -> str:
-    """A股代码 -> 交易所。6xx/68x(科创板)/9xx(B股)/11x → SSE；其余 -> SZSE。"""
+    """A股代码 -> 交易所。6xx/68x(科创板)/9xx(B股)/11x → SSE；其余 → SZSE。"""
     c = code.strip()
     if c.startswith(("60", "68", "90", "11", "113", "110")):
         return "SSE"
     return "SZSE"
+
+
+def _is_bjse(code: str) -> bool:
+    """北交所/新三板代码（8xx/4xx/920）：当前无数据源支持，发现清单中排除。"""
+    return code.startswith(("43", "83", "87", "88", "920")) \
+        or (code.startswith("4") and len(code) == 6)
 
 
 def _load_cache(name: str) -> List[str]:
@@ -68,6 +74,8 @@ def fetch_a_share_symbols(cap: int = 6000) -> List[str]:
         seen: List[str] = []
         for raw in df["code"].tolist():
             code = str(raw).strip().zfill(6)
+            if _is_bjse(code):
+                continue  # 北交所：无数据源支持，不进预热/研究清单
             vt = f"{code}.{_exchange_of(code)}"
             if code and vt not in seen:
                 seen.append(vt)
@@ -106,6 +114,33 @@ def fetch_hk_symbols(cap: int = 4000) -> List[str]:
     except Exception as exc:  # noqa: BLE001
         _logger.warning("拉取港股清单失败: %s", exc)
         return []
+
+
+#: 市场标识 -> 所属交易所后缀集合（用于把市场与交易所解耦）
+MARKET_EXCHANGES = {
+    "A": {"SSE", "SZSE"},   # A股：沪深
+    "HK": {"HKEX"},          # 港股
+}
+
+
+def market_exchanges(market: str) -> set:
+    """返回某市场（'A' / 'HK'）覆盖的交易所后缀集合；未知市场返回空集。"""
+    return MARKET_EXCHANGES.get(market, set())
+
+
+def discover_market(market: str, cap: int = 6000) -> List[str]:
+    """按市场返回全市场 vt-symbol 清单（带磁盘缓存）。
+
+    - ``A`` ：A股（沪深两市，``.SSE`` / ``.SZSE``）
+    - ``HK``：港股（``.HKEX``）
+
+    失败返回空列表（由调用方跳过该市场）。
+    """
+    if market == "A":
+        return fetch_a_share_symbols(cap=cap)
+    if market == "HK":
+        return fetch_hk_symbols(cap=cap)
+    return []
 
 
 def discover_all(cap_a: int = 6000, cap_hk: int = 4000) -> List[str]:

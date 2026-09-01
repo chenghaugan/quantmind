@@ -167,7 +167,8 @@ class FactorService:
                         sym, exch_str = head.strip(), ex.strip().upper()
                 hreq = HistoryRequest(
                     symbol=sym, exchange=Exchange(exch_str), interval=interv,
-                    start=req.start, end=req.end,
+                    start=datetime.fromisoformat(req.start) if req.start else None,
+                    end=datetime.fromisoformat(req.end) if req.end else None,
                 )
                 tasks.append(self.dm.get_bar_data(hreq))
             results = await asyncio.gather(*tasks, return_exceptions=True)

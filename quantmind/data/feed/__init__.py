@@ -9,6 +9,7 @@ from .akshare_option import AkShareOptionFeed
 from .mock import MockFeed
 from .local_file import LocalFileFeed
 from .china_futures_csv import ChinaFuturesCSVFeed
+from .tqsdk_feed import TqSdkFeed
 from .local_daily import (
     LocalDailyParquetFeed,
     ChinaAStockParquetFeed,
@@ -29,6 +30,7 @@ __all__ = [
     "MockFeed",
     "LocalFileFeed",
     "ChinaFuturesCSVFeed",
+    "TqSdkFeed",
     "LocalDailyParquetFeed",
     "ChinaAStockParquetFeed",
     "ChinaHKAStockParquetFeed",
@@ -72,6 +74,12 @@ def build_default_registry(
             _logger.info("已注册本地期货源: %s (主连=%s)", local_data_root, continuous_method)
         else:
             _logger.warning("local_data_root 不存在，跳过本地源: %s", local_data_root)
+    # TqSdk 提供 8000 根 K 线（1m≈47天，5m≈251天，15m≈2年，30m≈4年），远超新浪 1023 根
+    # 需要环境变量 QM_TQSDK_USER 和 QM_TQSDK_PASS，未配置时自动跳过
+    import os
+    if os.environ.get("QM_TQSDK_USER") and os.environ.get("QM_TQSDK_PASS"):
+        reg.register(TqSdkFeed(), priority=8)
+        _logger.info("已注册 TqSdk 数据源（8000根K线）")
     reg.register(AkShareFuturesFeed(), priority=10)
     reg.register(EfinanceFeed(), priority=11)  # efinance 作为期货数据备选源
     if local_stock_root:

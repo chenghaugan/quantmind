@@ -15,7 +15,7 @@ from ...config import get_settings
 from ...ai import build_provider
 
 # 允许前端更新的字段白名单
-_ALLOWED = {"provider", "api_key", "base_url", "model", "temperature"}
+_ALLOWED = {"provider", "api_key", "base_url", "model", "temperature", "timeout"}
 
 # 字段 -> 环境变量名（与 config.Settings 的 env_prefix="QM_" 对应）
 _ENV_MAP = {
@@ -24,6 +24,7 @@ _ENV_MAP = {
     "base_url": "QM_LLM_BASE_URL",
     "model": "QM_LLM_MODEL",
     "temperature": "QM_LLM_TEMPERATURE",
+    "timeout": "QM_LLM_TIMEOUT",
 }
 
 
@@ -55,6 +56,11 @@ class SettingsService:
                     val = float(val)
                 except (TypeError, ValueError):
                     val = 0.7
+            elif field == "timeout":
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    val = 120.0
             d[field] = val
         return d
 
@@ -165,6 +171,7 @@ class SettingsService:
             self.data.get("base_url", ""),
             self.data.get("model", ""),
             float(self.data.get("temperature", 0.7)),
+            timeout=float(self.data.get("timeout", 120.0)),
         )
 
     async def test(self, idea: str = "用一句话返回一个期货动量因子的名称。") -> Dict[str, Any]:

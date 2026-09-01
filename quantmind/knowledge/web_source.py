@@ -37,7 +37,7 @@ async def gather_web(idea: str, max_results: int = 3) -> List[dict]:
     try:
         client = _api_key()
         if client:
-            results = _tavily_search(client, idea, max_results)
+            results = await _tavily_search(client, idea, max_results)
             if results:
                 return results
     except Exception as exc:  # noqa: BLE001

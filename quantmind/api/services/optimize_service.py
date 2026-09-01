@@ -46,6 +46,19 @@ METRICS = [
 ]
 
 
+def _norm_range(x) -> Any:
+    """把整数值归一化为 int，保留真小数，避免整数窗口/步长被浮点化。
+
+    例：[3, 15, 2] → (3, 15, 2)（int，可喂给 range 与 ArrayManager）
+       [0.2, 0.8, 0.1] → (0.2, 0.8, 0.1)（float，交给 optuna/网格回退）
+    """
+    try:
+        f = float(x)
+    except (TypeError, ValueError):
+        return x
+    return int(x) if x == int(x) else f
+
+
 class OptimizeService:
     def __init__(self, dm: DataManager, resolver=None):
         self.dm = dm
@@ -94,7 +107,7 @@ class OptimizeService:
                 raise ValueError(
                     "Optuna 需要 param_ranges（参数名 -> [low, high, step]），如 {'fast': [3,15,2], 'slow': [20,60,5]}"
                 )
-            param_defs = {k: tuple(float(x) if i < 2 else int(x) for i, x in enumerate(v))
+            param_defs = {k: tuple(_norm_range(x) for x in v)
                           for k, v in param_ranges.items()}
             n_trials = int(getattr(req, "n_trials", 30) or 30)
             max_combos = getattr(req, "max_combos", 200) or 200

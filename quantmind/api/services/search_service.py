@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import time
@@ -378,6 +379,9 @@ class SearchService:
         long_short: bool = True,
         cost_rate: float = 0.0,
         max_candidates: int = 8,
+        net_gate: bool = False,
+        max_turnover: float = 0.0,
+        min_net_sharpe: float = 0.0,
     ) -> dict:
         """端到端因子挖掘流水线。
 
@@ -407,6 +411,9 @@ class SearchService:
             long_short=long_short,
             cost_rate=cost_rate,
             max_candidates=max_candidates,
+            net_gate=net_gate,
+            max_turnover=max_turnover,
+            min_net_sharpe=min_net_sharpe,
             persist_pairs=False,
         )
         loop = asyncio.get_running_loop()
@@ -446,7 +453,9 @@ class SearchService:
         return out
 
     # -- 端到端编排（AI 证据 → 挖掘 → 复合 → 策略代码）+ 可选沉淀知识库 ----------
-    async def e2e(self, req: FactorE2ERequest, ingest: bool = True) -> dict:
+    async def e2e(self, req: FactorE2ERequest, ingest: bool = True,
+                 bt_service: Optional["BacktestService"] = None,
+                 progress: Optional[Dict[str, Any]] = None) -> dict:
         """端到端因子研究。
 
         在标的面板上跑 :func:`quantmind.research.run_e2e`（AI 证据研究 →
@@ -457,14 +466,20 @@ class SearchService:
         （``{"ingested": True, "kb_records": n}``）。
         strategy code 保留完整不截断。
         """
-        # 短期结果缓存：同一 (idea, 标的集, 交易所, 算法, 轮数, 前向期, ingest, gate, promote) 在 TTL 内
-        # 复用上次结果，避免前端重复点击触发 85s+ 长跑；参数/标的/idea 变化即换新 key。
+        # 短期结果缓存：同一 (idea, 标的集, 交易所, 算法, 轮数, 前向期, ingest, gate, promote)
+        # 及全部影响结果的参数（start/end/seeds/cost_rate/…）在 TTL 内复用上次结果，
+        # 避免前端重复点击触发 85s+ 长跑；任一参数变化即换新 key。
+        _rest = req.model_dump(exclude={"idea", "symbols", "exchange", "interval",
+                                        "algo", "rounds", "forward_periods"})
         cache_key = (str(req.idea),
                      tuple(sorted(s for s in (req.symbols or []) if s)),
                      str(req.exchange), str(req.interval), str(req.algo), int(req.rounds),
                      int(req.forward_periods), bool(ingest),
                      _hash_gate(getattr(req, "gate", None)),
-                     bool(getattr(req, "promote", False)))
+                     bool(getattr(req, "promote", False)),
+                     uuid.uuid5(uuid.NAMESPACE_OID,
+                                json.dumps(_rest, sort_keys=True, ensure_ascii=False,
+                                            default=str)).hex)
         cached = self._e2e_cache.get(cache_key)
         if cached is not None and (time.time() - cached[0]) < _E2E_CACHE_TTL:
             out = dict(cached[1])
@@ -523,6 +538,9 @@ class SearchService:
             long_short=req.long_short,
             cost_rate=req.cost_rate,
             max_candidates=req.max_candidates,
+            net_gate=getattr(req, "net_gate", False),
+            max_turnover=getattr(req, "max_turnover", 0.0),
+            min_net_sharpe=getattr(req, "min_net_sharpe", 0.0),
             verify_threshold=req.verify_threshold,
             run_search=req.run_search,
             max_rounds=req.max_rounds,
@@ -545,7 +563,8 @@ class SearchService:
 
         report = await loop.run_in_executor(
             None, lambda: _run_e2e(panel, config=cfg, provider=self.provider,
-                                   knowledge_context=knowledge_context),
+                                   knowledge_context=knowledge_context,
+                                   progress=progress),
         )
 
         out = _sanitize(report)
@@ -601,6 +620,34 @@ class SearchService:
         # 任何异常只记录到返回 dict 的 ``gate`` 字段，绝不影响主报告。
         if getattr(req, "gate", None):
             out["gate"] = await self._gate_judge_and_promote(report, req)
+
+        # ------------------------------------------------------------------
+        # 阶段5（借鉴 LLM 策略挖掘页）：生成的策略代码直接进真实 CTA 回测闭环。
+        # 复用 BacktestService.validate_strategy 的审定代码直传能力：
+        # 注册 → 多品种真实回测 → 门槛判定 → 达标入库。全程失败闭合：
+        # 任何异常只写入 out["strategy_backtest"]["error"]，不影响主报告。
+        # ------------------------------------------------------------------
+        _strategy = out.get("strategy") or {}
+        _code = str(_strategy.get("code") or "")
+        if bt_service is not None and _code and _strategy.get("code_safe"):
+            try:
+                from types import SimpleNamespace
+                from ...core.engine import EventEngine
+                bt = bt_service or BacktestService(self.dm, EventEngine())
+                bt_req = SimpleNamespace(
+                    idea=req.idea, code=_code,
+                    symbols=symbols or [],
+                    exchange=req.exchange,
+                    interval=req.interval, intervals=None,
+                    start=req.start, end=req.end,
+                    setting={}, cost=bool(getattr(req, "cost_rate", 0)),
+                    gate=getattr(req, "gate", None),
+                    promote=bool(getattr(req, "promote", False)),
+                    optimization=None)
+                out["strategy_backtest"] = _sanitize(
+                    await bt.validate_strategy(bt_req, provider=self.provider))
+            except Exception as exc:  # noqa: BLE001
+                out["strategy_backtest"] = {"error": str(exc)[:200]}
 
         return out
 

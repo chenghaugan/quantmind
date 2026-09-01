@@ -25,7 +25,7 @@ def test_lookup_cost_normalizes_symbol():
     # 纯数字 -> A 股
     eq = lookup_cost("600519.SSE")
     assert eq.asset_class == "equity"
-    assert eq.stamp_tax_rate == 0.001
+    assert eq.stamp_tax_rate == 0.0005  # 2023-08-28 后现行税率 0.05%
     # 未知 -> 商品期货通用
     assert lookup_cost("ZZZ.COMEX").asset_class == "future"
 
@@ -47,11 +47,28 @@ def test_min_commission_floor():
     assert fee == pytest.approx(5.0)
 
 
+def test_lookup_cost_us_equity():
+    """美股（NASDAQ/NYSE/AMEX）应解析到美股成本，而非期货兜底。"""
+    for exch in ("NASDAQ", "NYSE", "AMEX"):
+        c = lookup_cost(f"AAPL.{exch}")
+        assert c.asset_class == "equity"
+        assert c.commission_rate == 0.0          # 免佣
+        assert abs(c.slippage_rate - 0.0005) < 1e-9  # 用滑点近似成本
+        assert c.stamp_tax_rate == 0.0
+
+
+def test_lookup_cost_hk_stamp_tax_current():
+    """港股印花税按 2023-11-17 后现行 0.1% 校准。"""
+    c = lookup_cost("00700.HKEX")
+    assert c.asset_class == "equity"
+    assert c.stamp_tax_rate == pytest.approx(0.001)
+
+
 def test_stamp_tax_only_on_sell():
     eq = lookup_cost("600519.SSE")
     _, tax_sell, _ = compute_commission(eq, 100, 10.0, 1, Direction.SHORT, Offset.CLOSE, close_today_volume=0)
     _, tax_buy, _ = compute_commission(eq, 100, 10.0, 1, Direction.LONG, Offset.OPEN, close_today_volume=0)
-    assert tax_sell == pytest.approx(100 * 10.0 * 1 * 0.001)
+    assert tax_sell == pytest.approx(100 * 10.0 * 1 * 0.0005)
     assert tax_buy == 0.0
 
 
@@ -92,7 +109,7 @@ def test_engine_equity_stamp_tax():
     eng._apply_fill(vt, Direction.SHORT, 100, 110.0, Offset.CLOSE, d)
     # 佣金: 100*100*100*0.00025=250 ; 110*100*100*0.00025=275 -> 525
     assert eng.total_commission == pytest.approx(250 + 275)
-    assert eng.total_stamp == pytest.approx(110 * 100 * 100 * 0.001)
+    assert eng.total_stamp == pytest.approx(110 * 100 * 100 * 0.0005)
     assert eng.margin_used == pytest.approx(0.0)  # 股票 margin_rate=1 但平仓后净仓 0
 
 

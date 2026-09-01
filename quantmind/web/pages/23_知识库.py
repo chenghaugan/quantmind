@@ -86,23 +86,19 @@ with col_k:
         }.get(x, x),
     )
 
-# 实时搜索：输入即搜（用 session_state 缓存结果）
+# 实时搜索：输入即搜（不持久缓存：错误结果与新入库条目都不能被旧缓存遮蔽）
 if query.strip():
-    search_key = f"search_{query}_{kind_filter}"
-    if search_key not in st.session_state:
-        with st.spinner("检索中..."):
-            sres = APIClient.knowledge_search(
-                query.strip(),
-                top_k=20,
-                kind=None if kind_filter == "全部" else kind_filter,
-            )
-        if guard_error(sres, "知识库检索"):
-            st.session_state[search_key] = []
-        else:
-            results = sres.get("results") or sres.get("hits") or []
-            st.session_state[search_key] = results
-    
-    results = st.session_state.get(search_key, [])
+    with st.spinner("检索中..."):
+        sres = APIClient.knowledge_search(
+            query.strip(),
+            top_k=20,
+            kind=None if kind_filter == "全部" else kind_filter,
+        )
+    if guard_error(sres, "知识库检索"):
+        results = []
+    else:
+        results = sres.get("results") or sres.get("hits") or []
+    results = results or []
     if results:
         st.caption(f"找到 {len(results)} 条结果")
         for r in results:

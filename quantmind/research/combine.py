@@ -29,7 +29,7 @@ import pandas as pd
 from .factors.alpha_cs import Panel
 from .factors.panel_expr import panel_eval_expression
 from .eval import evaluate_expression
-from .cross_sectional_backtest import _factor_scores, _run_portfolio
+from .cross_sectional_backtest import _factor_scores, _run_portfolio, _portfolio_output
 from .evaluator import FactorEvaluator
 from .barra import barra_factor_risk_attribution
 
@@ -473,7 +473,7 @@ def composite_backtest(
     )
 
     # 5) 复合信号截面多空回测
-    curve, port_ret, perf = _run_portfolio(
+    gross_curve, net_curve, port_ret, g_perf, n_perf, turnover_list = _run_portfolio(
         panel, composite, forward_periods, n_groups, long_short, cost_rate)
     comp_ic = evaluator.evaluate_factor_panel(
         composite, panel, forward_periods=forward_periods,
@@ -513,7 +513,7 @@ def composite_backtest(
         "scheme": scheme,
         "weights": {k: round(float(v), 4) for k, v in weights.items()},
         "n_symbols": len(panel.symbols),
-        "n_dates": len(curve),
+        "n_dates": len(gross_curve),
         "ic_report": comp_ic.to_dict(),
         "factor_ics": {k: round(float(v["ic_mean"]), 4) for k, v in ic_rep_map.items()},
         "ic_ts": ic_ts,
@@ -522,7 +522,9 @@ def composite_backtest(
             "values": [[None if v != v else round(float(v), 4) for v in corr_df.loc[c]]
                        for c in corr_df.index],
         },
-        "portfolio": {**perf.to_dict(), "daily_returns": [float(x) for x in port_ret]},
+        "portfolio": _portfolio_output(g_perf, n_perf, port_ret, turnover_list),
+        "gross_curve": gross_curve,
+        "net_curve": net_curve,
         "risk_attribution": risk_attribution,
         "composite": composite,
     }

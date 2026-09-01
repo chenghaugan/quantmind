@@ -108,13 +108,19 @@ class FactorSearcher(BaseAlgo):
 
         result = SearchResult(seed=seed, _best_expression=seed)
 
-        # 1) 评估 seed 作为基线
-        seed_metrics = await evaluate_fn(seed)
-        result.seed_rank_ic = seed_metrics.get("rank_ic", float("nan"))
-        rseed = map_rank(seed_metrics.get("rank_ic"))
-        result.best_rank_ic = rseed
-        result.best_ic = seed_metrics.get("ic", float("nan"))
-        _logger.info("seed=%s seed_rank_ic=%.4f", seed, rseed)
+        # 1) 评估 seed 作为基线；cold_start 时首轮不评估 seed（直接当作上一轮上下文）
+        if self.cold_start:
+            result.seed_rank_ic = float("nan")
+            result.best_rank_ic = float("nan")
+            result.best_ic = float("nan")
+            _logger.info("cold_start: 首轮不评估 seed=%s，直接作为上一轮上下文", seed)
+        else:
+            seed_metrics = await evaluate_fn(seed)
+            result.seed_rank_ic = seed_metrics.get("rank_ic", float("nan"))
+            rseed = map_rank(seed_metrics.get("rank_ic"))
+            result.best_rank_ic = rseed
+            result.best_ic = seed_metrics.get("ic", float("nan"))
+            _logger.info("seed=%s seed_rank_ic=%.4f", seed, rseed)
 
         history: List[dict] = []
 

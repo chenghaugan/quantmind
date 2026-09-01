@@ -95,5 +95,8 @@ class PairTradingStrategy(CtaTemplate):
             target = 0.0                   # 回归 -> 平仓
         else:
             return  # 持仓中、未触发出场阈值，保持
-        self.set_target(bar.vt_symbol, target * self.size)
+        oid = self.set_target(bar.vt_symbol, target * self.size)
+        if oid == "":
+            # 风控拒单：不更新 pos，下一根 bar 重试
+            return
         self.pos = target * self.size

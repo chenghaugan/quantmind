@@ -65,6 +65,8 @@ STRATEGY_ADJUSTMENT_SYSTEM = """你是一名量化策略优化专家。
 2. 回撤过大 → 收紧止损、降低最大仓位
 3. 胜率过低 → 提高入场阈值，减少噪音交易
 4. 交易次数过少 → 降低阈值或缩短窗口
+5. 交易成本占比过高（cost_ratio > 上限，即高换手）→ 降低交易频率：
+   拉大卫差/阈值、加长均线窗口、提高入场置信度，让每一笔持仓更久，摊薄成本
 
 输出完整的 StrategySpec JSON，保持结构不变，只调整参数值。
 """
@@ -127,6 +129,10 @@ def build_adjustment_prompt(
     min_sharpe: float,
     max_drawdown_threshold: float,
     iteration: int,
+    total_cost: float = 0.0,
+    cost_ratio: float = 0.0,
+    trade_count: int = 0,
+    max_cost_ratio: float = 0.0,
 ) -> str:
     """构建参数调整的用户提示。
 
@@ -139,6 +145,10 @@ def build_adjustment_prompt(
         min_sharpe: 目标最低 Sharpe
         max_drawdown_threshold: 目标最大回撤下限
         iteration: 当前迭代次数
+        total_cost: 总交易成本（含成本时）
+        cost_ratio: 成本/净收益占比
+        trade_count: 成交笔数
+        max_cost_ratio: 成本占比上限（0=不限制）
 
     Returns:
         格式化的调整提示字符串
@@ -151,6 +161,9 @@ def build_adjustment_prompt(
 - 最大回撤：{max_drawdown:.4f} (目标：≥ {max_drawdown_threshold})
 - 年化收益：{annual_return:.4f}
 - 胜率：{win_rate:.4f}
+- 成交笔数：{trade_count}
+- 总交易成本：{total_cost:.2f}
+- 成本/净收益：{cost_ratio:.4f} (上限：{max_cost_ratio if max_cost_ratio else '不限'})
 
 ## 任务
 这是第 {iteration} 次迭代。策略未通过闸门。请分析失败原因，调整参数，
@@ -159,6 +172,8 @@ def build_adjustment_prompt(
 调整原则：
 - 如果 Sharpe 过低，考虑降低阈值或调整因子权重
 - 如果回撤过大，考虑收紧止损或降低仓位
+- 如果成本/净收益占比过高（高换手），务必降低交易频率：拉大卫差/阈值、
+  加长窗口、提高入场置信度，让单笔持仓更久以摊薄成本
 - 保持策略逻辑不变，只调整参数
 
 输出完整的 StrategySpec JSON。

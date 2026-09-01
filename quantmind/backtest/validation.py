@@ -166,11 +166,13 @@ def shuffle_noise_test(
     # 但若真实收益异常高且无法在置乱中复现，需人工审视是否前视。
     threshold = mean + 2.0 * std
     if real_total > threshold:
-        no_lookahead = True
-        note = "真实收益显著高于置乱分布，存在可复现的时序 alpha（非前视信号的正常表现）"
+        # 真实收益远超置乱分布上界：置乱破坏时序结构后无法复现，
+        # 高收益很可能来自前视/未来函数，标记为可疑并需人工审查。
+        no_lookahead = False
+        note = "真实收益显著高于置乱分布上界，疑似前视/未来函数，请人工审查"
     else:
         no_lookahead = True
-        note = "真实收益不显著高于置乱分布，策略 alpha 存疑（可能无有效信号或收益来自噪声）"
+        note = "真实收益未显著超过置乱分布上界，未见前视迹象（但 alpha 可能无效或来自噪声）"
     return {
         "n_shuffles": len(arr),
         "mean_total_return": round(mean, 4),

@@ -103,6 +103,9 @@ async def _chat_json(provider: LLMProvider, system: str, user: str, allow):
     except Exception as exc:  # noqa: BLE001
         _logger.warning("judge LLM 调用失败: %s", exc)
         return None, ""
+    if not text:
+        # provider 可能返回 None（工具调用/拒答时 content 缺失）
+        return None, ""
     blob = re.search(r"\{.*\}", text, re.S)
     if not blob:
         return None, text

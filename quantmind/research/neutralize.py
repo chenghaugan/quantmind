@@ -76,8 +76,14 @@ def cross_sectional_neutralize(
                 sp = styles[nm].loc[d].reindex(valid_idx).dropna()
                 valid_idx = valid_idx.intersection(sp.index)
                 style_cols.append(sp.rename(nm))
+            if has_mc:
+                # 市值变量不能被 style 分支的 cols 重建覆盖掉
+                mc = np.log(market_cap.loc[d].reindex(valid_idx).replace(0, np.nan)).dropna()
+                valid_idx = valid_idx.intersection(mc.index)
+                style_cols.append(mc.rename("mc"))
             yw = yw.loc[valid_idx]
-            cols = [pd.Series(1.0, index=valid_idx, name="const")] + style_cols
+            cols = [pd.Series(1.0, index=valid_idx, name="const")] \
+                + [s.reindex(valid_idx) for s in style_cols]
         if has_ind:
             ind = industry.loc[d].reindex(valid_idx)
             valid_idx = valid_idx.intersection(ind.dropna().index)
@@ -135,7 +141,11 @@ def orthogonalize_factors(
     for i in range(z.shape[1]):
         v = z.iloc[:, i].copy()
         for b in base:
-            proj = (v * b).sum() / (b * b).sum()
+            denom = (b * b).sum()
+            if denom <= 1e-12:
+                # 零方差向量（常量因子）：跳过投影，避免 0/0=NaN 毒化后续所有因子
+                continue
+            proj = (v * b).sum() / denom
             v = v - proj * b
         base.append(v)
         ortho.append(v)

@@ -11,6 +11,7 @@ from .diagnostics import (
     limit_day_mask, detect_lookahead, diagnose_overfitting, health_checks, HealthReport,
 )
 from .walkforward import walk_forward, WalkForwardResult, WalkForwardFold
+from .rollover import round_trip_cost_bps, estimate_rollover_drag, summarize_rollovers
 
 __all__ = [
     "BacktestEngine",
@@ -36,4 +37,7 @@ __all__ = [
     "walk_forward",
     "WalkForwardResult",
     "WalkForwardFold",
+    "round_trip_cost_bps",
+    "estimate_rollover_drag",
+    "summarize_rollovers",
 ]

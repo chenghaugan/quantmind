@@ -106,6 +106,9 @@ def download_reports(reports: List[Dict], output_dir: Path, limit: Optional[int]
             downloaded.append(pdf_path)
             print(f"    ✓ {pdf_path.name}")
         except Exception as e:
+            # 失败也 append None 占位，保证 downloaded[i] 与 all_reports[i] 对齐，
+            # 否则后续 zip 会错位配对（报告 A 的标题 + 报告 B 的 PDF 内容）
+            downloaded.append(None)
             print(f"    ✗ 下载失败：{e}")
     
     return downloaded
@@ -323,6 +326,9 @@ def main() -> int:
     added = skipped = failed = 0
     
     for i, (report, pdf_path) in enumerate(zip(all_reports[:len(downloaded)], downloaded)):
+        if pdf_path is None:  # 下载失败占位：跳过，不与后续报告错位配对
+            failed += 1
+            continue
         if report["title"] in existing and not args.refresh:
             print(f"  跳过已存在：{report['title'][:40]}")
             skipped += 1

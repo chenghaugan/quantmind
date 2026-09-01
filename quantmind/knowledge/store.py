@@ -643,6 +643,14 @@ class KnowledgeStore:
             return None
         return self._lifecycle_dict(row)
 
+    def delete_strategy_lifecycle(self, strategy_id: str) -> bool:
+        """删除一条策略生命周期记录，返回是否成功删除。"""
+        with self._lock, self._closing() as conn:
+            cur = conn.execute(
+                "DELETE FROM lifecycle WHERE strategy_id = ?", (strategy_id,)
+            )
+            return cur.rowcount > 0
+
     def list_strategy_lifecycles(
         self,
         limit: int = 50,
@@ -783,12 +791,14 @@ class KnowledgeStore:
             if status_set and r["status"] not in status_set:
                 continue
             run_meta = self._run_market_offline(r["run_id"])
-            if market and market not in (run_meta or ""):
+            run_idea = (run_meta or ("", ""))[0]
+            run_market = (run_meta or ("", ""))[1]
+            if market and market != run_market:
                 continue
-            # idea 关键词宽松匹配：命中所属 run 的想法(run_meta)或该 trial 自身
+            # idea 关键词宽松匹配：命中所属 run 的想法(run_idea)或该 trial 自身
             # 的 expression/text 均可（trial 的 idea 挂在其 run 上，r["text"] 不含 idea）。
             if tokens and not any(
-                t in (run_meta or "")
+                t in run_idea
                 or t in (r["expression"] or "")
                 or (r["text"] or "").find(t) >= 0
                 for t in tokens
@@ -808,7 +818,8 @@ class KnowledgeStore:
                 "metadata": {
                     **{k: v for k, v in _row_metadata(r, "trial").items()
                        if k not in ("run_id",)},
-                    "idea": run_meta or "",
+                    "idea": run_idea,
+                    "market": run_market,
                     "trial_id": r["trial_id"],
                 },
             })
@@ -820,15 +831,19 @@ class KnowledgeStore:
         )
         return out[: max(1, top_k)]
 
-    def _run_market_offline(self, run_id: str) -> Optional[str]:
-        """按 run_id 取所属运行的 market（供成败因子跨运行拼接 idea/market）。"""
+    def _run_market_offline(self, run_id: str) -> Optional[tuple]:
+        """按 run_id 取所属运行的 (idea, market)（供成败因子跨运行检索）。
+
+        idea 与 market 必须分开返回：market 过滤只比对 market 字段，
+        idea 关键词匹配只对 idea 文本（原先拼在一起会漏检/误检）。
+        """
         with self._lock, self._closing() as conn:
             row = conn.execute(
                 "SELECT idea, market FROM e2e_runs WHERE run_id=?", (run_id,)
             ).fetchone()
         if row is None:
             return None
-        return row["idea"] or row["market"] or ""
+        return (row["idea"] or "", row["market"] or "")
 
     # -- 检索 ---------------------------------------------------------------
     def search(

@@ -42,12 +42,19 @@ def _rank_cs(df: pd.DataFrame, pct: bool = True) -> pd.DataFrame:
     return df.rank(axis=1, method="average", pct=pct)
 
 
+def _pos_d(d: int, name: str) -> int:
+    v = int(d)
+    if v <= 0:
+        raise ValueError(f"{name} 窗口必须为正整数，禁止负偏移（前视）：{d}")
+    return v
+
+
 def _delay(s: pd.Series, d: int) -> pd.Series:
-    return s.shift(d)
+    return s.shift(_pos_d(d, "delay"))
 
 
 def _delta(s: pd.Series, d: int) -> pd.Series:
-    return s - s.shift(d)
+    return s - s.shift(_pos_d(d, "delta"))
 
 
 def _corr(a: pd.Series, b: pd.Series, d: int) -> pd.Series:

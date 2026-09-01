@@ -80,9 +80,9 @@ class TestTradingCalendar:
         assert not self.cal.has_night_session(date(2026, 9, 30))
         assert not self.cal.is_trading_time(bj(2026, 9, 30, 22, 0), "rb2410", "SHFE")
 
-    def test_no_night_on_friday(self):
-        """周五晚有夜盘（归属下周一）——周六不是交易日，所以应无夜盘。"""
-        assert not self.cal.has_night_session(date(2026, 8, 7))  # 周五 → 周六非交易日
+    def test_night_on_friday(self):
+        """周五晚有夜盘（归属下周一，间隔 3 天）。"""
+        assert self.cal.has_night_session(date(2026, 8, 7))  # 周五 → 下周一开市
 
     def test_stock_sessions(self):
         assert not self.cal.is_trading_time(bj(2026, 8, 3, 9, 20), "600000", "SSE")
