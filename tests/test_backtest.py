@@ -41,10 +41,14 @@ async def test_no_lookahead_fill_next_bar():
     eng = BacktestEngine({vt: bars}, capital=1_000_000, sizes={vt: default_size(vt)})
     eng.add_strategy(DualMaStrategy, vt, {"fast": 3, "slow": 5, "size": default_size(vt), "max_pos": 1.0})
     eng.run()
-    # 所有成交价应等于某根 K 线的开盘价（下一根开盘）
+    # 所有成交价应等于某根 K 线的开盘价（下一根开盘）；
+    # 期末强平（若有持仓）按末日收盘价合成，属预期特例
     opens = {b.open_price for b in bars}
-    for t in eng.trades:
+    for t in eng.trades[:-1]:
         assert t.price in opens
+    if eng.trades:
+        assert (eng.trades[-1].price in opens
+                or eng.trades[-1].price == bars[-1].close_price)
 
 
 @pytest.mark.asyncio

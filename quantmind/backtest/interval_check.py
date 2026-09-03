@@ -50,6 +50,20 @@ def check_strategy_interval_compatibility(code: str, interval: str) -> Dict[str,
         )
         suggestions.append("将数据周期改为内日数据：1h / 30m / 15m / 5m / 1m")
         suggestions.append("或移除日内时间判断逻辑，改为日线级别的出场规则（如持仓 N 天后平仓）")
+
+    # 内日数据 + 策略引用 self.daily/self.mtf：正常（框架自动注入多周期上下文，无前视）
+    uses_tf_ctx = "self.daily" in code or "self.mtf" in code
+    if interval != "1d" and uses_tf_ctx:
+        suggestions.append(
+            "已启用日线级上下文（self.daily）：日线指标均基于当前交易日之前的"
+            "已完成日线计算，无前视偏差。")
+
+    # 日线数据 + 策略引用多周期上下文：日线周期下无意义
+    if interval == "1d" and uses_tf_ctx:
+        issues.append(
+            "策略代码引用了 self.daily/self.mtf（多周期上下文），但数据周期本身为日线（1d）。"
+            "多周期上下文仅在内日（分钟/小时）周期回测时由框架自动注入。")
+        suggestions.append("移除 self.daily 相关查询，直接用日线数据计算指标；或改用内日数据周期。")
     
     # 内日数据但策略没有日内逻辑（可能是疏忽，仅警告）
     if interval != "1d" and not has_intraday_logic:
@@ -60,6 +74,10 @@ def check_strategy_interval_compatibility(code: str, interval: str) -> Dict[str,
                 has_day_logic = True
                 break
             if isinstance(node, ast.Attribute) and node.attr == "date":
+                has_day_logic = True
+                break
+            # 使用 self.daily/self.mtf（多周期上下文注入）的策略本就是多周期混合结构
+            if isinstance(node, ast.Attribute) and node.attr in ("daily", "mtf"):
                 has_day_logic = True
                 break
         

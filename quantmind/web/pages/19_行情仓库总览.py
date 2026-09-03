@@ -79,7 +79,9 @@ kpi_row([
     {"label": "标的数", "value": fmt_num(_files, 0), "tone": "accent",
      "hint": "文件数（标的×周期）"},
     {"label": "K 线总数", "value": fmt_num(_rows, 0), "tone": "neutral"},
-    {"label": "最新交易日", "value": (stats.get("last_datetime") or "—")[:10],
+    {"label": "最新交易日", "value": (pd.to_datetime(stats.get("last_datetime"), utc=True)
+                                      .tz_convert("Asia/Shanghai").strftime("%Y-%m-%d")
+                                      if stats.get("last_datetime") else "—"),
      "tone": "neutral"},
     {"label": "落后标的", "value": f"{_n_stale} / {_files} (最差 {_worst}d)",
      "tone": "danger" if _n_stale else "success"},
@@ -141,8 +143,8 @@ if _by_exch:
     try:
         _cov = pd.DataFrame([{
             "交易所": f"{b.get('exchange')} ({b.get('market','')})",
-            "起点": pd.to_datetime(b.get("coverage_start")) if b.get("coverage_start") else None,
-            "终点": pd.to_datetime(b.get("coverage_end")) if b.get("coverage_end") else None,
+            "起点": pd.to_datetime(b.get("coverage_start"), utc=True).tz_convert("Asia/Shanghai") if b.get("coverage_start") else None,
+            "终点": pd.to_datetime(b.get("coverage_end"), utc=True).tz_convert("Asia/Shanghai") if b.get("coverage_end") else None,
             "K线数": b.get("rows", 0),
             "标的数": b.get("symbols", 0),
         } for b in _by_exch])

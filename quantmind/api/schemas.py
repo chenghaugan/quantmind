@@ -168,6 +168,15 @@ class StrategyDraftRequest(BaseModel):
 
     idea: str = ""                       # 首轮：策略思想；后续轮可空（修改意见在 history 末尾）
     history: List[StrategyDraftMessage] = []  # 完整对话史（截断由前端负责）
+    interval: str = "1d"                 # 数据周期（告知 LLM 多周期上下文可用性）
+
+
+class AssistantChatRequest(BaseModel):
+    """AI 投资助手对话（右下角悬浮面板）：无状态多轮，历史由前端携带。"""
+
+    message: str = ""                      # 本轮用户消息
+    history: List[StrategyDraftMessage] = []  # 对话历史（截断由后端负责）
+    context: Dict[str, str] = {}           # 工作流上下文：idea / code / result_summary
 
 
 class StrategyRegisterRequest(BaseModel):

@@ -18,6 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import plotly.graph_objects as go
 import streamlit as st
 
+import pandas as pd
+
+
 from utils.api_client import APIClient
 from utils.theme import kpi_row, note, page_header, setup_page, verdict
 
@@ -318,6 +321,7 @@ note(
     "参数未优化，结果仅供研究参考。",
     "info",
 )
+# AI 投资助手已在 setup_page() 内全局挂载，无需逐页调用
 
 
 
@@ -325,7 +329,9 @@ def _start_draft(history_msgs: list) -> None:
     """发起一轮 LLM 策略编程（生成/修改），进入草稿轮询。"""
     try:
         started = APIClient.post("/strategy/draft/start", json={
-            "idea": idea.strip(), "history": history_msgs}, timeout=30)
+            "idea": idea.strip(), "history": history_msgs,
+            "interval": (st.session_state.get("val_intervals") or ["1d"])[0],
+        }, timeout=30)
     except Exception as exc:  # noqa: BLE001
         note(f"启动失败：{exc}", "error")
         st.stop()
@@ -359,6 +365,10 @@ def _draft_poll_fragment() -> None:
             st.session_state["draft_error"] = res["error"]
         _persist_workflow()
         st.session_state.pop("draft_task_id", None)
+        # 自修复轮次透出（借鉴：LLM 失败自修订对用户可见）
+        _rr = int((res or {}).get("repair_rounds") or 0)
+        if _rr > 0 and res.get("sandbox_ok"):
+            st.session_state["draft_repaired"] = _rr
         # 一键运行：代码生成成功且通过沙箱 → 自动开始回测
         auto = st.session_state.pop("draft_auto_backtest", False)
         if auto and res.get("sandbox_ok") and not res.get("error"):
@@ -514,13 +524,30 @@ _has_code = st.session_state.val_generated_code is not None
 if _has_code:
     _sandbox_raw = st.session_state.get("val_code_sandbox_ok")
     _sandbox_ok = bool(_sandbox_raw)
+    _repaired = st.session_state.pop("draft_repaired", None)
+    if _repaired:
+        st.info(f"🧬 LLM 已自修复 {_repaired} 轮后通过沙箱校验。")
+    _check_done = st.session_state.pop("code_check_done", None)
+    if _check_done:
+        if _check_done.startswith("✅"):
+            st.success(_check_done)
+        else:
+            st.error(_check_done)
     if _sandbox_raw is None:
         st.warning("✏️ 代码已恢复，尚未检验：请点击「🔍 检验修改」确认沙箱状态")
     elif _sandbox_ok:
         st.success("📝 策略代码（可手动编辑，或填写修改意见让 LLM 修改）")
     else:
-        st.error("⚠️ 当前代码未通过沙箱校验，请修正后点击「🔍 检验修改」，"
-                 "或填写修改意见让 LLM 修复")
+        # 显示真实沙箱错误（复用校验端点），帮用户直接定位问题
+        _err_reason = ""
+        try:
+            _vr = APIClient.post("/strategy/draft/validate",
+                                 {"code": st.session_state.val_generated_code}, timeout=10)
+            _err_reason = _vr.get("error") or ""
+        except Exception:
+            pass
+        st.error(f"⚠️ 当前代码未通过沙箱校验：{_err_reason or '原因未知'}。"
+                 "请修正后点击「🔍 检验修改」，或填写修改意见让 LLM 修复")
 
     edited_code = st.text_area(
         "策略代码",
@@ -532,22 +559,27 @@ if _has_code:
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
+        # 直接检验编辑器当前内容（幂等，无需判断"是否修改"）
         if st.button("🔍 检验修改", type="secondary", width="stretch"):
-            if edited_code != st.session_state.val_generated_code:
-                try:
-                    _r = APIClient.post("/strategy/draft/validate",
-                                        {"code": edited_code}, timeout=10)
-                    if _r.get("ok"):
-                        st.session_state.val_generated_code = edited_code
-                        st.session_state.val_code_sandbox_ok = True
-                        _persist_workflow()
-                        st.rerun()
-                    else:
-                        st.error(f"❌ 沙箱校验失败：{_r.get('error', '未知错误')}")
-                except Exception as e:
-                    st.error(f"检验请求失败：{e}")
-            else:
-                st.info("代码未修改")
+            try:
+                _r = APIClient.post("/strategy/draft/validate",
+                                    {"code": edited_code}, timeout=10)
+                if _r.get("ok"):
+                    st.session_state.val_generated_code = edited_code
+                    st.session_state.val_code_sandbox_ok = True
+                    st.session_state["code_check_done"] = "✅ 沙箱校验通过，代码已更新"
+                    _persist_workflow()
+                    st.rerun()
+                else:
+                    # 失败的编辑也同步到状态：让 LLM 修改时能看到用户已改的内容
+                    st.session_state.val_generated_code = edited_code
+                    st.session_state.val_code_sandbox_ok = False
+                    st.session_state["code_check_done"] = (
+                        f"❌ 沙箱校验失败：{_r.get('error', '未知错误')}")
+                    _persist_workflow()
+                    st.rerun()
+            except Exception as e:
+                st.error(f"检验请求失败：{e}")
 
     st.text_area(
         "💬 修改意见（让 LLM 按此修改当前代码）",
@@ -661,8 +693,7 @@ if _has_code:
                                          key="opt_topk", on_change=_persist_workflow)
         optim_grid_text = st.text_area(
             "参数网格（JSON；留空 = 自动推导：请求显式 > LLM 代码 PARAM_GRID > 策略默认参数邻域 > 内置模板）",
-            value='{"window": [10, 20, 30], "threshold": [0.02, 0.03, 0.04]}',
-            height=80, key="opt_grid", on_change=_persist_workflow)
+            value="", height=80, key="opt_grid", on_change=_persist_workflow)
 
     # 开始回测（可由按钮或一键运行触发）
     def _do_start_backtest():
@@ -781,6 +812,18 @@ if _val_tid:
 
 result = st.session_state.get("val_result")
 if result is None:
+    # 刷新/切页后自动恢复最近一次回测结果（结果本体持久化在历史文件里）
+    try:
+        _hist = _load_history()
+        _last = max(_hist, key=lambda r: r.get("created_at", "")) if _hist else None
+        if _last and _last.get("result"):
+            result = _last["result"]
+            st.session_state["val_result"] = result
+            st.caption(f"🔄 已自动恢复最近一次回测结果（{_last.get('created_at', '')[:16].replace('T', ' ')}）。"
+                       "重新回测会自动覆盖本展示。")
+    except Exception:  # noqa: BLE001 —— 历史不可用时按无结果处理
+        result = None
+if result is None:
     st.stop()
 if not isinstance(result, dict):
     result = {}
@@ -803,74 +846,247 @@ else:
     verdict(f"回测完成：{result.get('strategy_desc') or result.get('strategy')}",
             "info", icon="📊")
 
-# ------------------------------------------------------------ 多品种对比表
-rows = []
-for p in per_symbol:
-    if "error" in p:
-        rows.append({"品种": p["symbol"], "周期": p.get("interval", "-"), "K线": "-", "交易": "-", "总收益": "-",
-                     "年化": "-", "Sharpe": "-", "回撤": "-", "门槛": f"❌ {p['error'][:20]}"})
-        continue
-    r = p.get("report") or {}
-    g = p.get("gate") or {}
-    rows.append({
-        "品种": p["symbol"],
-        "周期": p.get("interval") or result.get("interval") or "1d",
-        "K线": f"{p.get("bars", 0):,}",
-        "交易": f"{p.get("trades", 0):,}",
-        "总收益": f"{r.get('total_return', 0):+.2%}",
-        "年化": f"{r.get('annual_return', 0):+.2%}",
-        'Sharpe': f"{r.get('sharpe', 0):.2f}",
-        "回撤": f"{r.get('max_drawdown', 0):.2%}",
-        "门槛": (g.get("status") or "-").upper(),
-    })
-if rows:
-    st.markdown("### 📊 多品种回测对比")
-    st.dataframe(rows, use_container_width=True)
+# ------------------------------------------------------------ 结果区（Tab 布局）
+def _leg_label(p):
+    return f'{p["symbol"]}·{p.get("interval") or result.get("interval") or "1d"}'
 
-# 参数优化详情（IS/OOS + DSR + 高原）
-_render_optim_block(result)
 
-# ------------------------------------------------------------ 净值曲线（各品种叠加）
-curves = [(f'{p["symbol"]}·{p.get("interval") or result.get("interval") or "1d"}',
-          p.get("equity_curve") or []) for p in per_symbol
+def _trading_days(p) -> int:
+    """回测覆盖的交易日数（按净值曲线去重日期）。"""
+    eq = p.get("equity_curve") or []
+    return len({str(e.get("date", ""))[:10] for e in eq})
+
+
+_legs = [(p, _leg_label(p)) for p in per_symbol
          if not p.get("error") and p.get("equity_curve")]
-if curves:
-    fig = go.Figure()
-    for sym, eq in curves:
-        dates = [e.get("date") for e in eq]
-        equity = [e.get("equity") for e in eq]
-        fig.add_trace(go.Scatter(x=dates, y=equity, mode="lines", name=sym,
-                                 line=dict(width=1.5)))
-    fig.update_layout(
-        title="净值曲线对比（各品种独立回测）",
-        xaxis_title="日期", yaxis_title="净值（初始 100 万）", height=420,
-        margin=dict(l=10, r=10, t=50, b=10),
-    )
-    st.plotly_chart(fig, use_container_width=True)
+_leg_map = {lbl: p for p, lbl in _legs}
+
+_tab1, _tab2, _tab3, _tab4 = st.tabs(
+    ["📊 概览", "📈 收益分析", "💼 交易分析", "🛡️ 稳健性"])
+
+# ================================================== Tab1 概览
+with _tab1:
+    rows = []
+    for p in per_symbol:
+        if "error" in p:
+            rows.append({"品种": p["symbol"], "周期": p.get("interval", "-"),
+                         "K线": "-", "交易": "-", "总收益": "-", "年化": "-",
+                         "Sharpe": "-", "胜率": "-", "盈亏比": "-", "回撤": "-",
+                         "成本占比": "-", "门槛": f"❌ {p['error'][:20]}", "样本警示": ""})
+            continue
+        r = p.get("report") or {}
+        g = p.get("gate") or {}
+        days = _trading_days(p)
+        ntr = p.get("trades", 0)
+        warns = []
+        if days and days < 60:
+            warns.append(f"仅{days}个交易日")
+        if ntr < 20:
+            warns.append(f"仅{ntr}笔")
+        _pf = r.get("profit_factor", 0)
+        _pf = "∞" if _pf == float("inf") else f"{_pf:.2f}"
+        rows.append({
+            "品种": p["symbol"],
+            "周期": p.get("interval") or result.get("interval") or "1d",
+            "K线": f"{p.get('bars', 0):,}",
+            "交易": f"{ntr:,}",
+            "总收益": f"{r.get('total_return', 0):+.2%}",
+            "年化": f"{r.get('annual_return', 0):+.2%}" + (" ‼️" if days and days < 60 else ""),
+            "Sharpe": f"{r.get('sharpe', 0):.2f}",
+            "胜率": f"{r.get('win_rate', 0):.0%}",
+            "盈亏比": _pf,
+            "回撤": f"{r.get('max_drawdown', 0):.2%}",
+            "成本占比": f"{r.get('cost_ratio', 0):.1%}" if r.get("cost_ratio") is not None else "-",
+            "门槛": (g.get("status") or "-").upper(),
+            "样本警示": " ".join(warns),
+        })
+    st.markdown("#### 📊 多品种回测对比")
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.caption("‼️ 年化按覆盖天数外推——覆盖 < 60 个交易日或 < 20 笔交易时仅为噪声，"
+               "请结合总收益、胜率与样本警示判断，勿以短窗口年化为决策依据。")
+
+    # 净值曲线 + 买入持有基准
+    if _legs:
+        fig = go.Figure()
+        for p, lbl in _legs:
+            eq = p.get("equity_curve") or []
+            _xs = pd.to_datetime([e.get("date") for e in eq], utc=True).tz_convert("Asia/Shanghai")
+            fig.add_trace(go.Scatter(x=_xs, y=[e.get("equity") for e in eq],
+                                     mode="lines", name=lbl, line=dict(width=1.5)))
+            bench = p.get("benchmark_curve") or []
+            if bench:
+                fig.add_trace(go.Scatter(
+                    x=[e.get("date") for e in bench],
+                    y=[round(e.get("nav", 1.0) * 1_000_000, 2) for e in bench],
+                    mode="lines", name=f"基准·{lbl}",
+                    line=dict(width=1, dash="dot"), opacity=0.55))
+        fig.update_layout(
+            title="净值曲线 vs 买入持有基准（各品种独立回测）",
+            xaxis_title="日期", yaxis_title="净值（初始 100 万）", height=420,
+            margin=dict(l=10, r=10, t=50, b=10), legend={"orientation": "h"})
+        st.plotly_chart(fig, use_container_width=True)
+
+        # 回撤水下图
+        fig_dd = go.Figure()
+        for p, lbl in _legs:
+            eq = p.get("equity_curve") or []
+            xs = pd.to_datetime([e.get("date") for e in eq], utc=True).tz_convert("Asia/Shanghai")
+            ys = [(e.get("dd") or 0) * 100 for e in eq]
+            fig_dd.add_trace(go.Scatter(x=xs, y=ys, name=lbl, mode="lines",
+                                        fill="tozeroy", line=dict(width=1),
+                                        opacity=0.45))
+        fig_dd.update_layout(
+            title="回撤水下图（% 距净值新高）", height=300,
+            margin=dict(l=10, r=10, t=40, b=10), legend={"orientation": "h"})
+        st.plotly_chart(fig_dd, use_container_width=True)
+
+# ================================================== Tab2 收益分析
+with _tab2:
+    if not _legs:
+        st.info("暂无可用的回测净值数据。")
+    else:
+        _sel2 = st.selectbox("选择品种·周期", list(_leg_map.keys()),
+                             key="pnl_month_leg")
+        p2 = _leg_map[_sel2]
+        eq2 = pd.DataFrame(p2["equity_curve"])
+        eq2["date"] = pd.to_datetime(eq2["date"], utc=True).dt.tz_convert("Asia/Shanghai")
+        daily2 = eq2.groupby(eq2["date"].dt.date)["equity"].last()
+        nav2 = daily2 / daily2.iloc[0]
+        nav2.index = pd.to_datetime(nav2.index)
+
+        # 月度收益（首月 = 月末/首日 - 1）
+        month_end = nav2.groupby(nav2.index.to_period("M")).last()
+        mret = month_end.pct_change(fill_method=None)
+        if len(month_end):
+            mret.iloc[0] = month_end.iloc[0] - 1.0
+        piv = pd.DataFrame({
+            "年": [p.year for p in mret.index],
+            "月": [p.month for p in mret.index],
+            "r": mret.values * 100,
+        })
+        piv_w = piv.pivot(index="年", columns="月", values="r")
+        piv_w = piv_w.reindex(columns=range(1, 13))
+        fig_h = go.Figure(go.Heatmap(
+            z=piv_w.values * 100,
+            x=[f"{m}月" for m in piv_w.columns],
+            y=[str(y) for y in piv_w.index],
+            text=[[f"{v / 100:+.2%}" if v == v and v is not None else "" for v in row]
+                  for row in piv_w.values],
+            texttemplate="%{text}", colorscale="RdYlGn", zmid=0,
+            hovertemplate="%{y} %{x}: %{text}<extra></extra>"))
+        fig_h.update_layout(title="月度收益热力图", height=300,
+                            margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_h, use_container_width=True)
+
+        # 年度收益柱状
+        daily2.index = pd.to_datetime(daily2.index)
+        yearly = daily2.groupby(daily2.index.year).last()
+        # 逐年收益：年末/上年年末（首年 = 年末/年初首日）
+        yr_ret = yearly.pct_change(fill_method=None)
+        yr_ret.iloc[0] = yearly.iloc[0] / daily2.iloc[0] - 1.0
+        fig_y = go.Figure(go.Bar(
+            x=[str(y) for y in yr_ret.index],
+            y=[v * 100 for v in yr_ret.values],
+            marker_color=["#e05d5d" if v < 0 else "#4ca77c" for v in yr_ret.values],
+            text=[f"{v:+.2%}" for v in yr_ret.values], textposition="outside"))
+        fig_y.update_layout(title="年度收益", height=280,
+                            margin=dict(l=10, r=10, t=40, b=10), yaxis_title="收益率 %")
+        st.plotly_chart(fig_y, use_container_width=True)
+
+# ================================================== Tab3 交易分析
+with _tab3:
+    _legs_with_trades = [(lbl, p) for lbl, p in _leg_map.items() if p.get("trade_list")]
+    if not _legs_with_trades:
+        st.info("当前记录未包含逐笔交易明细（旧记录或无成交）。重新回测后即可查看。")
+    else:
+        _sel3 = st.selectbox("选择品种·周期", list(_leg_map.keys()),
+                             key="trade_detail_leg")
+        p3 = _leg_map[_sel3]
+        tl = p3.get("trade_list") or []
+        if not tl:
+            st.info("该品种·周期无成交回合。")
+        else:
+            df_t = pd.DataFrame(tl)
+            df_t["入场时间"] = pd.to_datetime(df_t["entry_time"], utc=True).dt.tz_convert("Asia/Shanghai")
+            df_t["出场时间"] = pd.to_datetime(df_t["exit_time"], utc=True).dt.tz_convert("Asia/Shanghai")
+            df_t["持仓(小时)"] = ((df_t["出场时间"] - df_t["入场时间"])
+                                 .dt.total_seconds() / 3600).round(1)
+            _out = df_t[["direction", "入场时间", "entry_price", "出场时间",
+                         "exit_price", "volume", "pnl", "持仓(小时)"]].copy()
+            _out.columns = ["方向", "入场时间", "入场价", "出场时间", "出场价",
+                            "手数", "盈亏", "持仓(小时)"]
+            _out["入场时间"] = _out["入场时间"].dt.strftime("%m-%d %H:%M")
+            _out["出场时间"] = _out["出场时间"].dt.strftime("%m-%d %H:%M")
+            wins3 = df_t[df_t["pnl"] > 0]["pnl"]
+            lose3 = df_t[df_t["pnl"] <= 0]["pnl"]
+            c3a, c3b, c3c, c3d = st.columns(4)
+            c3a.metric("总回合", len(tl))
+            c3b.metric("盈利/亏损笔数", f"{len(wins3)}/{len(lose3)}")
+            c3c.metric("平均盈利", f"{wins3.mean():+,.0f}" if len(wins3) else "-")
+            c3d.metric("平均亏损", f"{lose3.mean():+,.0f}" if len(lose3) else "-")
+            st.dataframe(_out, use_container_width=True, hide_index=True)
+
+            fig_h = go.Figure(go.Histogram(
+                x=df_t["pnl"], nbinsx=min(30, max(10, len(tl) // 2)),
+                marker_color="#4a7ebb"))
+            fig_h.update_layout(title="单笔盈亏分布", height=300,
+                                xaxis_title="每笔盈亏（不含乘数/成本）",
+                                yaxis_title="笔数",
+                                margin=dict(l=10, r=10, t=40, b=10))
+            st.plotly_chart(fig_h, use_container_width=True)
+
+# ================================================== Tab4 稳健性
+with _tab4:
+    st.markdown("#### 利润集中度（前 3 大盈利日贡献）")
+    st.caption("前 3 大盈利日贡献占比过高（如 > 50%）说明收益依赖个别行情日，"
+               "不具统计稳定性——短样本年化再高也需警惕。")
+    _c_rows = []
+    for p, lbl in _legs:
+        try:
+            eq4 = pd.DataFrame(p.get("equity_curve") or [])
+            eq4["date"] = pd.to_datetime(eq4["date"], utc=True).dt.tz_convert("Asia/Shanghai")
+            daily4 = eq4.groupby(eq4["date"].dt.date)["equity"].last()
+            nav4 = daily4 / daily4.iloc[0]
+            ret4 = nav4.pct_change(fill_method=None).dropna()
+            top3 = ret4.nlargest(3).sum() if len(ret4) else 0.0
+            total4 = float(nav4.iloc[-1] - 1.0)
+            _c_rows.append({
+                "品种·周期": lbl,
+                "总收益": f"{total4:+.2%}",
+                "盈利日": f"{(ret4 > 0).sum()}/{len(ret4)}",
+                "前3大盈利日贡献": f"{top3:+.2%}",
+                "集中度": f"{top3 / total4 * 100:.0f}%" if total4 > 1e-9 else "-",
+            })
+        except Exception:  # noqa: BLE001
+            continue
+    if _c_rows:
+        st.dataframe(_c_rows, use_container_width=True, hide_index=True)
+
+    # 参数优化详情（IS/OOS + DSR + 高原）
+    _render_optim_block(result)
+
+    # 门槛判定详情
+    if result.get("gate_enabled"):
+        st.markdown("#### 🎯 门槛判定详情")
+        for p in per_symbol:
+            g = p.get("gate") or {}
+            if not g:
+                continue
+            _m = g.get("metrics") or {}
+            cols = st.columns([1, 3, 3, 3, 3])
+            cols[0].markdown(f"**{p['symbol']}·{p.get('interval') or '-'}**")
+            cols[1].markdown(f"Sharpe {_m.get('sharpe')}")
+            cols[2].markdown(f"回撤 {_m.get('max_drawdown')}")
+            cols[3].markdown(f"判定 **{g.get('status', '?').upper()}**")
+            cols[4].caption(g.get("reason", "")[:60])
+        if result.get("promote_error"):
+            note(f"⚠️ 判定通过但自动入库失败：{result['promote_error']}", "warning")
 
 # ------------------------------------------------------------ LLM 生成代码
 if llm_code:
     with st.expander("📝 LLM 生成的策略代码（沙箱已校验）", expanded=False):
         st.code(llm_code, language="python")
         st.caption("⚠️ 请核对代码是否忠实于你的策略思想（LLM 可能理解偏差）。")
-
-# ------------------------------------------------------------ 门槛判定详情
-if result.get("gate_enabled"):
-    st.markdown("### 🎯 门槛判定详情")
-    for p in per_symbol:
-        g = p.get("gate") or {}
-        if not g:
-            continue
-        _m = g.get("metrics") or {}
-        tone = "up" if g.get("status") == "verified" else "down"
-        cols = st.columns([1, 3, 3, 3, 3])
-        cols[0].markdown(f"**{p['symbol']}**")
-        cols[1].markdown(f"Sharpe {_m.get('sharpe')}")
-        cols[2].markdown(f"回撤 {_m.get('max_drawdown')}")
-        cols[3].markdown(f"判定 **{g.get('status','?').upper()}**")
-        cols[4].caption(g.get("reason", "")[:60])
-    if result.get("promote_error"):
-        note(f"⚠️ 判定通过但自动入库失败：{result['promote_error']}", "warning")
 
 st.caption(f"idea：{result.get('idea', '')[:80]}…" if len(result.get("idea", "")) > 80
            else f"idea：{result.get('idea', '')}")

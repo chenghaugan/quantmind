@@ -55,22 +55,35 @@ def _get_reusable_tqsdk():
     return _REUSABLE_TQSDK
 
 
+# Interval → 秒（增量缺口估算用）
+_INTERVAL_SECONDS = {
+    "1d": 86400, "4h": 14400, "2h": 7200, "60m": 3600, "1h": 3600, "30m": 1800,
+    "15m": 900, "5m": 300, "3m": 180, "1m": 60,
+}
+
+# 新浪分钟接口单次窗口 ~1023 根：缺口在此之内用 akshare（快），否则 TqSdk 按需拉
+_SINA_MINUTE_WINDOW = 900
+
+
 async def _fetch_by_strategy(
     req: HistoryRequest,
     cached_bars: Optional[List[Any]],
 ) -> tuple:
-    """按缓存状态选择数据源拉取，返回 (bars, source_name)。
+    """按缓存状态与缺口大小选择数据源拉取，返回 (bars, source_name)。
 
-    策略：
-      - 首次（缓存为空）：用 TqSdk，拉完整历史（最多 8000 根，纵深长）
-      - 增量（缓存有数据）：用 akshare，只拉最新 1023 根，本地过滤新增
+    策略（增量优先、按需拉取）：
+      - 首次（缓存为空）：TqSdk 完整历史（最多 8000 根，纵深长）
+      - 增量（缓存有数据）：估算缺口根数
+        - 缺口 ≤ 新浪分钟窗口（~1023 根）：akshare（快、省 TqSdk 开销），本地过滤新增
+        - 缺口更大（停机过久/长假）：TqSdk 从 latest_cached 起按需计算根数（≤8000）
+        - 若拉回的数据与本地接不上（仍有断层），由调用方在结果中标记 gap
 
     注意：TqSdk 连接在进程内复用（模块级单例），不随每次调用新建/关闭，
     避免反复握手导致的缓慢与卡顿。
     """
-    is_first = (not cached_bars)
-    
-    if is_first:
+    latest_cached = max((b.datetime for b in cached_bars), default=None) if cached_bars else None
+
+    if latest_cached is None:
         # 首次：TqSdk 完整历史（复用连接）
         from ..data.feed.tqsdk_feed import TqSdkFeed
         feed = _get_reusable_tqsdk()
@@ -80,24 +93,47 @@ async def _fetch_by_strategy(
                 return bars, "tqsdk"
         except Exception as exc:  # noqa: BLE001
             _logger.warning("TqSdk 首次拉取失败(%s)，回退 akshare: %s", req.symbol, exc)
-    
-    # 增量（或首次 TqSdk 失败）：akshare 最新数据
-    from ..data.feed.akshare_future import AkShareFuturesFeed
-    feed = AkShareFuturesFeed()
-    bars = await feed.fetch_bar_data(req)
-    if bars:
-        return bars, "akshare_future"
-    # akshare 也拿不到，回退 TqSdk（增量场景兜底，复用连接）
-    if not is_first:
-        from ..data.feed.tqsdk_feed import TqSdkFeed
-        feed2 = _get_reusable_tqsdk()
-        try:
-            bars2 = await feed2.fetch_bar_data(req)
-            if bars2:
-                return bars2, "tqsdk"
-        except Exception:  # noqa: BLE001
-            pass
-    return [], ""
+
+    # ---- 增量：估算缺口根数，选源 ----
+    if latest_cached is not None and latest_cached.tzinfo is None:
+        latest_cached = latest_cached.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    duration = _INTERVAL_SECONDS.get(req.interval.value, 86400)
+
+    if latest_cached is not None:
+        bars_needed = int((now - latest_cached).total_seconds() / duration) + 10
+    else:
+        bars_needed = 8000  # 首次 TqSdk 失败的兜底
+
+    if bars_needed <= _SINA_MINUTE_WINDOW:
+        # 缺口小：新浪分钟窗口（~1023 根）能覆盖，走 akshare（快）
+        from ..data.feed.akshare_future import AkShareFuturesFeed
+        feed = AkShareFuturesFeed()
+        bars = await feed.fetch_bar_data(req)
+        if bars:
+            return bars, "akshare_future"
+
+    # 缺口大（或 akshare 拉空）：TqSdk 从 latest_cached 起按需拉取（≤8000 根）
+    from ..data.feed.base import HistoryRequest
+    from ..data.feed.tqsdk_feed import TqSdkFeed
+    req2 = HistoryRequest(symbol=req.symbol, exchange=req.exchange,
+                          interval=req.interval, start=latest_cached)
+    feed2 = _get_reusable_tqsdk()
+    try:
+        bars2 = await feed2.fetch_bar_data(req2)
+        if bars2:
+            return bars2, "tqsdk"
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("TqSdk 增量拉取失败(%s): %s", req.symbol, exc)
+
+    # 最后兜底：akshare 再试一次（缺口大时它覆盖不到全部，但总比空好）
+    if latest_cached is not None and bars_needed > _SINA_MINUTE_WINDOW:
+        from ..data.feed.akshare_future import AkShareFuturesFeed
+        feed = AkShareFuturesFeed()
+        bars = await feed.fetch_bar_data(req)
+        if bars:
+            _logger.warning("%s 缺口 %d 根超过 akshare 窗口，只能部分补齐", req.symbol, bars_needed)
+            return bars, "akshare_future_partial"
     return [], ""
 
 
@@ -248,6 +284,16 @@ async def _job_futures_auto_download(
                         new_bars = bars  # 首次下载，全部是新数据
                     
                     if new_bars:
+                        # 断层检测：新数据最早一根与本地最新之间留有空隙 → 数据源覆盖不到
+                        gap_flag = False
+                        if latest_cached:
+                            earliest = min(b.datetime for b in new_bars)
+                            gap_seconds = (earliest - latest_cached).total_seconds()
+                            gap_flag = gap_seconds > 2 * interval_seconds_map[interval_str]
+                            if gap_flag:
+                                _logger.warning(
+                                    "期货数据断层 %s: 本地最新 %s 与源最早 %s 之间缺 %d 秒",
+                                    key, latest_cached, earliest, int(gap_seconds))
                         # 写入仓库（幂等合并）
                         n = dc.save(new_bars)
                         results.append({
@@ -258,6 +304,7 @@ async def _job_futures_auto_download(
                             "total_rows": n,
                             "latest": new_bars[-1].datetime.isoformat(),
                             "cached_before": len(cached_bars) if cached_bars else 0,
+                            "gap": gap_flag,
                         })
                         downloaded += 1
                         _logger.info("期货增量更新: %s 新增 %d 根 (总计 %d 根, 来源:%s)", 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List
 
 from .base import BaseDataFeed, HistoryRequest, resolve_ohlc_columns
@@ -19,16 +19,30 @@ from ...core.object import BarData
 _logger = logging.getLogger("quantmind.data.akshare_future")
 
 
+_CST = timezone(timedelta(hours=8))
+
+
+def _attach_tz(dt: datetime, date_only: bool) -> datetime:
+    """naive 时间戳附加时区：日期约定为 UTC 零点；带时刻的新浪分钟数据为北京时间 → UTC。"""
+    if dt.tzinfo is not None:
+        return dt
+    if date_only or (dt.hour == 0 and dt.minute == 0 and dt.second == 0):
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.replace(tzinfo=_CST).astimezone(timezone.utc)
+
+
 def _parse_dt(value) -> datetime:
+    """解析新浪接口时间：分钟数据是北京时间 naive → 转 UTC；日期（日线）保持 UTC 零点。"""
     if isinstance(value, datetime):
-        return value
+        return _attach_tz(value, date_only=False)
     s = str(value)
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y%m%d"):
         try:
-            return datetime.strptime(s[: len(fmt) + 2], fmt)
+            dt = datetime.strptime(s[: len(fmt) + 2], fmt)
+            return _attach_tz(dt, date_only=(fmt == "%Y-%m-%d"))
         except ValueError:
             continue
-    return datetime.fromisoformat(s)
+    return _attach_tz(datetime.fromisoformat(s), date_only=False)
 
 
 class AkShareFuturesFeed(BaseDataFeed):
@@ -45,7 +59,7 @@ class AkShareFuturesFeed(BaseDataFeed):
         else:
             # sina 分钟接口只接受 1/5/15/30/60；HOUR("1h")/WEEKLY("1w")
             # 不能用字符串替换（会产出非法 period "1h"/"1w"）
-            _PERIOD = {Interval.MINUTE_1: "1", Interval.MINUTE_5: "5",
+            _PERIOD = {Interval.MINUTE: "1", Interval.MINUTE_5: "5",
                        Interval.MINUTE_15: "15", Interval.MINUTE_30: "30",
                        Interval.HOUR: "60"}
             if req.interval not in _PERIOD:

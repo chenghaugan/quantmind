@@ -14,6 +14,76 @@ from ..core.engine import EventEngine
 from ..core.object import BarData
 
 
+def _pair_round_trips(trades, cap: int = 500) -> List[dict]:
+    """把成交流配对成开平回合（用于逐笔明细展示）。
+
+    配对逻辑与 PerformanceAnalyzer._pair_pnl 一致（相邻反向成交，
+    同向加仓入栈，残量回填），但保留完整的开平仓信息。最多返回
+    最近 ``cap`` 个回合，避免多品种长回测时结果体积爆炸。
+    """
+    import dataclasses
+
+    rounds: List[dict] = []
+    stacks: Dict[str, list] = {}
+    for t in trades:
+        stack = stacks.setdefault(t.vt_symbol, [])
+        if not stack:
+            stack.append(t)
+            continue
+        prev = stack[-1]
+        if prev.direction == t.direction:
+            stack.append(t)
+            continue
+        stack.pop()
+        direction = 1 if prev.direction.value == "多" else -1
+        matched = min(prev.volume, t.volume)
+        rounds.append({
+            "direction": "多" if direction > 0 else "空",
+            "entry_time": prev.datetime.isoformat(),
+            "entry_price": round(float(prev.price), 2),
+            "exit_time": t.datetime.isoformat(),
+            "exit_price": round(float(t.price), 2),
+            "volume": float(matched),
+            "pnl": round((t.price - prev.price) * matched * direction, 2),
+        })
+        # 部分平仓/反手时保留残量，与 _pair_pnl 同一套语义
+        if t.volume > prev.volume:
+            residual = dataclasses.replace(t, volume=t.volume - prev.volume)
+            stack.append(residual)
+        elif prev.volume > t.volume:
+            residual_open = dataclasses.replace(prev, volume=prev.volume - t.volume)
+            if stack:
+                stack[-1] = residual_open
+            else:
+                stack.append(residual_open)
+    return rounds[-cap:]
+
+
+def _benchmark_curve(bars: List[BarData], max_points: int = 2000) -> List[dict]:
+    """买入持有基准：日频归一化收盘价（首日 = 1.0）。"""
+    import pandas as pd
+
+    if not bars:
+        return []
+    df = pd.DataFrame({
+        "t": [b.datetime for b in bars],
+        "c": [b.close_price for b in bars],
+    })
+    df["t"] = pd.to_datetime(df["t"], utc=True)
+    daily = df.groupby(df["t"].dt.date)["c"].last()
+    base = float(daily.iloc[0])
+    if base <= 0:
+        return []
+    curve = [{"date": d.isoformat(), "nav": round(float(v) / base, 4)}
+             for d, v in daily.items()]
+    # 点数超限时均匀抽样（保留首尾）
+    if len(curve) > max_points:
+        step = len(curve) / max_points
+        idx = [int(i * step) for i in range(max_points - 1)] + [len(curve) - 1]
+        curve = [curve[i] for i in idx]
+    return curve
+
+
 def run_strategy(
     mode: str,
     strategy_class,
@@ -28,6 +98,8 @@ def run_strategy(
     commission: Optional[float] = None,
     slippage: Optional[float] = None,
     warmup_bars: int = 0,
+    daily_context=None,
+    mtf_context=None,
 ) -> dict:
     """按模式运行策略，返回结果字典。
 
@@ -52,12 +124,19 @@ def run_strategy(
                              slippage=slippage if slippage is not None else 0.0,
                              warmup_bars=warmup_bars)
         eng.add_strategy(strategy_class, vt_symbol, setting)
+        # 多周期/日线级上下文注入（分钟策略查询更高周期数据，借鉴 LLM 策略挖掘实践）
+        if daily_context is not None:
+            eng.strategy.daily = daily_context
+        if mtf_context is not None:
+            eng.strategy.mtf = mtf_context
         report = eng.run()
         return {
             "mode": "backtest",
             "report": report.to_dict(),
             "equity_curve": report.equity_curve,
             "trades": report.trade_count,
+            "trade_list": _pair_round_trips(eng.trades),
+            "benchmark_curve": _benchmark_curve(bars),
         }
 
     if mode == "paper":

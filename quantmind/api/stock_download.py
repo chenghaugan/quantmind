@@ -327,7 +327,23 @@ async def _job_stock_auto_download(
 
                 # 按市场拉取：A股腾讯日线/分钟；港股新浪/东财链；美股 yfinance（日线）。
                 # 全部带 45s 兜底超时，事件循环不再被长同步段阻塞
-                bars, source = await _fetch_market_bars(market, symbol, exchange, interval_str)
+                try:
+                    bars, source = await _fetch_market_bars(market, symbol, exchange, interval_str)
+                except Exception as exc1:  # noqa: BLE001 - 源失败不中断整批，走下方回退
+                    _logger.warning("%s 市场源拉取失败: %s", key, exc1)
+                    bars, source = [], "error"
+
+                # 个股接口覆盖不到的标的（如上证指数 000001.SSE、ETF 等）→ 回退通用多源链
+                if not bars and market == "A":
+                    try:
+                        sink: Dict[str, Any] = {}
+                        bars = await asyncio.wait_for(
+                            dm.get_bar_data(HistoryRequest(symbol=symbol, exchange=exchange,
+                                                           interval=interval), source_sink=sink),
+                            timeout=45)
+                        source = sink.get(symbol, "fallback")
+                    except Exception as exc2:  # noqa: BLE001
+                        _logger.warning("%s 个股接口与通用链均失败: %s", key, exc2)
 
                 if not bars:
                     results.append({"key": key, "status": "up_to_date", "new_rows": 0,

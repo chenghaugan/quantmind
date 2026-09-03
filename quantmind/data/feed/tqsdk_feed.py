@@ -37,6 +37,11 @@ STOCK_INDEX_FUTURES_TQSDK = {
     "IM0": "KQ.m@CFFEX.IM",  # 中证1000 主力连续
 }
 
+# 大商所产品代码在 TqSdk 中为小写（内部命名大小写不一，如 PP0/L0/V0）
+_DCE_PRODUCT_CASE = {"PP": "pp", "L": "l", "V": "v", "J": "j", "JM": "jm",
+                     "I": "i", "M": "m", "Y": "y", "A": "a", "P": "p",
+                     "EG": "eg", "EB": "eb", "C": "c", "B": "b"}
+
 # 周期映射：Interval → TqSdk duration_seconds
 INTERVAL_TO_DURATION = {
     Interval.MINUTE: 60,       # 1分钟
@@ -56,11 +61,18 @@ def _get_tqsdk_symbol(symbol: str, exchange: Exchange) -> Optional[str]:
     # 先查主力连续映射表
     if symbol in STOCK_INDEX_FUTURES_TQSDK:
         return STOCK_INDEX_FUTURES_TQSDK[symbol]
-    
+
+    # 主力连续通用映射：rb0 → KQ.m@SHFE.rb，TA0 → KQ.m@CZCE.TA（Xxx0 = 主连）
+    if symbol.endswith("0") and len(symbol) > 1:
+        base = symbol[:-1]
+        # 大商所产品代码为小写（DCE.pp / DCE.l / DCE.v）
+        base = _DCE_PRODUCT_CASE.get(base, base)
+        return f"KQ.m@{exchange.value}.{base}"
+
     # 具体合约：IF2609 → CFFEX.IF2609
     if exchange == Exchange.CFFEX and symbol.startswith(("IF", "IC", "IH", "IM")):
         return f"CFFEX.{symbol}"
-    
+
     # 商品期货：rb2609 → SHFE.rb2609（需要知道交易所）
     # TODO: 实现商品期货的交易所自动推断
     _logger.debug(f"合约 {symbol} 的 TqSdk 映射暂未实现")
@@ -145,6 +157,17 @@ class TqSdkFeed(BaseDataFeed):
         async with self._fetch_lock:
             return await self._fetch_bar_data_locked(req)
 
+    @staticmethod
+    def _compute_data_length(start, duration: int, cap: int = 8000, margin: int = 10) -> int:
+        """按增量起点估算所需根数（日历秒粗估，只会高估不会漏，封顶 cap）。"""
+        if start is None:
+            return cap
+        now = datetime.now(timezone.utc)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        need = int((now - start).total_seconds() / duration) + margin
+        return max(2, min(cap, need))
+
     async def _fetch_bar_data_locked(self, req: HistoryRequest) -> List[BarData]:
         api = await self._ensure_api()
         
@@ -158,8 +181,8 @@ class TqSdkFeed(BaseDataFeed):
             _logger.warning(f"不支持的周期 {req.interval}，跳过")
             return []
         
-        # TqSdk 免费版最多 8000 根
-        data_length = 8000
+        # TqSdk 免费版最多 8000 根；指定 start（增量）时按需计算，避免每次全量拉 8000
+        data_length = self._compute_data_length(req.start, duration)
         
         def _fetch():
             klines = api.get_kline_serial(tq_symbol, duration, data_length=data_length)

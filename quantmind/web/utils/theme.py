@@ -870,6 +870,9 @@ def setup_page(title: str, icon: str = "📊", layout: str = "wide") -> None:
     )
     st.markdown(_GLOBAL_CSS, unsafe_allow_html=True)
     render_sidebar()
+    # AI 投资助手：右下角悬浮面板（所有页面复用；fixed 定位，DOM 位置无关）
+    from .assistant_widget import render_assistant
+    render_assistant()
 
 
 def render_sidebar(show_nav: bool = True) -> None:

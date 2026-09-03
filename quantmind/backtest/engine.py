@@ -285,7 +285,10 @@ class BacktestEngine(StrategyContext):
             if not self._in_warmup:
                 self._mark_to_market(d)
         # 收尾：取消剩余未成交挂单（不再以末日价格伪造成交），并重算末日权益
+        # 收尾：取消剩余未成交挂单（不再以末日价格伪造成交），并重算末日权益
         self._cancel_remaining()
+        # 期末强平：未平仓位按末日收盘价合成平仓成交，纳入胜率/盈亏比统计
+        self._liquidate_at_end()
         if self.dates:
             self._mark_to_market(self.dates[-1], replace_last=True)
         self.strategy.on_stop()
@@ -460,6 +463,38 @@ class BacktestEngine(StrategyContext):
             _logger.info("收尾取消未成交挂单: %s x%s",
                          p["vt_symbol"], p["req"].volume)
         self.pending = []
+
+    def _liquidate_at_end(self) -> None:
+        """期末强平：未平持仓按末日收盘价合成平仓成交。
+
+        若不强平，长期持仓的浮动盈亏永远不会进入逐笔配对统计，
+        胜率/盈亏比会严重失真（如 SAR 型策略的巨额持仓浮盈被丢弃）。
+        平仓价 = 末日收盘价（与盯市口径一致）；平今/平昨成本按实际费率计。
+        """
+        for vt in self.data:
+            try:
+                pos = self.get_position(vt)
+            except Exception:  # noqa: BLE001
+                continue
+            if pos is None or abs(pos.volume) < 1e-9:
+                continue
+            bar = self._lookup[vt].get(self.dates[-1]) if self.dates else None
+            if bar is None:
+                continue
+            close_dir = Direction.SHORT if pos.volume > 0 else Direction.LONG
+            vol = abs(pos.volume)
+            self._order_seq += 1
+            self.trades.append(TradeData(
+                symbol=bar.symbol, exchange=bar.exchange,
+                order_id=f"BT-{self._order_seq}", trade_id=f"T-{self._order_seq}",
+                direction=close_dir, offset=Offset.CLOSE,
+                price=bar.close_price, volume=vol, datetime=bar.datetime,
+            ))
+            self._apply_fill(vt, close_dir, vol, bar.close_price,
+                             Offset.CLOSE, bar.datetime)
+            _logger.info("期末强平: %s 平%s x%s @ %s",
+                         vt, "多" if close_dir == Direction.LONG else "空", vol,
+                         bar.close_price)
 
     def _mark_to_market(self, date: datetime, replace_last: bool = False) -> None:
         equity = self.cash

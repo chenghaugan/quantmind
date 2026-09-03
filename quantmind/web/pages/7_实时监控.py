@@ -364,7 +364,8 @@ if orders:
         "手数": o.get("volume", ""),
         "价格": o.get("price", ""),
         "状态": o.get("status", ""),
-        "时间": (o.get("datetime") or "")[11:19],
+        "时间": (pd.to_datetime(o.get("datetime"), utc=True).tz_convert("Asia/Shanghai")
+                 .strftime("%H:%M:%S") if o.get("datetime") else ""),
     } for o in orders]
     st.markdown(badge(f"订单 {len(orders)}", "violet"), unsafe_allow_html=True)
     st.dataframe(pd.DataFrame(order_rows), width="stretch", height=280, hide_index=True)

@@ -125,3 +125,133 @@ def test_validate_strategy_intervals_compat_fallback(tmp_path) -> None:
     assert out.get("intervals") == ["15m"]
     assert len(out["per_symbol"]) == 1
     assert out["per_symbol"][0].get("interval") == "15m"
+
+
+# ================= 沙箱自修复循环（draft_strategy_code） =================
+
+class _FakeProvider:
+    """按序返回预设响应的假 Provider。"""
+
+    name = "fake"
+    last_fallback_reason = None
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    async def chat_messages(self, system, msgs):
+        self.calls.append(msgs)
+        return self._responses.pop(0)
+
+    async def chat(self, system, msg):
+        self.calls.append(msg)
+        return self._responses.pop(0)
+
+
+_MINIMAL = (
+    "from quantmind.strategy.base import CtaTemplate\n\n"
+    "class XStrategy(CtaTemplate):\n"
+    "    def on_bar(self, bar):\n"
+    "        pass\n")
+
+
+def test_draft_self_repair_success(tmp_path) -> None:
+    """首轮沙箱失败（getattr）→ 自修复轮通过 → sandbox_ok=True。"""
+    import asyncio
+    os.environ["QM_KNOWLEDGE_DB"] = str(tmp_path / "kb.db")
+    from quantmind.api.services.backtest_service import BacktestService
+    from quantmind.core.engine import EventEngine
+
+    svc = BacktestService(dm=None, ee=EventEngine())
+    bad = _MINIMAL.replace(
+        "    def on_bar(self, bar):\n        pass\n",
+        "    def on_bar(self, bar):\n        m = getattr(self, 'daily', None)\n")
+    good = _MINIMAL.replace(
+        "    def on_bar(self, bar):\n        pass\n",
+        "    def on_bar(self, bar):\n"
+        "        if bar.datetime.hour >= 6:\n"
+        "            pass\n")
+    provider = _FakeProvider([bad, good])
+    out = asyncio.run(svc.draft_strategy_code(provider, "测试", interval="15m"))
+    assert out["sandbox_ok"] is True
+    assert out["repair_rounds"] == 1
+    assert "getattr" not in out["code"]
+
+
+def test_draft_self_repair_exhausted(tmp_path) -> None:
+    """全部轮次失败 → 返回末版代码 + sandbox_ok=False + 轮次记录。"""
+    import asyncio
+    os.environ["QM_KNOWLEDGE_DB"] = str(tmp_path / "kb.db")
+    from quantmind.api.services.backtest_service import BacktestService
+    from quantmind.core.engine import EventEngine
+
+    svc = BacktestService(dm=None, ee=EventEngine())
+    bad = _MINIMAL.replace(
+        "    def on_bar(self, bar):\n        pass\n",
+        "    def on_bar(self, bar):\n        m = getattr(self, 'daily', None)\n")
+    good = bad.replace(
+        "        m = getattr(self, 'daily', None)\n",
+        "        if bar.datetime.hour >= 6:\n            pass\n")
+    provider = _FakeProvider([bad, bad, bad])
+    out = asyncio.run(svc.draft_strategy_code(provider, "测试", interval="15m"))
+    assert out["sandbox_ok"] is False
+    assert out["repair_rounds"] == 2
+    assert "getattr" in out["code"]  # 末版代码保留供人工修复
+
+
+def test_generate_left_shift_1d_daily_ctx(tmp_path) -> None:
+    """失败左移：1d 周期 + 代码引用 self.daily → 生成阶段直接报错。"""
+    import asyncio
+    os.environ["QM_KNOWLEDGE_DB"] = str(tmp_path / "kb.db")
+    from quantmind.api.services.backtest_service import BacktestService
+    from quantmind.core.engine import EventEngine
+
+    svc = BacktestService(dm=None, ee=EventEngine())
+    bad = _MINIMAL + "\n    # uses self.daily\n"
+    bad = _MINIMAL.replace(
+        "    def on_bar(self, bar):\n        pass\n",
+        "    def on_bar(self, bar):\n        d = self.daily\n")
+    provider = _FakeProvider([bad, bad, bad])
+    code, err = asyncio.run(svc._llm_generate_strategy(provider, "测试", interval="1d"))
+    assert code == ""
+    assert "自修复" in err and ("不兼容" in err or "self.mtf" in err)
+
+
+def test_draft_interval_hint_reaches_llm(tmp_path) -> None:
+    """周期告知：draft 调用把【数据周期】hint 注入 LLM 消息。"""
+    import asyncio
+    os.environ["QM_KNOWLEDGE_DB"] = str(tmp_path / "kb.db")
+    from quantmind.api.services.backtest_service import BacktestService
+    from quantmind.core.engine import EventEngine
+
+    svc = BacktestService(dm=None, ee=EventEngine())
+    provider = _FakeProvider([_MINIMAL])
+    asyncio.run(svc.draft_strategy_code(provider, "测试", interval="15m"))
+    sent = provider.calls[0]
+    flat = str(sent)
+    assert "【数据周期】15m" in flat
+    assert "self.mtf" in flat
+
+
+def test_daily_close_times_no_pandas_normalize() -> None:
+    """回归：BarData.datetime 是标准库 datetime，误用 pandas 的 normalize 会抛
+    AttributeError 并被日线上下文的 except 吞掉，导致"日线数据不可用"。
+    同时覆盖历史 16:00 UTC 旧约定 → 归一当日 00:00 再 +1 天。"""
+    from datetime import datetime, timezone
+
+    from quantmind.api.services.backtest_service import _daily_close_times
+    from quantmind.core.object import BarData
+
+    bars = [
+        BarData(symbol="IC0", exchange="CFFEX",
+                datetime=datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc),
+                open_price=1, high_price=2, low_price=0.5, close_price=1.5,
+                volume=10),
+        BarData(symbol="IC0", exchange="CFFEX",
+                datetime=datetime(2016, 1, 4, 16, 0, tzinfo=timezone.utc),
+                open_price=1, high_price=2, low_price=0.5, close_price=1.5,
+                volume=1),
+    ]
+    ct = _daily_close_times(bars)
+    assert ct[0] == datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc)
+    assert ct[1] == datetime(2016, 1, 5, 0, 0, tzinfo=timezone.utc)

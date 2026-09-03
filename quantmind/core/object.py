@@ -49,6 +49,24 @@ class BarData(BaseData):
     low_price: float = 0.0
     close_price: float = 0.0
 
+    # ---- 兼容别名（vnpy 风格）：LLM 生成的策略常写 bar.high/bar.close，----
+    # 这里提供安全网，避免 AttributeError 中断回测。
+    @property
+    def high(self) -> float:
+        return self.high_price
+
+    @property
+    def low(self) -> float:
+        return self.low_price
+
+    @property
+    def close(self) -> float:
+        return self.close_price
+
+    @property
+    def open(self) -> float:
+        return self.open_price
+
     def __post_init__(self) -> None:
         self.datetime = _as_utc(self.datetime)
 

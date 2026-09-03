@@ -115,7 +115,7 @@ if not bars:
     st.stop()
 
 df = pd.DataFrame(bars)
-df["datetime"] = pd.to_datetime(df["datetime"])
+df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_convert("Asia/Shanghai")
 df = df.sort_values("datetime").reset_index(drop=True)
 
 # ---------------------------------------------------------------- 概览

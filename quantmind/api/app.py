@@ -53,6 +53,7 @@ from .schemas import (
     FactorE2ERequest, KnowledgeIngestRequest, KnowledgeSearchRequest,
     StrategyRegisterRequest, StrategyValidateRequest, PaperRunRequest,
     StrategyDraftRequest, StrategyMiningRequest, AutoBacktestRequest,
+    AssistantChatRequest,
 )
 from .ws import manager
 from .services import (
@@ -1242,7 +1243,8 @@ async def strategy_draft_start(req: StrategyDraftRequest):
         task_id = _submit_task(
             service.draft_strategy_code(
                 provider, req.idea,
-                [m.model_dump() for m in req.history]),
+                [m.model_dump() for m in req.history],
+                interval=req.interval),
             progress=progress)
         return {"task_id": task_id, "status": "running"}
     except Exception as e:  # noqa: BLE001
@@ -1351,6 +1353,155 @@ async def strategy_draft_validate(payload: Dict[str, Any]):
     except Exception as e:  # noqa: BLE001
         _logger.exception("沙箱校验失败")
         return {"ok": False, "error": str(e), "errors": [str(e)]}
+
+
+# ============================================================ AI 投资助手（右下角悬浮对话面板）
+
+@app.post("/assistant/chat/start")
+async def assistant_chat_start(req: AssistantChatRequest):
+    """AI 投资助手对话：上下文感知 + 工具循环（agent）+ 会话持久化。
+
+    后台任务运行（LLM 调用 10~60s），前端轮询 status；任务 progress.events
+    实时透出工具调用事件（tool_call/tool_result），前端渲染执行过程。
+    """
+    try:
+        provider = _llm_provider()
+        from .services import assistant_service
+        progress: Dict[str, Any] = {"current": 0, "total": 0,
+                                    "message": "助手思考中…", "events": []}
+        task_id = _submit_task(assistant_service.chat(
+            provider, req.message,
+            [m.model_dump() for m in req.history],
+            context=req.context,
+            progress=progress),
+            progress=progress)
+        return {"task_id": task_id, "status": "running"}
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("助手对话启动失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.get("/assistant/chat/status/{task_id}")
+async def assistant_chat_status(task_id: str):
+    """查询助手任务状态（含工具调用事件 progress.events）。"""
+    rec = _E2E_TASKS.get(task_id)
+    if rec is None:
+        return JSONResponse(status_code=404, content={
+            "task_id": task_id, "status": "not_found",
+            "message": "任务不存在（后端可能已重启），请重新发送。",
+        })
+    return {
+        "task_id": task_id,
+        "status": rec["status"],
+        "message": rec["message"],
+        "result": rec.get("result") if rec["status"] == "success" else None,
+        "progress": rec.get("progress") or {"events": []},
+    }
+
+
+@app.post("/assistant/chat/cancel/{task_id}")
+async def assistant_chat_cancel(task_id: str):
+    """取消正在运行的助手对话任务（⏹ 停止按钮）。"""
+    rec = _E2E_TASKS.get(task_id)
+    if rec is None:
+        return {"ok": False, "error": "任务不存在或已结束"}
+    if rec["status"] == "running":
+        task = rec.get("task")
+        if task is not None:
+            task.cancel()
+        rec["status"] = "cancelled"
+        rec["message"] = "已取消"
+    return {"ok": True, "status": rec["status"]}
+
+
+@app.get("/assistant/session")
+async def assistant_get_session():
+    """读取助手会话历史（服务器端持久化，刷新/重连不丢）。"""
+    from .services import assistant_service
+    return assistant_service.load_session()
+
+
+@app.delete("/assistant/session")
+async def assistant_clear_session():
+    """清空助手会话（🗑️ 删除聊天记录）。"""
+    from .services import assistant_service
+    assistant_service.clear_session()
+    return {"ok": True}
+
+
+@app.get("/assistant/pending_code")
+async def assistant_get_pending_code():
+    """读取 AI 助手自动应用的待生效代码。"""
+    from pathlib import Path
+    _PENDING_FILE = Path("data_cache") / "pending_code.json"
+    if _PENDING_FILE.exists():
+        try:
+            import json
+            return json.loads(_PENDING_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+@app.delete("/assistant/pending_code")
+async def assistant_clear_pending_code():
+    """清除待应用代码（避免重复应用）。"""
+    from pathlib import Path
+    _PENDING_FILE = Path("data_cache") / "pending_code.json"
+    try:
+        if _PENDING_FILE.exists():
+            _PENDING_FILE.unlink()
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@app.post("/assistant/session/new")
+async def assistant_new_session():
+    """新开对话：归档当前会话后清空（���新建对话，可回溯最近 10 份）。"""
+    from .services import assistant_service
+    assistant_service.new_session()
+    return {"ok": True}
+
+
+@app.get("/assistant/status")
+async def assistant_status():
+    """助手可用性：LLM Provider 是否就绪（状态灯）。"""
+    provider = _llm_provider()
+    name = getattr(provider, "name", "") if provider is not None else ""
+    return {"llm_ok": bool(provider is not None and name != "mock"),
+            "provider": name or None}
+
+
+@app.get("/assistant/system_prompt")
+async def assistant_get_system_prompt():
+    """读取助手系统提示词（⚙️ 可视化编辑）。"""
+    from .services import assistant_service
+    return {"content": assistant_service.get_system_prompt()}
+
+
+@app.put("/assistant/system_prompt")
+async def assistant_save_system_prompt(payload: Dict[str, Any]):
+    """保存助手系统提示词（⚙️ 手动编辑）。"""
+    from .services import assistant_service
+    content = str(payload.get("content", ""))
+    if not content.strip():
+        return JSONResponse(status_code=400, content={"error": "内容为空"})
+    assistant_service.set_system_prompt(content)
+    return {"ok": True}
+
+
+@app.post("/assistant/system_prompt/regenerate")
+async def assistant_regenerate_system_prompt():
+    """⚙️「AI 更新」：让 LLM 基于平台知识重新生成系统提示词（后台任务）。"""
+    try:
+        provider = _llm_provider()
+        from .services import assistant_service
+        task_id = _submit_task(assistant_service.regenerate_system_prompt(provider))
+        return {"task_id": task_id, "status": "running"}
+    except Exception as e:  # noqa: BLE001
+        _logger.exception("系统提示词再生成失败")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/factor/backtest")

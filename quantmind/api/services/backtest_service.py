@@ -53,6 +53,18 @@ _STRATEGY_MAP = {
 }
 
 
+def _daily_close_times(daily_bars: List[Any]) -> List[datetime]:
+    """日线 bar 的可见时间 = 交易日次日凌晨 00:00 UTC（防前视）。
+
+    注意：BarData.datetime 是标准库 datetime（没有 pandas 的 normalize 方法），
+    归零须用 .replace()。历史数据可能混有 16:00 UTC 旧约定，统一归到当日 00:00。
+    """
+    return [
+        b.datetime.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        for b in daily_bars
+    ]
+
+
 def _safe_num(x) -> "float | None":
     """安全取数值（NaN/None/非法 → None），用于门槛判定指标提取。"""
     if x is None:
@@ -86,10 +98,22 @@ def _strategy_codegen_system() -> str:
             "   from quantmind.core.utility import ArrayManager；numpy/pandas/math。\n"
             "3. 用 self.am = ArrayManager(size)；self.am.update_bar(bar)；\n"
             "   self.am.close / self.am.high / self.am.low 为 list。\n"
+            "   bar 对象属性为 bar.open_price / bar.high_price / bar.low_price /\n"
+            "   bar.close_price（注意：没有 bar.high / bar.close 这种短名）。\n"
+            "   分钟级回测时框架自动注入 self.mtf（多周期上下文）与 self.daily（=1d），\n"
+            "   均无前视（只用已完成 bar；可用周期清单见【数据周期】说明）：\n"
+            "   self.mtf.tf('1h', bar.datetime).close[-1]  截至当前的上一根1h收盘\n"
+            "   self.mtf.tf('1h', bar.datetime).sma(20)    1h均线（数据不足返回 None，请判空）\n"
+            "   self.mtf.tf('1d', bar.datetime).prev_high()  前一交易日高点\n"
+            "   self.daily.prev_high(bar.datetime) / prev_close / sma(20, ...) 为 1d 简化写法\n"
+            "   若策略思想包含更高周期规则（日线定方向、前日高低点等），优先用上述上下文实现。\n"
             "4. 用 self.set_target(bar.vt_symbol, target) 下单（target=正多/负空/0空仓）。\n"
             "5. 参数写在 parameters 列表，并在 __init__ 给默认值，\n"
             "   形如 self.window = 20（之后 super().__init__(context, setting)）。\n"
             "6. 禁止：exec/eval/open/网络/文件读写/线程；禁止 import 其他模块。\n"
+            "   禁止使用 getattr/setattr/hasattr（沙箱白名单不允许）：\n"
+            "   self.daily/self.mtf 由框架保证已注入（分钟级回测），直接访问即可，\n"
+            "   不要写 getattr(self, 'daily', None) 之类的防御性兜底。\n"
             "7. 逻辑必须忠实于用户描述，不要自行发明多余规则。\n"
             "   框架**没有内置**止盈/止损/定时平仓：用户思想里的每一条规则\n"
             "   （指标计算、入场条件、止盈止损、时间出场）都必须在 on_bar 里\n"
@@ -102,12 +126,15 @@ def _strategy_codegen_system() -> str:
             "- 百分比止盈止损：记录入场价，触发后平仓。例如持多时\n"
             "    if self.entry_price and closes[-1] <= self.entry_price * (1 - self.stop_loss):\n"
             "        self.set_target(bar.vt_symbol, 0)\n"
-            "- 日内定时平仓（如 14:55 前全平）：bar.datetime 为 UTC 时间，\n"
-            "    可用 bar.datetime.hour / bar.datetime.minute 判断；14:55 北京时间 ≈ 06:55 UTC，\n"
-            "    其他市场同理换算。\n"
-            "    if bar.datetime.hour == 6 and bar.datetime.minute >= 55:\n"
-            "        self.set_target(bar.vt_symbol, 0)\n"
-            "        return\n"
+            "- 日内平仓（不持隔夜仓）：**严禁硬编码具体分钟**（如 14:55/06:55）——\n"
+            "    K线粒度不同（1m/5m/15m/30m/1h），每天最后一根K线的时刻各不相同，\n"
+            "    硬编码时刻在较粗粒度下可能永不触发，导致持仓跨越数月。\n"
+            "    稳健做法：在 __init__ 里初始化 self._last_date = None，\n"
+            "    on_bar 开头检测日期变化，新交易日第一根K线先平掉昨日残留仓位：\n"
+            "    cur_date = bar.datetime.date()\n"
+            "    if self._last_date is not None and cur_date != self._last_date:\n"
+            "        self.set_target(bar.vt_symbol, 0)  # 平掉昨日残留仓位\n"
+            "    self._last_date = cur_date\n"
             "- 布林带（窗口 N、K 倍标准差）：mean = sum(closes[-N:]) / N；\n"
             "    std = statistics 或 numpy 计算；上轨 = mean + K*std；下轨 = mean - K*std。\n\n"
             "示例结构：\n"
@@ -158,6 +185,9 @@ def _strategy_class_name(source: str) -> str:
             return n
     return names[-1]
 
+
+
+_DRAFT_REPAIR_ROUNDS = 2  # 沙箱自修复轮数上限（+首次生成，最多3次LLM调用）
 
 
 class BacktestService:
@@ -477,7 +507,21 @@ class BacktestService:
             if progress:
                 progress(msg, cur, tot)
 
-        # ------------------------------------------------------- 1) 策略来源
+        # ------------------------------------------------------- 1) 标的与周期
+        symbols = [x for x in (getattr(req, "symbols", None) or []) if x and x.strip()]
+        if not symbols and getattr(req, "symbol", ""):
+            symbols = [getattr(req, "symbol", "")]
+        if not symbols:
+            return {"error": "未指定标的（symbols 为空）"}
+
+        # 多周期：req.intervals 非空时逐周期回测（兼容旧单 interval 字段）
+        _valid_ivs = ("1d", "1h", "30m", "15m", "5m", "1m")
+        intervals = [iv for iv in (getattr(req, "intervals", None) or [])
+                     if iv in _valid_ivs]
+        if not intervals:
+            intervals = [req.interval if req.interval in _valid_ivs else "1d"]
+
+        # ------------------------------------------------------- 2) 策略来源
         generated_code: str = ""
         _prog("LLM 编程中（把策略思想翻译为代码）…", 0, 1)
         approved = (getattr(req, "code", "") or "").strip()
@@ -486,9 +530,14 @@ class BacktestService:
             _prog("使用审定代码…", 0, 1)
             code = approved
         else:
-            code, err = await self._llm_generate_strategy(provider, req.idea, interval=req.interval)
+            code, err = await self._llm_generate_strategy(provider, req.idea,
+                                                          interval=intervals[0])
             if err:
                 return {"error": f"LLM 策略编程失败：{err}"}
+        # 生成时左移校验：纯日线周期下多周期上下文无数据来源，直接报错（失败左移）
+        if intervals == ["1d"] and ("self.mtf" in code or "self.daily" in code):
+            return {"error": ("策略代码引用了 self.mtf/self.daily（多周期上下文），"
+                              "但本次数据周期为 1d，二者不兼容。请修改策略思想或更换数据周期。")}
         name = "idea_strategy"
         ok, err2, _info = self.register_generated_strategy(name, code)
         if not ok:
@@ -497,111 +546,146 @@ class BacktestService:
         generated_code = code
         strategy_desc = "用户审定的 LLM 策略" if approved else "LLM 预编程策略"
 
-        # ------------------------------------------------------- 2) 多品种回测
-        symbols = [x for x in (getattr(req, "symbols", None) or []) if x and x.strip()]
-        if not symbols and getattr(req, "symbol", ""):
-            symbols = [getattr(req, "symbol", "")]
-        if not symbols:
-            return {"error": "未指定标的（symbols 为空）"}
-
         _prog("数据加载与回测准备…", 0, len(symbols))
-
-        # 多周期：req.intervals 非空时逐周期回测（兼容旧单 interval 字段）
-        _valid_ivs = ("1d", "1h", "30m", "15m", "5m", "1m")
-        intervals = [iv for iv in (getattr(req, "intervals", None) or [])
-                     if iv in _valid_ivs]
-        if not intervals:
-            intervals = [req.interval if req.interval in _valid_ivs else "1d"]
         setting = dict(req.setting or {}) or dict(DEFAULT_SETTINGS.get(name) or {})
 
         per_symbol: list = []
         _total = len(symbols) * len(intervals)
         _idx = 0
         for iv in intervals:
-          for _i, sym in enumerate(symbols, 1):
-            _idx += 1
-            _prog(f"回测 {sym}@{iv}（{_idx}/{_total}）…", _idx - 1, _total)
-            vt = f"{sym}.{req.exchange.upper()}"
-            try:
-                bars = await self.dm.get_bar_data(HistoryRequest(
-                    symbol=sym,
-                    exchange=Exchange(req.exchange.upper()),
-                    interval=Interval(iv),
-                    start=datetime.fromisoformat(req.start) if req.start else None,
-                    end=datetime.fromisoformat(req.end) if req.end else None,
-                ))
-            except Exception as exc:  # noqa: BLE001
-                per_symbol.append({"symbol": sym, "interval": iv, "error": f"数据获取失败：{exc}"})
-                continue
-            if not bars:
-                per_symbol.append({"symbol": sym, "interval": iv, "error": "无数据（检查 data_cache）"})
-                continue
-            if len(bars) < 200:
-                per_symbol.append({"symbol": sym, "interval": iv, "error": f"数据不足（{len(bars)} 根 < 200）"})
-                continue
-
-            # 周期-策略兼容性校验（防止日内策略用日线数据）
-            if generated_code:
-                from ...backtest.interval_check import check_strategy_interval_compatibility
-                compat = check_strategy_interval_compatibility(generated_code, iv)
-                if not compat["compatible"]:
-                    per_symbol.append({
-                        "symbol": sym,
-                        "error": "策略与数据周期不兼容：" + "；".join(compat["issues"]),
-                        "suggestions": compat["suggestions"],
-                    })
+            for _i, sym in enumerate(symbols, 1):
+                _idx += 1
+                _prog(f"回测 {sym}@{iv}（{_idx}/{_total}）…", _idx - 1, _total)
+                vt = f"{sym}.{req.exchange.upper()}"
+                try:
+                    bars = await self.dm.get_bar_data(HistoryRequest(
+                        symbol=sym,
+                        exchange=Exchange(req.exchange.upper()),
+                        interval=Interval(iv),
+                        start=datetime.fromisoformat(req.start) if req.start else None,
+                        end=datetime.fromisoformat(req.end) if req.end else None,
+                    ))
+                except Exception as exc:  # noqa: BLE001
+                    per_symbol.append({"symbol": sym, "interval": iv, "error": f"数据获取失败：{exc}"})
+                    continue
+                if not bars:
+                    per_symbol.append({"symbol": sym, "interval": iv, "error": "无数据（检查 data_cache）"})
+                    continue
+                if len(bars) < 200:
+                    per_symbol.append({"symbol": sym, "interval": iv, "error": f"数据不足（{len(bars)} 根 < 200）"})
                     continue
 
-            sizes = {vt: default_size(vt)}
-            try:
-                result = await asyncio.to_thread(
-                    run_strategy, "backtest", cls, vt, setting, bars,
-                    self.ee, sizes, "ctp", None, req.cost,
-                )
-            except Exception as exc:  # noqa: BLE001
-                per_symbol.append({"symbol": sym, "interval": iv, "error": f"回测失败：{exc}"})
-                continue
-            report = _sanitize(result.get("report") or {})
+                # 多周期上下文：近周期从回测 bars 重采样（同源对齐），
+                # 日线/周线独立拉取（深度不受基础周期限制），全部无前视。
+                daily_ctx = None
+                mtf = None
+                _needs_tf = generated_code and (
+                    "self.daily" in generated_code or "self.mtf" in generated_code)
+                if iv != "1d":
+                    try:
+                        _daily_bars = await self.dm.get_bar_data(HistoryRequest(
+                            symbol=sym,
+                            exchange=Exchange(req.exchange.upper()),
+                            interval=Interval.DAILY,
+                            start=None,
+                            end=datetime.fromisoformat(req.end) if req.end else None,
+                        ))
+                        if _daily_bars:
+                            from ...strategy.daily_context import DailyContext
+                            from ...strategy.multi_tf import MultiTFContext, resample_bars
+                            daily_ctx = DailyContext(_daily_bars)
+                            mtf = MultiTFContext()
+                            mtf.add("1d", _daily_bars,
+                                    close_times=_daily_close_times(_daily_bars))
+                            _wb, _wb_ct = resample_bars(_daily_bars, "1w", "1d")
+                            if _wb:
+                                mtf.add("1w", _wb, close_times=_wb_ct)
+                    except Exception:  # noqa: BLE001 —— 日线上下文缺失走下方显式错误
+                        _logger.exception("日线上下文构建失败 iv=%s", iv)
+                        daily_ctx = None
+                # 依赖多周期上下文的代码在日线数据不可用 → 显式错误（绝不静默崩溃）
+                if _needs_tf and daily_ctx is None:
+                    per_symbol.append({
+                        "symbol": sym, "interval": iv,
+                        "error": "策略依赖日线级上下文（self.daily/self.mtf），"
+                                 f"但品种 {sym} 的日线数据不可用",
+                    })
+                    continue
+                # 近周期重采样（必须在线日数据就绪后，基于回测自身 bars 构建）
+                if mtf is not None:
+                    from ...strategy.multi_tf import RESAMPLE_CANDIDATES, resample_bars
+                    for tgt in RESAMPLE_CANDIDATES.get(iv, []):
+                        try:
+                            _rb, _rct = resample_bars(bars, tgt, iv)
+                            mtf.add(tgt, _rb, close_times=_rct)
+                        except Exception:  # noqa: BLE001
+                            pass
 
-            # --------------------------------------------------- 3) 逐品种门槛
-            item: Dict[str, Any] = {
-                "symbol": sym,
-                "interval": iv,
-                "exchange": req.exchange.upper(),
-                "bars": len(bars),
-                "report": report,
-                "equity_curve": _sanitize(result.get("equity_curve") or []),
-                "trades": result.get("trades", 0),
-            }
-            if req.gate:
-                gate = dict(req.gate)
-                sharpe = _safe_num(report.get("sharpe"))
-                mdd = _safe_num(report.get("max_drawdown"))
-                total_ret = _safe_num(report.get("total_return"))
-                total_cost = _safe_num(report.get("total_cost"))
-                cost_ratio = _safe_num(report.get("cost_ratio"))
-                judge = await judge_strategy(
-                    None, {"run_id": vt, "state": "BACKTEST", "status": "",
-                           "sharpe": sharpe, "max_drawdown": mdd},
-                    gate=gate, fallback_rules=True)
-                status = judge.get("status")
-                reason = judge.get("reason", "")
-                # 高换手成本拦截：启用成本且成本/净收益超阈值 → 拒绝入库（即使零成本 Sharpe 高）
-                max_cost_ratio = gate.get("max_cost_ratio", 0.6) or 0.6
-                if req.cost and max_cost_ratio > 0 and cost_ratio > max_cost_ratio:
-                    status = "rejected"
-                    reason = (reason + "；" if reason else "") + \
-                        f"成本/净收益 {cost_ratio:.1%} 超上限 {max_cost_ratio:.0%}（高换手，总成本 {total_cost:.0f}）"
-                item["gate"] = {
-                    "enabled": True,
-                    "status": status,
-                    "reason": reason[:300],
-                    "tags": judge.get("tags") or [],
-                    "metrics": {"sharpe": sharpe, "max_drawdown": mdd,
-                                "total_return": total_ret,
-                                "total_cost": total_cost, "cost_ratio": cost_ratio},
+                # 周期-策略兼容性校验（防止日内策略用日线数据）
+                if generated_code:
+                    from ...backtest.interval_check import check_strategy_interval_compatibility
+                    compat = check_strategy_interval_compatibility(generated_code, iv)
+                    if not compat["compatible"]:
+                        per_symbol.append({
+                            "symbol": sym,
+                            "error": "策略与数据周期不兼容：" + "；".join(compat["issues"]),
+                            "suggestions": compat["suggestions"],
+                        })
+                        continue
+
+                sizes = {vt: default_size(vt)}
+                try:
+                    result = await asyncio.to_thread(
+                        run_strategy, "backtest", cls, vt, setting, bars,
+                        self.ee, sizes, "ctp", None, req.cost,
+                        daily_context=daily_ctx, mtf_context=mtf,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    per_symbol.append({"symbol": sym, "interval": iv, "error": f"回测失败：{exc}"})
+                    continue
+                report = _sanitize(result.get("report") or {})
+
+                # --------------------------------------------------- 3) 逐品种门槛
+                item: Dict[str, Any] = {
+                    "symbol": sym,
+                    "interval": iv,
+                    "exchange": req.exchange.upper(),
+                    "bars": len(bars),
+                    "report": report,
+                    "equity_curve": _sanitize(result.get("equity_curve") or []),
+                    "trades": result.get("trades", 0),
+                    "trade_list": _sanitize(result.get("trade_list") or []),
+                    "benchmark_curve": _sanitize(result.get("benchmark_curve") or []),
                 }
-            per_symbol.append(item)
+                if req.gate:
+                    gate = dict(req.gate)
+                    sharpe = _safe_num(report.get("sharpe"))
+                    mdd = _safe_num(report.get("max_drawdown"))
+                    total_ret = _safe_num(report.get("total_return"))
+                    total_cost = _safe_num(report.get("total_cost"))
+                    cost_ratio = _safe_num(report.get("cost_ratio"))
+                    judge = await judge_strategy(
+                        None, {"run_id": vt, "state": "BACKTEST", "status": "",
+                               "sharpe": sharpe, "max_drawdown": mdd},
+                        gate=gate, fallback_rules=True)
+                    status = judge.get("status")
+                    reason = judge.get("reason", "")
+                    # 高换手成本拦截：启用成本且成本/净收益超阈值 → 拒绝入库（即使零成本 Sharpe 高）
+                    max_cost_ratio = gate.get("max_cost_ratio", 0.6) or 0.6
+                    if req.cost and max_cost_ratio > 0 and cost_ratio > max_cost_ratio:
+                        status = "rejected"
+                        reason = (reason + "；" if reason else "") + \
+                            f"成本/净收益 {cost_ratio:.1%} 超上限 {max_cost_ratio:.0%}（高换手，总成本 {total_cost:.0f}）"
+                    item["gate"] = {
+                        "enabled": True,
+                        "status": status,
+                        "reason": reason[:300],
+                        "tags": judge.get("tags") or [],
+                        "metrics": {"sharpe": sharpe, "max_drawdown": mdd,
+                                    "total_return": total_ret,
+                                    "total_cost": total_cost, "cost_ratio": cost_ratio},
+                    }
+                per_symbol.append(item)
 
         out: Dict[str, Any] = {
             "idea": req.idea or "",
@@ -780,7 +864,10 @@ class BacktestService:
         except ValueError as exc:
             return {"error": f"参数网格非法：{exc}"}
 
-        iv = req.interval if req.interval in ("1d", "1h", "30m", "15m", "5m", "1m") else "1d"
+        _valid_ivs = ("1d", "1h", "30m", "15m", "5m", "1m")
+        intervals = [x for x in (getattr(req, "intervals", None) or []) if x in _valid_ivs]
+        if not intervals:
+            intervals = [req.interval if req.interval in _valid_ivs else "1d"]
         base_setting = dict(req.setting or {}) or dict(DEFAULT_SETTINGS.get(name) or {})
 
         per_symbol: list = []
@@ -788,177 +875,234 @@ class BacktestService:
         is_bars_total = oos_bars_total = 0
         grid_used: Dict[str, list] = param_grid
 
-        _total_steps = max(1, len(combos) * len(symbols))
+        _total_steps = max(1, len(combos) * len(symbols) * len(intervals))
         _done_steps = 0
 
-        for _i, sym in enumerate(symbols, 1):
-            _prog(f"参数优化 {sym}（{_i}/{len(symbols)}）：IS 段网格回测…",
-                  _done_steps, _total_steps)
-            vt = f"{sym}.{req.exchange.upper()}"
-            try:
-                bars = await self.dm.get_bar_data(HistoryRequest(
-                    symbol=sym,
-                    exchange=Exchange(req.exchange.upper()),
-                    interval=Interval(iv),
-                    start=datetime.fromisoformat(req.start) if req.start else None,
-                    end=datetime.fromisoformat(req.end) if req.end else None,
-                ))
-            except Exception as exc:  # noqa: BLE001
-                per_symbol.append({"symbol": sym, "error": f"数据获取失败：{exc}"})
-                continue
-            if not bars:
-                per_symbol.append({"symbol": sym, "error": "无数据（检查 data_cache）"})
-                continue
-            if len(bars) < 200:
-                per_symbol.append({"symbol": sym, "error": f"数据不足（{len(bars)} 根 < 200），无法切分"})
-                continue
-
-            is_bars, oos_bars, split_info = opt.split_is_oos(
-                bars, is_ratio=cfg.is_ratio, warmup_bars=cfg.warmup_bars)
-            if split_info["degraded"]:
-                per_symbol.append({"symbol": sym,
-                                   "error": f"历史过短（{len(bars)} 根），OOS 段不足，请拉长日期范围"})
-                continue
-            sizes = {vt: default_size(vt)}
-
-            # -------- IS 段网格穷举（逐组合同步线程池执行）
-            is_results: Dict[tuple, Dict[str, Any]] = {}
-            for _ci, combo in enumerate(combos, 1):
-                _done_steps += 1
-                _prog(f"参数优化 {sym}：IS 组合 {_ci}/{len(combos)}（全任务 {_done_steps}/{_total_steps}）…",
+        for iv in intervals:
+            for _i, sym in enumerate(symbols, 1):
+                _prog(f"参数优化 {sym}@{iv}（{_i}/{len(symbols)}）：IS 段网格回测…",
                       _done_steps, _total_steps)
-                setting = {**base_setting, **combo}
-                r = await asyncio.to_thread(
-                    run_strategy, "backtest", cls, vt, setting,
-                    is_bars, self.ee, sizes, "ctp", None, req.cost,
-                )
-                rep = r.get("report") or {}
-                is_results[opt.combo_key(combo)] = {
-                    "combo": combo,
-                    "sharpe": _safe_num(rep.get("sharpe")),
-                    "trades": int(r.get("trades", 0) or 0),
-                    "max_drawdown": _safe_num(rep.get("max_drawdown")),
-                }
-            n_trials_total += len(is_results)
+                vt = f"{sym}.{req.exchange.upper()}"
+                try:
+                    bars = await self.dm.get_bar_data(HistoryRequest(
+                        symbol=sym,
+                        exchange=Exchange(req.exchange.upper()),
+                        interval=Interval(iv),
+                        start=datetime.fromisoformat(req.start) if req.start else None,
+                        end=datetime.fromisoformat(req.end) if req.end else None,
+                    ))
+                except Exception as exc:  # noqa: BLE001
+                    per_symbol.append({"symbol": sym, "interval": iv,
+                                       "error": f"数据获取失败：{exc}"})
+                    continue
+                if not bars:
+                    per_symbol.append({"symbol": sym, "interval": iv,
+                                       "error": "无数据（检查 data_cache）"})
+                    continue
+                if len(bars) < 200:
+                    per_symbol.append({"symbol": sym, "interval": iv,
+                                       "error": f"数据不足（{len(bars)} 根 < 200），无法切分"})
+                    continue
 
-            # -------- 淘汰交易笔数不足的组合（Sharpe 无统计意义）
-            valid = {k: v for k, v in is_results.items()
-                     if v["trades"] >= cfg.min_trades}
-            if not valid:
-                per_symbol.append({
+                is_bars, oos_bars, split_info = opt.split_is_oos(
+                    bars, is_ratio=cfg.is_ratio, warmup_bars=cfg.warmup_bars)
+                if split_info["degraded"]:
+                    per_symbol.append({"symbol": sym, "interval": iv,
+                                       "error": f"历史过短（{len(bars)} 根），OOS 段不足，请拉长日期范围"})
+                    continue
+
+                # 周期-策略兼容性校验 + 多周期上下文（与主路径一致）
+                if generated_code:
+                    from ...backtest.interval_check import check_strategy_interval_compatibility
+                    compat = check_strategy_interval_compatibility(generated_code, iv)
+                    if not compat["compatible"]:
+                        per_symbol.append({"symbol": sym, "interval": iv,
+                                           "error": "策略与数据周期不兼容：" + "；".join(compat["issues"])})
+                        continue
+                daily_ctx = None
+                mtf = None
+                _needs_tf = generated_code and (
+                    "self.daily" in generated_code or "self.mtf" in generated_code)
+                if iv != "1d":
+                    try:
+                        _daily_bars = await self.dm.get_bar_data(HistoryRequest(
+                            symbol=sym,
+                            exchange=Exchange(req.exchange.upper()),
+                            interval=Interval.DAILY,
+                            start=None,
+                            end=datetime.fromisoformat(req.end) if req.end else None,
+                        ))
+                        if _daily_bars:
+                            from ...strategy.daily_context import DailyContext
+                            from ...strategy.multi_tf import MultiTFContext, resample_bars
+                            daily_ctx = DailyContext(_daily_bars)
+                            mtf = MultiTFContext()
+                            mtf.add("1d", _daily_bars,
+                                    close_times=_daily_close_times(_daily_bars))
+                            _wb, _wb_ct = resample_bars(_daily_bars, "1w", "1d")
+                            if _wb:
+                                mtf.add("1w", _wb, close_times=_wb_ct)
+                    except Exception:  # noqa: BLE001 —— 日线上下文缺失走下方显式错误
+                        _logger.exception("日线上下文构建失败 iv=%s", iv)
+                        daily_ctx = None
+                if _needs_tf and daily_ctx is None:
+                    per_symbol.append({"symbol": sym, "interval": iv,
+                                       "error": f"策略依赖日线级上下文（self.daily/self.mtf），但品种 {sym} 的日线数据不可用"})
+                    continue
+                if mtf is not None:
+                    from ...strategy.multi_tf import RESAMPLE_CANDIDATES, resample_bars
+                    for tgt in RESAMPLE_CANDIDATES.get(iv, []):
+                        try:
+                            _rb, _rct = resample_bars(bars, tgt, iv)
+                            mtf.add(tgt, _rb, close_times=_rct)
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                sizes = {vt: default_size(vt)}
+
+                # -------- IS 段网格穷举（逐组合同步线程池执行）
+                is_results: Dict[tuple, Dict[str, Any]] = {}
+                for _ci, combo in enumerate(combos, 1):
+                    _done_steps += 1
+                    _prog(f"参数优化 {sym}@{iv}：IS 组合 {_ci}/{len(combos)}（全任务 {_done_steps}/{_total_steps}）…",
+                          _done_steps, _total_steps)
+                    setting = {**base_setting, **combo}
+                    r = await asyncio.to_thread(
+                        run_strategy, "backtest", cls, vt, setting,
+                        is_bars, self.ee, sizes, "ctp", None, req.cost,
+                        daily_context=daily_ctx, mtf_context=mtf,
+                    )
+                    rep = r.get("report") or {}
+                    is_results[opt.combo_key(combo)] = {
+                        "combo": combo,
+                        "sharpe": _safe_num(rep.get("sharpe")),
+                        "trades": int(r.get("trades", 0) or 0),
+                        "max_drawdown": _safe_num(rep.get("max_drawdown")),
+                    }
+                n_trials_total += len(is_results)
+
+                # -------- 淘汰交易笔数不足的组合（Sharpe 无统计意义）
+                valid = {k: v for k, v in is_results.items()
+                         if v["trades"] >= cfg.min_trades}
+                if not valid:
+                    per_symbol.append({
+                        "symbol": sym,
+                        "interval": iv,
+                        "error": f"所有 {len(is_results)} 个组合在 IS 段成交均 < "
+                                 f"{cfg.min_trades} 笔，无法评估",
+                    })
+                    continue
+
+                # -------- 取 IS Top-K → OOS 段各验证一次（绝不回头调参）
+                # sharpe 可能为 None（报告缺失）：排序/取优时降序把 None 排尾，避免 TypeError
+                ranked = sorted(
+                    valid.values(),
+                    key=lambda v: (v["sharpe"] is None, v["sharpe"] if v["sharpe"] is not None else 0.0),
+                    reverse=True,
+                )
+                _prog(f"参数优化 {sym}@{iv}：样本外验证 top-{max(1, cfg.top_k)}…",
+                      _done_steps, _total_steps)
+                oos_runs = []
+                for meta in ranked[: max(1, cfg.top_k)]:
+                    setting = {**base_setting, **meta["combo"]}
+                    r = await asyncio.to_thread(
+                        run_strategy, "backtest", cls, vt, setting,
+                        oos_bars, self.ee, sizes, "ctp", None, req.cost,
+                        warmup_bars=split_info.get("warmup_bars", 0),
+                        daily_context=daily_ctx, mtf_context=mtf,
+                    )
+                    rep = r.get("report") or {}
+                    oos_runs.append({**meta, "report": rep, "raw": r})
+                best = max(
+                    oos_runs,
+                    key=lambda x: (x["sharpe"] is None, x["sharpe"] if x["sharpe"] is not None else 0.0),
+                )
+                best_report = best["report"]
+
+                # -------- 高原检验（基于 IS 段各组合 Sharpe）
+                plateau = opt.plateau_check(
+                    param_grid, best["combo"],
+                    {k: v["sharpe"] for k, v in valid.items()},
+                    ratio_threshold=cfg.plateau_ratio)
+
+                # -------- DSR（按试验数 N 折算；试验 Sharpe 分布来自 IS 穷举）
+                oos_returns = opt.daily_returns_from_equity(
+                    best["raw"].get("equity_curve") or [])
+                dsr = opt.deflated_sharpe(
+                    best["sharpe"], oos_returns, n_trials_total,
+                    trial_sharpes=[v["sharpe"] for v in valid.values()],
+                ) if cfg.use_dsr else None
+
+                item: Dict[str, Any] = {
                     "symbol": sym,
-                    "error": f"所有 {len(is_results)} 个组合在 IS 段成交均 < "
-                             f"{cfg.min_trades} 笔，无法评估",
-                })
-                continue
-
-            # -------- 取 IS Top-K → OOS 段各验证一次（绝不回头调参）
-            # sharpe 可能为 None（报告缺失）：排序/取优时降序把 None 排尾，避免 TypeError
-            ranked = sorted(
-                valid.values(),
-                key=lambda v: (v["sharpe"] is None, v["sharpe"] if v["sharpe"] is not None else 0.0),
-                reverse=True,
-            )
-            _prog(f"参数优化 {sym}：样本外验证 top-{max(1, cfg.top_k)}…",
-                  _done_steps, _total_steps)
-            oos_runs = []
-            for meta in ranked[: max(1, cfg.top_k)]:
-                setting = {**base_setting, **meta["combo"]}
-                r = await asyncio.to_thread(
-                    run_strategy, "backtest", cls, vt, setting,
-                    oos_bars, self.ee, sizes, "ctp", None, req.cost,
-                    warmup_bars=split_info.get("warmup_bars", 0),
-                )
-                rep = r.get("report") or {}
-                oos_runs.append({**meta, "report": rep, "raw": r})
-            best = max(
-                oos_runs,
-                key=lambda x: (x["sharpe"] is None, x["sharpe"] if x["sharpe"] is not None else 0.0),
-            )
-            best_report = best["report"]
-
-            # -------- 高原检验（基于 IS 段各组合 Sharpe）
-            plateau = opt.plateau_check(
-                param_grid, best["combo"],
-                {k: v["sharpe"] for k, v in valid.items()},
-                ratio_threshold=cfg.plateau_ratio)
-
-            # -------- DSR（按试验数 N 折算；试验 Sharpe 分布来自 IS 穷举）
-            oos_returns = opt.daily_returns_from_equity(
-                best["raw"].get("equity_curve") or [])
-            dsr = opt.deflated_sharpe(
-                best["sharpe"], oos_returns, n_trials_total,
-                trial_sharpes=[v["sharpe"] for v in valid.values()],
-            ) if cfg.use_dsr else None
-
-            item: Dict[str, Any] = {
-                "symbol": sym,
-                "exchange": req.exchange.upper(),
-                "bars": split_info["is_bars"] + split_info["oos_bars"],
-                "report": best_report,
-                "equity_curve": _sanitize(best["raw"].get("equity_curve") or []),
-                "trades": best["raw"].get("trades", 0),
-                "optim_detail": {
-                    "best_combo": best["combo"],
-                    "is_sharpe": best["sharpe"],
-                    "oos_sharpe": _safe_num(best_report.get("sharpe")),
-                    "oos_trades": int(best["raw"].get("trades", 0) or 0),
-                    "dsr": round(dsr, 4) if dsr is not None else None,
-                    "plateau": plateau,
-                    "top": [{"combo": t["combo"], "is_sharpe": t["sharpe"]}
-                            for t in ranked[: max(1, cfg.top_k)]],
-                },
-            }
-
-            # -------- gate：判据用 OOS 指标 + DSR/高原附加拦截
-            if req.gate:
-                gate = dict(req.gate)
-                sharpe = _safe_num(best_report.get("sharpe"))
-                mdd = _safe_num(best_report.get("max_drawdown"))
-                total_ret = _safe_num(best_report.get("total_return"))
-                total_cost = _safe_num(best_report.get("total_cost"))
-                cost_ratio = _safe_num(best_report.get("cost_ratio"))
-                judge = await judge_strategy(
-                    None, {"run_id": vt, "state": "BACKTEST", "status": "",
-                           "sharpe": sharpe, "max_drawdown": mdd},
-                    gate=gate, fallback_rules=True)
-                status = judge.get("status")
-                reason = judge.get("reason", "")
-                if cfg.use_dsr and dsr is not None and status == "verified" and dsr < 0.9:
-                    status = "rejected"
-                    reason = (reason + "；" if reason else "") + (
-                        f"Deflated Sharpe {dsr:.2f} < 0.9（试验 {n_trials_total} 次，"
-                        "选择偏差校正后不可信）")
-                if not plateau["ok"] and status == "verified":
-                    status = "rejected"
-                    reason = (reason + "；" if reason else "") + (
-                        "参数落在尖峰而非高原（" + plateau.get("reason", "") + "）")
-                max_cost_ratio = gate.get("max_cost_ratio", 0.6) or 0.6
-                if req.cost and max_cost_ratio > 0 and cost_ratio > max_cost_ratio:
-                    status = "rejected"
-                    reason = (reason + "；" if reason else "") + (
-                        f"成本/净收益 {cost_ratio:.1%} 超上限 {max_cost_ratio:.0%}"
-                        f"（高换手，总成本 {total_cost:.0f}）")
-                item["gate"] = {
-                    "enabled": True,
-                    "status": status,
-                    "reason": reason[:300],
-                    "tags": judge.get("tags") or [],
-                    "metrics": {"sharpe": sharpe, "max_drawdown": mdd,
-                                "total_return": total_ret,
-                                "total_cost": total_cost, "cost_ratio": cost_ratio,
-                                "dsr": round(dsr, 4) if dsr is not None else None},
+                    "interval": iv,
+                    "exchange": req.exchange.upper(),
+                    "bars": split_info["is_bars"] + split_info["oos_bars"],
+                    "report": best_report,
+                    "equity_curve": _sanitize(best["raw"].get("equity_curve") or []),
+                    "trades": best["raw"].get("trades", 0),
+                    "trade_list": _sanitize(best["raw"].get("trade_list") or []),
+                    "optim_detail": {
+                        "best_combo": best["combo"],
+                        "is_sharpe": best["sharpe"],
+                        "oos_sharpe": _safe_num(best_report.get("sharpe")),
+                        "oos_trades": int(best["raw"].get("trades", 0) or 0),
+                        "dsr": round(dsr, 4) if dsr is not None else None,
+                        "plateau": plateau,
+                        "top": [{"combo": t["combo"], "is_sharpe": t["sharpe"]}
+                                for t in ranked[: max(1, cfg.top_k)]],
+                    },
                 }
-            per_symbol.append(item)
-            is_bars_total += split_info["is_bars"]
-            oos_bars_total += split_info["oos_bars"]
+
+                # -------- gate：判据用 OOS 指标 + DSR/高原附加拦截
+                if req.gate:
+                    gate = dict(req.gate)
+                    sharpe = _safe_num(best_report.get("sharpe"))
+                    mdd = _safe_num(best_report.get("max_drawdown"))
+                    total_ret = _safe_num(best_report.get("total_return"))
+                    total_cost = _safe_num(best_report.get("total_cost"))
+                    cost_ratio = _safe_num(best_report.get("cost_ratio"))
+                    judge = await judge_strategy(
+                        None, {"run_id": vt, "state": "BACKTEST", "status": "",
+                               "sharpe": sharpe, "max_drawdown": mdd},
+                        gate=gate, fallback_rules=True)
+                    status = judge.get("status")
+                    reason = judge.get("reason", "")
+                    if cfg.use_dsr and dsr is not None and status == "verified" and dsr < 0.9:
+                        status = "rejected"
+                        reason = (reason + "；" if reason else "") + (
+                            f"Deflated Sharpe {dsr:.2f} < 0.9（试验 {n_trials_total} 次，"
+                            "选择偏差校正后不可信）")
+                    if not plateau["ok"] and status == "verified":
+                        status = "rejected"
+                        reason = (reason + "；" if reason else "") + (
+                            "参数落在尖峰而非高原（" + plateau.get("reason", "") + "）")
+                    max_cost_ratio = gate.get("max_cost_ratio", 0.6) or 0.6
+                    if req.cost and max_cost_ratio > 0 and cost_ratio > max_cost_ratio:
+                        status = "rejected"
+                        reason = (reason + "；" if reason else "") + (
+                            f"成本/净收益 {cost_ratio:.1%} 超上限 {max_cost_ratio:.0%}"
+                            f"（高换手，总成本 {total_cost:.0f}）")
+                    item["gate"] = {
+                        "enabled": True,
+                        "status": status,
+                        "reason": reason[:300],
+                        "tags": judge.get("tags") or [],
+                        "metrics": {"sharpe": sharpe, "max_drawdown": mdd,
+                                    "total_return": total_ret,
+                                    "total_cost": total_cost, "cost_ratio": cost_ratio,
+                                    "dsr": round(dsr, 4) if dsr is not None else None},
+                    }
+                per_symbol.append(item)
+                is_bars_total += split_info["is_bars"]
+                oos_bars_total += split_info["oos_bars"]
 
         out: Dict[str, Any] = {
             "idea": req.idea or "",
             "strategy": name,
             "strategy_desc": strategy_desc,
             "code": generated_code,
-            "interval": iv,
+            "interval": "+".join(intervals),
             "per_symbol": per_symbol,
             "gate_enabled": bool(req.gate),
             "optim": {
@@ -986,59 +1130,34 @@ class BacktestService:
     async def _llm_generate_strategy(self, provider, idea: str,
                                      history: Optional[List[Dict[str, str]]] = None,
                                      interval: str = "1d") -> "tuple[str, str]":
-        """LLM 预编程：策略思想 → CtaTemplate 策略代码（AST 沙箱校验后返回）。
+        """LLM 预编程：策略思想 → CtaTemplate 策略代码（含沙箱自修复循环）。
 
-        ``history`` 非空时走多轮对话模式（用户审定/修改意见循环）；
-        ``interval`` 数据周期，用于提示 LLM 策略类型与周期的匹配关系；
+        委托给 :meth:`draft_strategy_code`：沙箱/周期兼容性校验失败时自动把
+        真实错误喂回 LLM 自行修订（最多 ``_DRAFT_REPAIR_ROUNDS`` 轮），
+        全部轮次失败仍返回末版代码供人工修复。
         返回 (code, err)；err 非空表示失败（失败闭合，不抛异常）。
         """
-        if provider is None:
-            return "", "LLM Provider 不可用（请先配置 AI Key）"
-        if getattr(provider, "name", "") == "mock":
-            return "", ("当前为 Mock Provider（未配置 AI Key）：只能生成占位演示代码，"
-                        "已禁止用于策略生成。请先在「设置」页或 .env 配置 QM_LLM_* 后重试")
-        from ...ai.sandbox import compile_strategy
+        out = await self.draft_strategy_code(provider, idea, history=history,
+                                             interval=interval)
+        if out.get("error"):
+            return "", out["error"]
+        if not out.get("sandbox_ok"):
+            return "", (f"沙箱校验未通过（LLM 自修复 {out.get('repair_rounds', 0)} 轮未成功）："
+                        f"{out.get('sandbox_err') or '未知原因'}。"
+                        "末版代码已保留在编辑器中，可手动修正或填写修改意见重试。")
+        return out.get("code") or "", ""
 
-        system = _strategy_codegen_system()
-        # 追加周期信息，提示 LLM 策略类型与周期的匹配关系
-        interval_hint = (
-            f"\n\n【数据周期】{interval}\n"
-            "- 如果是日内策略（如 14:55 平仓、分钟级止损），必须使用内日数据（1h/30m/15m/5m/1m）\n"
-            "- 如果是日线级别策略（如持仓 N 天、日线交叉），使用 1d\n"
-            "- 日内策略用日线数据回测时，时间判断逻辑（hour/minute）永远不会触发\n"
-        )
-        user_msg = str(idea) + interval_hint
-        try:
-            if history:
-                # 在历史消息最后一条追加周期信息
-                history = list(history)
-                if history and history[-1].get("role") == "user":
-                    history[-1]["content"] = history[-1]["content"] + interval_hint
-                code = await provider.chat_messages(system, history)
-            else:
-                code = await provider.chat(system, user_msg)
-        except Exception as exc:  # noqa: BLE001
-            return "", f"LLM 调用失败：{exc}"
-        # 真实 Provider 失败会静默回退 Mock（返回占位代码）——此处转为显式失败
-        fallback = getattr(provider, "last_fallback_reason", None)
-        if fallback:
-            return "", f"真实 LLM 调用失败（返回了 Mock 占位代码）：{fallback}"
-        code = _strip_code_fences(code or "").strip()
-        if not code:
-            return "", "LLM 未返回代码"
-        ok, err, _ = compile_strategy(code, require_base="CtaTemplate")
-        if not ok:
-            return "", f"沙箱校验未通过：{err}"
-        return code, ""
 
     async def draft_strategy_code(self, provider, idea: str,
-                                  history: Optional[List[Dict[str, str]]] = None
-                                  ) -> Dict[str, Any]:
+                                  history: Optional[List[Dict[str, str]]] = None,
+                                  interval: str = "1d") -> Dict[str, Any]:
         """对话式策略编程草稿：生成/修改策略代码，**不回测**。
 
-        与 ``_llm_generate_strategy`` 的区别：失败闭合但**不拦截**——
-        沙箱不通过时仍返回代码与错误详情，供用户在界面上审阅修改。
-        返回 {code, sandbox_ok, sandbox_err, provider} 或 {error}。
+        自修复循环（借鉴 self-healing generation）：沙箱/周期兼容性校验失败时，
+        把真实错误喂回 LLM 自行修订（最多 ``_DRAFT_REPAIR_ROUNDS`` 轮），
+        通过后才返回给用户；全部轮次失败仍返回末版代码与错误详情，
+        供用户在界面上审阅手动修改。
+        返回 {code, sandbox_ok, sandbox_err, repair_rounds, provider} 或 {error}。
         """
         if provider is None:
             return {"error": "LLM Provider 不可用（请先配置 AI Key）"}
@@ -1046,6 +1165,7 @@ class BacktestService:
             return {"error": ("当前为 Mock Provider（未配置 AI Key）：生成的是占位演示代码，"
                               "不能用于回测。请先在「设置」页或 .env 配置 QM_LLM_* 后重试。")}
         from ...ai.sandbox import compile_strategy
+        from ...backtest.interval_check import check_strategy_interval_compatibility
 
         msgs = list(history or [])
         if idea and not any(m.get("role") == "user" for m in msgs):
@@ -1053,24 +1173,68 @@ class BacktestService:
         if not msgs:
             return {"error": "策略思想为空"}
         # 系统提示词与正式生成一致；历史截断防爆 token
-        _llm = self._llm_generate_strategy
         try:
             if len(msgs) > 8:
                 msgs = msgs[-8:]
-            code = await provider.chat_messages(
-                _strategy_codegen_system(), msgs)
-        except Exception as exc:  # noqa: BLE001
-            return {"error": f"LLM 调用失败：{exc}"}
-        # 真实 Provider 失败会静默回退 Mock（返回占位代码）——此处转为显式错误
-        fallback = getattr(provider, "last_fallback_reason", None)
-        if fallback:
-            return {"error": f"真实 LLM 调用失败（返回了 Mock 占位代码）：{fallback}"}
-        code = _strip_code_fences(code or "").strip()
-        if not code:
-            return {"error": "LLM 未返回代码"}
-        ok, err, _ = compile_strategy(code, require_base="CtaTemplate")
-        return {"code": code, "sandbox_ok": bool(ok),
-                "sandbox_err": (err or "") if not ok else "",
+        except Exception:  # noqa: BLE001
+            pass
+        # 周期信息：告知当前周期及多周期上下文可用性（按周期动态生成）
+        if interval == "1d":
+            _hint = ("\n\n【数据周期】1d\n"
+                     "- 本次数据周期为日线（1d）：self.mtf/self.daily 不可用，"
+                     "禁止在代码中引用\n")
+        else:
+            from ...strategy.multi_tf import RESAMPLE_CANDIDATES
+            _tfs = sorted(set(["1d", "1w"] + RESAMPLE_CANDIDATES.get(interval, [])))
+            _hint = (f"\n\n【数据周期】{interval}（分钟级）\n"
+                     "- 日内策略的时间判断逻辑（hour/minute）在分钟数据上正常触发\n"
+                     f"- 框架已注入多周期上下文 self.mtf，可用周期：{', '.join(_tfs)}\n"
+                     "- 更高周期规则（如日线定方向、前日高低点、周线趋势）优先用 self.mtf 实现\n"
+                     "- 指标数据深度不足时返回 None（预热期），代码需判空跳过\n")
+        if msgs and msgs[-1].get("role") == "user":
+            msgs[-1]["content"] = msgs[-1]["content"] + _hint
+        else:
+            msgs.append({"role": "user", "content": _hint})
+
+        system = _strategy_codegen_system()
+        code, sandbox_ok, sandbox_err = "", False, ""
+        repair_rounds = 0
+        # 自修复循环：首次生成 + N 轮沙箱失败自动修订
+        for attempt in range(_DRAFT_REPAIR_ROUNDS + 1):
+            try:
+                code = await provider.chat_messages(system, msgs)
+            except Exception as exc:  # noqa: BLE001
+                return {"error": f"LLM 调用失败：{exc}"}
+            # 真实 Provider 失败会静默回退 Mock（返回占位代码）——此处转为显式错误
+            fallback = getattr(provider, "last_fallback_reason", None)
+            if fallback:
+                return {"error": f"真实 LLM 调用失败（返回了 Mock 占位代码）：{fallback}"}
+            code = _strip_code_fences(code or "").strip()
+            if not code:
+                return {"error": "LLM 未返回代码"}
+            ok, err, _ = compile_strategy(code, require_base="CtaTemplate")
+            compat = check_strategy_interval_compatibility(code, interval)
+            sandbox_ok = bool(ok and compat["compatible"])
+            sandbox_err = (err or "") if not ok else (
+                "；".join(compat["issues"]) if not compat["compatible"] else "")
+            if sandbox_ok:
+                break
+            if attempt < _DRAFT_REPAIR_ROUNDS:
+                _problems = []
+                if not ok:
+                    _problems.append(f"沙箱校验失败：{err}")
+                if not compat["compatible"]:
+                    _problems.append("策略与数据周期不兼容：" + "；".join(compat["issues"]))
+                repair_rounds = attempt + 1  # 已发起的修复轮数
+                msgs = msgs + [
+                    {"role": "assistant", "content": code},
+                    {"role": "user", "content": (
+                        "以上代码未通过校验：" + "；".join(_problems)
+                        + "。请修复全部问题后重新输出完整代码（只输出代码本身，不要解释）。")},
+                ]
+        return {"code": code, "sandbox_ok": sandbox_ok,
+                "sandbox_err": sandbox_err if not sandbox_ok else "",
+                "repair_rounds": repair_rounds,
                 "provider": getattr(provider, "name", "")}
 
     async def run_walkforward(self, req: WalkForwardRequest) -> Dict[str, Any]:
